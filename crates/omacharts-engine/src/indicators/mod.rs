@@ -431,6 +431,45 @@ mod tests {
     }
 
     #[test]
+    fn computing_every_indicator_is_cheap_enough_to_do_on_every_repaint() {
+        // Two years of hourly bars, which is the most this app ever holds.
+        let series: Vec<Bar> = (0..12_000)
+            .map(|i| {
+                let price = 100.0 + (i as f64 / 50.0).sin() * 5.0;
+                Bar {
+                    ts: i as i64 * 3_600,
+                    open: price,
+                    high: price + 0.5,
+                    low: price - 0.5,
+                    close: price + 0.1,
+                    volume: 1_000.0,
+                }
+            })
+            .collect();
+
+        let indicators: Vec<Indicator> =
+            Kind::ALL.into_iter().enumerate().map(|(i, k)| Indicator::new(i as u32, k)).collect();
+
+        let start = std::time::Instant::now();
+        let rounds = 20;
+        for _ in 0..rounds {
+            for indicator in &indicators {
+                let _ = compute(indicator, &series, 0, Timeframe::hours(1));
+            }
+        }
+        let per_repaint = start.elapsed() / rounds;
+
+        // Caching these would mean storing and invalidating derived values to
+        // save a few milliseconds a repaint. The budget here is deliberately
+        // loose; it exists to catch an indicator that becomes quadratic.
+        assert!(
+            per_repaint < std::time::Duration::from_millis(50),
+            "all four indicators over 12k bars took {per_repaint:?}"
+        );
+        eprintln!("all indicators over 12k bars: {per_repaint:?} per repaint");
+    }
+
+    #[test]
     fn the_picker_finds_things_by_name_abbreviation_and_concept() {
         assert_eq!(search("sma")[0], Kind::Sma);
         assert_eq!(search("vwap")[0], Kind::Vwap);

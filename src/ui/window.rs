@@ -992,6 +992,11 @@ impl Window {
         let shown = match memo {
             Some(bars) => {
                 let empty = bars.is_empty();
+                // Indicators have to be recomputed here too. Skipping it left
+                // the previous symbol's VWAP on screen until the network reply
+                // arrived and forced a repaint — which looked like a slow
+                // indicator and was a missing call.
+                self.recompute_indicators(&instrument, timeframe, &bars);
                 self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
                 empty
             }

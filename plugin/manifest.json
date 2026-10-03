@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "id": "jorgemanrubia.omacharts",
+  "name": "omacharts",
+  "version": "1.0.0",
+  "author": "Jorge Manrubia",
+  "license": "MIT",
+  "description": "Your omacharts watchlist in the bar.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "omacharts",
+    "description": "Watchlist quotes from omacharts, and a way back into it.",
+    "category": "Information",
+    "aliases": [
+      "stocks",
+      "markets",
+      "watchlist",
+      "omacharts"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 120,
+      "showTicker": true
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 30,
+        "max": 1800,
+        "step": 30,
+        "defaultValue": 120
+      },
+      {
+        "key": "showTicker",
+        "type": "boolean",
+        "label": "Show a quote beside the icon",
+        "defaultValue": true
+      }
+    ]
+  }
+}

@@ -13,6 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::glib;
 use omacharts_engine::theme::{
     BarScheme, BarSlot, Source, Theme, UiSlot, SWATCH_NAMES, THEME_BARS_ID,
 };
@@ -65,6 +66,7 @@ impl Preferences {
         });
         rebuild(&context);
         build_data_page(&context);
+        build_desktop_group(&context);
 
         dialog.present(Some(parent));
     }
@@ -416,6 +418,62 @@ fn build_data_page(context: &Rc<Context>) {
     });
     cache.add_suffix(&clear);
     group.add(&cache);
+
+    context.data_page.add(&group);
+}
+
+/// The bar widget: one switch, and the truth about what it did.
+fn build_desktop_group(context: &Rc<Context>) {
+    let home = crate::store::home();
+    if !crate::bar_plugin::available(&home) {
+        return;
+    }
+
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Desktop");
+    group.set_description(Some(
+        "The bar widget reads the watchlist with the omacharts command, so it \
+         keeps working — and keeps its icon — when the app is closed.",
+    ));
+
+    let row = adw::ActionRow::new();
+    row.set_title("Show in the Omarchy bar");
+    row.set_subtitle("Your watchlist, a click away from anywhere");
+
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(crate::bar_plugin::installed(&home));
+    let row_weak = row.downgrade();
+    switch.connect_state_set(move |switch, on| {
+        let home = crate::store::home();
+        let result = if on {
+            crate::bar_plugin::install(&home)
+        } else {
+            crate::bar_plugin::remove(&home)
+        };
+        match result {
+            Ok(()) => {
+                if let Some(row) = row_weak.upgrade() {
+                    row.set_subtitle(if on {
+                        "Added to the bar"
+                    } else {
+                        "Your watchlist, a click away from anywhere"
+                    });
+                }
+            }
+            // Say what went wrong and put the switch back, rather than
+            // leaving it looking like something happened.
+            Err(error) => {
+                if let Some(row) = row_weak.upgrade() {
+                    row.set_subtitle(&error);
+                }
+                switch.set_active(!on);
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    row.add_suffix(&switch);
+    group.add(&row);
 
     context.data_page.add(&group);
 }

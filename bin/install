@@ -16,6 +16,10 @@ done
 mkdir -p "$icons/scalable/apps"
 install -m644 "$root/assets/icons/$id.svg" "$icons/scalable/apps/$id.svg"
 
+# The bar widget shells out to `omacharts`, so it has to be on PATH.
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$root/bin/omacharts" "$HOME/.local/bin/omacharts"
+
 sed "s|^Exec=.*|Exec=$root/bin/omacharts|" \
   "$root/packaging/$id.desktop" > "$apps/$id.desktop"
 chmod 644 "$apps/$id.desktop"
