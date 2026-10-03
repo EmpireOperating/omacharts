@@ -29,6 +29,10 @@ struct Context {
     store: Rc<Store>,
     theming: Rc<RefCell<Theming>>,
     on_change: Rc<dyn Fn()>,
+    /// Opens the window's own resolution editor. The list belongs to the
+    /// window — every chart offers the same resolutions — so it is edited
+    /// there and merely reached from here.
+    on_edit_resolutions: Rc<dyn Fn()>,
     page: adw::PreferencesPage,
     data_page: adw::PreferencesPage,
     groups: RefCell<Vec<adw::PreferencesGroup>>,
@@ -40,6 +44,7 @@ impl Preferences {
         store: Rc<Store>,
         theming: Rc<RefCell<Theming>>,
         on_change: Rc<dyn Fn()>,
+        on_edit_resolutions: Rc<dyn Fn()>,
     ) {
         let dialog = adw::PreferencesDialog::new();
         dialog.set_title("Preferences");
@@ -61,6 +66,7 @@ impl Preferences {
             store,
             theming,
             on_change,
+            on_edit_resolutions,
             page,
             data_page,
             groups: RefCell::new(Vec::new()),
@@ -100,10 +106,36 @@ fn rebuild(context: &Rc<Context>) {
         }
     }
 
+    groups.push(resolutions_group(context));
+
     for group in &groups {
         context.page.add(group);
     }
     *context.groups.borrow_mut() = groups;
+}
+
+/// A way to the resolution list from the settings, since the other way in is
+/// right-clicking a strip, which you have to know about to find.
+fn resolutions_group(context: &Rc<Context>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Chart");
+
+    let row = adw::ActionRow::new();
+    row.set_title("Preset resolutions");
+    row.set_subtitle("What every chart's strip offers. Typing one on a chart adds it here too.");
+    row.set_activatable(true);
+
+    let button = gtk::Button::with_label("Edit…");
+    button.set_valign(gtk::Align::Center);
+    let edit = context.on_edit_resolutions.clone();
+    button.connect_clicked(move |_| edit());
+    row.add_suffix(&button);
+
+    let edit = context.on_edit_resolutions.clone();
+    row.connect_activated(move |_| edit());
+
+    group.add(&row);
+    group
 }
 
 fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {

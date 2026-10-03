@@ -34,16 +34,20 @@ use gtk::gio;
 /// often enough to feel immediate.
 const THEME_POLL_SECONDS: u32 = 2;
 
-/// Read the stored resolution strip, falling back to the presets.
+/// Read the stored resolution strip.
+///
+/// A strip that was never set gets the presets; one that was set to nothing
+/// stays set to nothing. Clearing it is a choice — typing a resolution works
+/// whether or not it is on the strip — and a list that refills itself the next
+/// time the app starts is a setting that does not hold.
 fn parse_timeframes(stored: Option<&str>) -> Vec<Timeframe> {
-    let mut listed: Vec<Timeframe> = stored
-        .map(|s| s.split(',').filter_map(|k| Timeframe::parse(k.trim())).collect())
-        .unwrap_or_default();
+    let Some(stored) = stored else {
+        return Timeframe::PRESETS.to_vec();
+    };
+    let mut listed: Vec<Timeframe> =
+        stored.split(',').filter_map(|k| Timeframe::parse(k.trim())).collect();
     listed.sort_by_key(|t| t.seconds());
     listed.dedup();
-    if listed.is_empty() {
-        return Timeframe::PRESETS.to_vec();
-    }
     listed
 }
 
@@ -83,10 +87,18 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_unreadable_strip_falls_back_to_the_presets() {
+    fn a_strip_nobody_has_set_falls_back_to_the_presets() {
         assert_eq!(parse_timeframes(None), Timeframe::PRESETS.to_vec());
-        assert_eq!(parse_timeframes(Some("")), Timeframe::PRESETS.to_vec());
-        assert_eq!(parse_timeframes(Some("banana,,")), Timeframe::PRESETS.to_vec());
+    }
+
+    /// Emptying the strip is allowed and has to stick. Typing a resolution
+    /// works whether or not it is listed, so a chart with no strip at all is a
+    /// usable chart — and a list that refilled itself on the next launch would
+    /// be a setting that does not hold.
+    #[test]
+    fn a_strip_emptied_on_purpose_stays_empty() {
+        assert!(parse_timeframes(Some("")).is_empty());
+        assert!(parse_timeframes(Some("banana,,")).is_empty());
     }
 
     #[test]
@@ -926,7 +938,10 @@ impl Window {
                     remove.set_valign(gtk::Align::Center);
                     // The last one cannot go: a strip with nothing on it is a
                     // chart with no way back to a resolution.
-                    remove.set_sensitive(this.timeframes.borrow().len() > 1);
+                    // Every one of them can go. A chart with no strip is a
+                    // usable chart: typing a resolution works whether or not
+                    // it is listed.
+                    remove.set_sensitive(true);
 
                     let this = this.clone();
                     let rebuild = rebuild.clone();
@@ -1389,11 +1404,13 @@ impl Window {
 
     fn open_preferences(self: &Rc<Self>) {
         let this = self.clone();
+        let editor = self.clone();
         Preferences::present(
             &self.window,
             self.store.clone(),
             self.theming.clone(),
             Rc::new(move || this.restyle()),
+            Rc::new(move || editor.edit_timeframes()),
         );
     }
 
