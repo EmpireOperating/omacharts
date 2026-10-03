@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, Indicator, Instrument, Provider, SearchIndex, Session, Timeframe,
+    resample, BarStyle, Indicator, Instrument, Provider, SearchIndex, Session, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
@@ -32,6 +32,29 @@ use gtk::gio;
 /// often enough to feel immediate.
 const THEME_POLL_SECONDS: u32 = 2;
 
+/// One row of a popover menu, optionally ticked.
+fn menu_item(label: &str, selected: bool) -> gtk::Button {
+    let tick = gtk::Image::from_icon_name(if selected {
+        "object-select-symbolic"
+    } else {
+        "empty-symbolic"
+    });
+    tick.set_opacity(if selected { 1.0 } else { 0.0 });
+
+    let text = gtk::Label::new(Some(label));
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.append(&tick);
+    row.append(&text);
+
+    let button = gtk::Button::new();
+    button.set_child(Some(&row));
+    button.add_css_class("flat");
+    button
+}
+
 /// How many symbols either side of the selection to fetch ahead.
 ///
 /// Small on purpose. Every request is one someone may never want, and the
@@ -44,6 +67,7 @@ const LAST_SYMBOL: &str = "last_symbol";
 const LAST_SUFFIX: &str = "last_suffix";
 const LAST_TIMEFRAME: &str = "last_timeframe";
 const SHOW_WATCHLIST: &str = "show_watchlist";
+pub const SETTING_BAR_STYLE: &str = "bar_style";
 
 pub struct Window {
     pub window: adw::ApplicationWindow,
@@ -71,6 +95,9 @@ pub struct Window {
     session: Rc<RefCell<Session>>,
     /// One set of indicators, shared by every symbol.
     indicators: Rc<RefCell<Vec<Indicator>>>,
+    bar_style: Rc<RefCell<BarStyle>>,
+    /// The split, so the keyboard can show and hide the rail.
+    split: adw::OverlaySplitView,
     /// The preset strip, so a typed resolution can update it.
     timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
 }
@@ -104,6 +131,8 @@ impl Window {
         readout.set_valign(gtk::Align::Center);
         readout.set_can_target(false);
 
+        let split = adw::OverlaySplitView::new();
+
         let this = Rc::new(Window {
             window: window.clone(),
             chart: chart.clone(),
@@ -125,6 +154,13 @@ impl Window {
             symbol_button,
             legend: readout.clone(),
             indicators: Rc::new(RefCell::new(store.indicators())),
+            bar_style: Rc::new(RefCell::new(
+                store
+                    .setting(SETTING_BAR_STYLE)
+                    .and_then(|k| BarStyle::from_key(&k))
+                    .unwrap_or_default(),
+            )),
+            split: split.clone(),
             session: Rc::new(RefCell::new(
                 store
                     .setting(crate::ui::chart_settings::SETTING_SESSION)
@@ -137,7 +173,7 @@ impl Window {
         let watchlist = this.build_watchlist();
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
 
-        let split = adw::OverlaySplitView::new();
+        let split = &this.split;
         split.set_sidebar_position(gtk::PackType::End);
         split.set_sidebar(Some(&watchlist.widget));
         split.set_collapsed(false);
@@ -168,9 +204,12 @@ impl Window {
         let header = this.build_header(&split);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(&split));
+        toolbar.set_content(Some(split));
         window.set_content(Some(&toolbar));
 
+        this.chart.set_bar_style(*this.bar_style.borrow());
+        let menu_owner = this.clone();
+        this.chart.set_context_menu_handler(move |x, y| menu_owner.chart_menu(x, y));
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
@@ -305,24 +344,79 @@ impl Window {
         keys.connect_key_pressed(move |_, key, _, state| {
             use gtk::gdk::Key;
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+
+            match key {
+                // Find a symbol. Ctrl+K is what modern apps use; Ctrl+F is
+                // what this desktop uses for find.
+                Key::k | Key::f if ctrl => {
+                    this.open_search();
+                    return glib::Propagation::Stop;
+                }
+                // Show and hide the rail. F9 is the platform's sidebar key.
+                Key::b if ctrl => {
+                    this.toggle_watchlist();
+                    return glib::Propagation::Stop;
+                }
+                Key::F9 => {
+                    this.toggle_watchlist();
+                    return glib::Propagation::Stop;
+                }
+                // Move the keyboard between panes, the way F6 does elsewhere.
+                Key::F6 => {
+                    this.cycle_focus();
+                    return glib::Propagation::Stop;
+                }
+                // Back to the chart, from wherever the keyboard ended up.
+                Key::Escape => {
+                    this.chart.area.grab_focus();
+                    return glib::Propagation::Stop;
+                }
+                Key::i if ctrl => {
+                    this.open_chart_settings();
+                    return glib::Propagation::Stop;
+                }
+                Key::comma if ctrl => {
+                    this.open_preferences();
+                    return glib::Propagation::Stop;
+                }
+                Key::question if ctrl => {
+                    this.show_shortcuts();
+                    return glib::Propagation::Stop;
+                }
+                Key::w if ctrl => {
+                    this.window.close();
+                    return glib::Propagation::Stop;
+                }
+                Key::r | Key::R if alt => {
+                    this.chart.reset_view();
+                    return glib::Propagation::Stop;
+                }
+                _ => {}
+            }
+
+            if alt {
+                return glib::Propagation::Proceed;
+            }
+
+            // The rail owns the arrows while the keyboard is on it.
+            let on_watchlist = this
+                .watchlist
+                .borrow()
+                .as_ref()
+                .map(|w| w.has_focus())
+                .unwrap_or(false);
+
             match (key, ctrl) {
-                (Key::k, true) | (Key::slash, false) => {
+                (Key::slash, false) => {
                     this.open_search();
                     glib::Propagation::Stop
                 }
-                (Key::b, true) => {
-                    WidgetExt::activate_action(&this.window, "win.watchlist", None).ok();
-                    glib::Propagation::Stop
-                }
-                (Key::comma, true) => {
-                    this.open_preferences();
-                    glib::Propagation::Stop
-                }
-                (Key::Left, false) => {
+                (Key::Left, false) if !on_watchlist => {
                     this.chart.pan_bars(-5);
                     glib::Propagation::Stop
                 }
-                (Key::Right, false) => {
+                (Key::Right, false) if !on_watchlist => {
                     this.chart.pan_bars(5);
                     glib::Propagation::Stop
                 }
@@ -334,21 +428,12 @@ impl Window {
                     this.chart.zoom(1.25);
                     glib::Propagation::Stop
                 }
-                (Key::End, false) => {
+                (Key::End, false) if !on_watchlist => {
                     this.chart.go_to_latest();
                     glib::Propagation::Stop
                 }
+                (_, true) => glib::Propagation::Proceed,
                 _ => {
-                    if state.contains(gtk::gdk::ModifierType::ALT_MASK) {
-                        if key == Key::r || key == Key::R {
-                            this.chart.reset_view();
-                            return glib::Propagation::Stop;
-                        }
-                        return glib::Propagation::Proceed;
-                    }
-                    if ctrl {
-                        return glib::Propagation::Proceed;
-                    }
                     // Start typing and the chart does what every charting tool
                     // does: letters look for a symbol, digits set the
                     // resolution. The keystroke carries into the box.
@@ -519,12 +604,23 @@ impl Window {
     }
 
     fn show_shortcuts(self: &Rc<Self>) {
-        let body = "Ctrl+K   Find a symbol\n\
-                    Ctrl+B   Show or hide the watchlist\n\
-                    Ctrl+,   Preferences\n\
-                    ← →      Pan\n\
-                    + −      Zoom\n\
-                    End      Jump to the latest bar";
+        let body = "Type a letter   Find a symbol\n\
+                    Type a number   Set the resolution\n\
+                    Ctrl+K          Find a symbol\n\
+                    Ctrl+I          Chart settings and indicators\n\
+                    Ctrl+,          Preferences\n\
+                    \n\
+                    Ctrl+B · F9     Show or hide the watchlist\n\
+                    F6              Move between chart and watchlist\n\
+                    Esc             Back to the chart\n\
+                    ↑ ↓             Next or previous symbol\n\
+                    Ctrl+↑ ↓        Next or previous section\n\
+                    Delete          Remove the symbol from the watchlist\n\
+                    \n\
+                    ← →             Pan\n\
+                    + −             Zoom\n\
+                    End             Jump to the latest bar\n\
+                    Alt+R           Reset the chart";
         let dialog = adw::AlertDialog::new(Some("Keyboard shortcuts"), Some(body));
         dialog.add_response("close", "Close");
         dialog.present(Some(&self.window));
@@ -763,6 +859,96 @@ impl Window {
 
     pub fn session(&self) -> Rc<RefCell<Session>> {
         self.session.clone()
+    }
+
+    pub fn bar_style(&self) -> BarStyle {
+        *self.bar_style.borrow()
+    }
+
+    pub fn set_bar_style(self: &Rc<Self>, style: BarStyle) {
+        *self.bar_style.borrow_mut() = style;
+        self.store.set_setting(SETTING_BAR_STYLE, style.key());
+        self.chart.set_bar_style(style);
+    }
+
+    /// Right-clicking the chart offers the things you change most, and a way
+    /// to everything else.
+    fn chart_menu(self: &Rc<Self>, x: f64, y: f64) {
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let popover = gtk::Popover::new();
+        popover.set_child(Some(&items));
+        popover.set_parent(&self.chart.area);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+
+        let current_style = self.bar_style();
+        for style in BarStyle::ALL {
+            let item = menu_item(style.label(), style == current_style);
+            let this = self.clone();
+            let popover_weak = popover.downgrade();
+            item.connect_clicked(move |_| {
+                this.set_bar_style(style);
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
+            });
+            items.append(&item);
+        }
+
+        items.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let current_session = *self.session.borrow();
+        for session in Session::ALL {
+            let item = menu_item(session.label(), session == current_session);
+            let this = self.clone();
+            let popover_weak = popover.downgrade();
+            item.connect_clicked(move |_| {
+                *this.session.borrow_mut() = session;
+                this.store
+                    .set_setting(crate::ui::chart_settings::SETTING_SESSION, session.key());
+                this.redraw_current();
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
+            });
+            items.append(&item);
+        }
+
+        items.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let settings = menu_item("Chart settings…", false);
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        settings.connect_clicked(move |_| {
+            if let Some(p) = popover_weak.upgrade() {
+                p.popdown();
+            }
+            this.open_chart_settings();
+        });
+        items.append(&settings);
+
+        popover.popup();
+    }
+
+    /// Show or hide the rail.
+    pub fn toggle_watchlist(self: &Rc<Self>) {
+        let showing = !self.split.shows_sidebar();
+        self.split.set_show_sidebar(showing);
+        self.store.set_setting_bool(SHOW_WATCHLIST, showing);
+    }
+
+    /// Move the keyboard between the chart and the rail, the way F6 does
+    /// everywhere else on this desktop.
+    pub fn cycle_focus(self: &Rc<Self>) {
+        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
+        if watchlist.has_focus() {
+            self.chart.area.grab_focus();
+        } else {
+            if !self.split.shows_sidebar() {
+                self.toggle_watchlist();
+            }
+            watchlist.grab_focus();
+        }
     }
 
     pub fn search(&self) -> Rc<SymbolSearch> {

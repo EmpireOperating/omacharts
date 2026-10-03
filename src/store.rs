@@ -514,6 +514,28 @@ impl Store {
         self.reorder_entries(section_id, &entries);
     }
 
+    /// Move an entry into another section, landing before `before` when given
+    /// and at the end otherwise.
+    pub fn move_entry_to_section(
+        &self,
+        from: i64,
+        to: i64,
+        moving: &Entry,
+        before: Option<&Entry>,
+    ) {
+        if from == to {
+            if let Some(before) = before {
+                self.move_entry(from, moving, before);
+            }
+            return;
+        }
+        self.remove_from_section(from, &moving.symbol, moving.suffix.as_deref());
+        self.add_to_section(to, &moving.symbol, moving.suffix.as_deref());
+        if let Some(before) = before {
+            self.move_entry(to, moving, before);
+        }
+    }
+
     /// Give a new install something to look at rather than an empty rail.
     pub fn seed_watchlist_if_empty(&self, defaults: &[(&str, &[&str])]) {
         let existing: i64 = self
@@ -873,6 +895,54 @@ mod tests {
         let order: Vec<String> =
             store.watchlist()[0].entries.iter().map(|e| e.symbol.clone()).collect();
         assert_eq!(order, vec!["A", "B", "C"]);
+    }
+
+    #[test]
+    fn an_entry_can_move_between_sections() {
+        let store = Store::memory().unwrap();
+        let a = store.add_section("A").unwrap();
+        let b = store.add_section("B").unwrap();
+        store.add_to_section(a, "ES", None);
+        store.add_to_section(a, "NQ", None);
+        store.add_to_section(b, "BTC", None);
+        let entry = |s: &str| Entry { symbol: s.into(), suffix: None };
+
+        // Dropped onto BTC, so it lands above it.
+        store.move_entry_to_section(a, b, &entry("ES"), Some(&entry("BTC")));
+
+        let list = store.watchlist();
+        let in_a: Vec<String> = list[0].entries.iter().map(|e| e.symbol.clone()).collect();
+        let in_b: Vec<String> = list[1].entries.iter().map(|e| e.symbol.clone()).collect();
+        assert_eq!(in_a, vec!["NQ"]);
+        assert_eq!(in_b, vec!["ES", "BTC"]);
+    }
+
+    #[test]
+    fn dropping_on_a_section_rather_than_a_row_appends() {
+        let store = Store::memory().unwrap();
+        let a = store.add_section("A").unwrap();
+        let b = store.add_section("B").unwrap();
+        store.add_to_section(a, "ES", None);
+        store.add_to_section(b, "BTC", None);
+        store.move_entry_to_section(a, b, &Entry { symbol: "ES".into(), suffix: None }, None);
+
+        let in_b: Vec<String> =
+            store.watchlist()[1].entries.iter().map(|e| e.symbol.clone()).collect();
+        assert_eq!(in_b, vec!["BTC", "ES"]);
+    }
+
+    #[test]
+    fn moving_within_a_section_still_reorders() {
+        let store = Store::memory().unwrap();
+        let a = store.add_section("A").unwrap();
+        for symbol in ["X", "Y", "Z"] {
+            store.add_to_section(a, symbol, None);
+        }
+        let entry = |s: &str| Entry { symbol: s.into(), suffix: None };
+        store.move_entry_to_section(a, a, &entry("Z"), Some(&entry("X")));
+        let order: Vec<String> =
+            store.watchlist()[0].entries.iter().map(|e| e.symbol.clone()).collect();
+        assert_eq!(order, vec!["Z", "X", "Y"]);
     }
 
     #[test]

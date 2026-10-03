@@ -13,6 +13,38 @@ pub struct Bar {
     pub volume: f64,
 }
 
+/// How each bar is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarStyle {
+    #[default]
+    Candles,
+    /// Open and close as ticks either side of a high-low line.
+    Ohlc,
+}
+
+impl BarStyle {
+    pub const ALL: [BarStyle; 2] = [BarStyle::Candles, BarStyle::Ohlc];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BarStyle::Candles => "Candles",
+            BarStyle::Ohlc => "OHLC bars",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            BarStyle::Candles => "candles",
+            BarStyle::Ohlc => "ohlc",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<BarStyle> {
+        BarStyle::ALL.into_iter().find(|s| s.key() == key)
+    }
+}
+
 /// The unit a resolution is counted in.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -362,6 +394,16 @@ mod tests {
                 native.key()
             );
         }
+    }
+
+    #[test]
+    fn bar_styles_round_trip() {
+        for style in BarStyle::ALL {
+            assert_eq!(BarStyle::from_key(style.key()), Some(style));
+            assert!(!style.label().is_empty());
+        }
+        assert_eq!(BarStyle::from_key("sticks"), None);
+        assert_eq!(BarStyle::default(), BarStyle::Candles);
     }
 
     #[test]

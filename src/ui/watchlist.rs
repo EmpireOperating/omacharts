@@ -211,6 +211,27 @@ impl Watchlist {
         watchlist
     }
 
+    /// Put the keyboard on the rail, landing on something selected so the
+    /// arrows have somewhere to go from.
+    pub fn grab_focus(self: &Rc<Self>) {
+        let row = self.list.selected_row().or_else(|| {
+            (0..)
+                .map_while(|i| self.list.row_at_index(i))
+                .find(|row| row.is_selectable() && row.is_visible())
+        });
+        if let Some(row) = row {
+            self.list.select_row(Some(&row));
+            row.grab_focus();
+        } else {
+            self.list.grab_focus();
+        }
+    }
+
+    /// Does the keyboard currently live here?
+    pub fn has_focus(&self) -> bool {
+        self.list.focus_child().is_some() || self.list.has_focus()
+    }
+
     pub fn columns(&self) -> Vec<Column> {
         self.columns.borrow().clone()
     }
@@ -520,6 +541,19 @@ impl Watchlist {
         row.set_selectable(false);
         row.set_activatable(false);
 
+        // Dropping on a header puts the symbol in that section, at the end.
+        // Without this there is no way to move something into a collapsed or
+        // empty section.
+        let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        let this = self.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Some((from, moving)) = parse_drag(value) else { return false };
+            this.store.move_entry_to_section(from, id, &moving, None);
+            this.rebuild();
+            true
+        });
+        row.add_controller(target);
+
         // Everything you can do to a section lives behind a right-click. A
         // delete button sitting on every header all the time is both noise and
         // an invitation to lose a section by accident.
@@ -700,19 +734,11 @@ impl Watchlist {
         let this = self.clone();
         let onto = entry.clone();
         target.connect_drop(move |_, value, _, _| {
-            let Ok(text) = value.get::<String>() else { return false };
-            let parts: Vec<&str> = text.split('\t').collect();
-            if parts.len() != 3 || parts[0].parse::<i64>().ok() != Some(section_id) {
+            let Some((from, moving)) = parse_drag(value) else { return false };
+            if from == section_id && moving == onto {
                 return false;
             }
-            let moving = Entry {
-                symbol: parts[1].to_string(),
-                suffix: (!parts[2].is_empty()).then(|| parts[2].to_string()),
-            };
-            if moving == onto {
-                return false;
-            }
-            this.store.move_entry(section_id, &moving, &onto);
+            this.store.move_entry_to_section(from, section_id, &moving, Some(&onto));
             this.rebuild();
             true
         });
@@ -802,6 +828,22 @@ impl Watchlist {
         });
         dialog.present(Some(anchor));
     }
+}
+
+/// Unpack a dragged row: which section it came from, and which entry it is.
+fn parse_drag(value: &glib::Value) -> Option<(i64, Entry)> {
+    let text = value.get::<String>().ok()?;
+    let parts: Vec<&str> = text.split('\t').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    Some((
+        parts[0].parse().ok()?,
+        Entry {
+            symbol: parts[1].to_string(),
+            suffix: (!parts[2].is_empty()).then(|| parts[2].to_string()),
+        },
+    ))
 }
 
 /// Put a quote into one value label, direction colouring included.

@@ -14,7 +14,7 @@ pub mod providers;
 pub mod symbols;
 pub mod theme;
 
-pub use bars::{resample, Bar, Timeframe};
+pub use bars::{resample, Bar, BarStyle, Timeframe};
 pub use indicators::{Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use provider::{Capability, Provider, ProviderError};
 pub use session::Session;

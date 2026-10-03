@@ -16,7 +16,9 @@ use std::rc::Rc;
 use gtk::cairo;
 use gtk::prelude::*;
 use omacharts_engine::indicators::{vwap, Output, Profile};
-use omacharts_engine::{Bar, BarScheme, Indicator, Instrument, Theme, Timeframe};
+use omacharts_engine::{
+    Bar, BarScheme, BarStyle, Direction, Indicator, Instrument, Theme, Timeframe,
+};
 
 use crate::ui::colors;
 use gtk::glib;
@@ -71,6 +73,7 @@ struct State {
     anchored: bool,
     drag: Option<Drag>,
     indicators: Vec<Drawn>,
+    bar_style: BarStyle,
     stale: bool,
     loading: bool,
     /// Multiplier on the auto-fitted price range. 1.0 shows exactly what the
@@ -194,6 +197,7 @@ pub struct ChartView {
     pub area: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
     on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>>,
+    on_context_menu: Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>,
 }
 
 impl ChartView {
@@ -214,6 +218,7 @@ impl ChartView {
             pointer: None,
             anchored: true,
             indicators: Vec::new(),
+            bar_style: BarStyle::default(),
             drag: None,
             stale: false,
             loading: false,
@@ -223,7 +228,12 @@ impl ChartView {
         }));
         let on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>> = Rc::new(RefCell::new(None));
 
-        let view = Rc::new(ChartView { area, state, on_hover });
+        let view = Rc::new(ChartView {
+            area,
+            state,
+            on_hover,
+            on_context_menu: Rc::new(RefCell::new(None)),
+        });
         view.wire_drawing();
         view.wire_pointer();
         view.wire_zoom();
@@ -255,6 +265,17 @@ impl ChartView {
         }
         drop(state);
         self.area.queue_draw();
+    }
+
+    pub fn set_bar_style(&self, style: BarStyle) {
+        self.state.borrow_mut().bar_style = style;
+        self.area.queue_draw();
+    }
+
+    /// What to do when the chart itself is right-clicked. The axis keeps its
+    /// own menu.
+    pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
+        *self.on_context_menu.borrow_mut() = Some(Box::new(handler));
     }
 
     pub fn set_indicators(&self, indicators: Vec<Drawn>) {
@@ -531,9 +552,14 @@ impl ChartView {
         click.set_button(gtk::gdk::BUTTON_SECONDARY);
         let state = self.state.clone();
         let area = self.area.clone();
+        let on_context_menu = self.on_context_menu.clone();
         click.connect_pressed(move |_, _, x, y| {
             let (width, height) = (area.width() as f64, area.height() as f64);
             if region_at(x, y, width, height) != Region::PriceAxis {
+                // The chart's own menu belongs to whoever owns the chart.
+                if let Some(handler) = on_context_menu.borrow().as_ref() {
+                    handler(x, y);
+                }
                 return;
             }
             let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -802,6 +828,10 @@ fn draw_candles(
     bar_w: f64,
     to_y: &impl Fn(f64) -> f64,
 ) {
+    if state.bar_style == BarStyle::Ohlc {
+        draw_ohlc(cr, state, bars, plot_x, bar_w, to_y);
+        return;
+    }
     let scheme = &state.scheme;
     let body_w = (bar_w * 0.68).clamp(1.0, 24.0);
     // Below about three pixels a candle is a line; outlining it just muddies
@@ -857,6 +887,44 @@ fn draw_candles(
         } else {
             colors::set_source(cr, fill);
             let _ = cr.fill();
+        }
+    }
+}
+
+/// Open and close as ticks either side of a high-low line.
+fn draw_ohlc(
+    cr: &cairo::Context,
+    state: &State,
+    bars: &[Bar],
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    let tick = (bar_w * 0.32).clamp(1.0, 10.0);
+    cr.set_line_width(1.0);
+    for rising in [false, true] {
+        let direction = if rising { Direction::Up } else { Direction::Down };
+        let mut any = false;
+        for (i, bar) in bars.iter().enumerate() {
+            if (bar.close >= bar.open) != rising {
+                continue;
+            }
+            any = true;
+            let x = (plot_x + (i as f64 + 0.5) * bar_w).round() + 0.5;
+            cr.move_to(x, to_y(bar.high).round());
+            cr.line_to(x, to_y(bar.low).round());
+            if tick > 1.0 {
+                let open = to_y(bar.open).round() + 0.5;
+                cr.move_to(x - tick, open);
+                cr.line_to(x, open);
+                let close = to_y(bar.close).round() + 0.5;
+                cr.move_to(x, close);
+                cr.line_to(x + tick, close);
+            }
+        }
+        if any {
+            colors::set_source(cr, state.scheme.outline(direction));
+            let _ = cr.stroke();
         }
     }
 }

@@ -9,7 +9,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use omacharts_engine::indicators::{self, Kind, Params, Reset};
 use omacharts_engine::theme::ColorChoice;
-use omacharts_engine::{Indicator, Session};
+use omacharts_engine::{BarStyle, Indicator, Session};
 
 use crate::store::Store;
 use crate::ui::colors;
@@ -29,6 +29,7 @@ impl ChartSettings {
         let chart_page = adw::PreferencesPage::new();
         chart_page.set_title("Chart");
         chart_page.set_icon_name(Some("preferences-system-symbolic"));
+        chart_page.add(&bars_group(window));
         chart_page.add(&session_group(window, &store));
         dialog.add(&chart_page);
 
@@ -45,6 +46,28 @@ impl ChartSettings {
     pub fn present_indicators(window: &Rc<Window>, store: Rc<Store>) {
         ChartSettings::present(window, store);
     }
+}
+
+fn bars_group(window: &Rc<Window>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Bars");
+
+    let names: Vec<&str> = BarStyle::ALL.iter().map(|s| s.label()).collect();
+    let row = adw::ComboRow::new();
+    row.set_title("Style");
+    row.set_model(Some(&gtk::StringList::new(&names)));
+    row.set_selected(
+        BarStyle::ALL.iter().position(|s| *s == window.bar_style()).unwrap_or(0) as u32
+    );
+
+    let window = window.clone();
+    row.connect_selected_notify(move |row| {
+        if let Some(style) = BarStyle::ALL.get(row.selected() as usize).copied() {
+            window.set_bar_style(style);
+        }
+    });
+    group.add(&row);
+    group
 }
 
 fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGroup {
