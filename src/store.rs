@@ -12,7 +12,7 @@
 
 use std::path::{Path, PathBuf};
 
-use omacharts_engine::{Bar, BarScheme, Theme, Timeframe};
+use omacharts_engine::{Bar, BarScheme, Indicator, Theme, Timeframe};
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub struct Store {
@@ -537,6 +537,23 @@ impl Store {
         }
     }
 
+    // -- indicators --------------------------------------------------------
+
+    /// The indicators on the chart. One set, shared by every symbol — arrowing
+    /// down a watchlist to compare setups only works if the chart keeps its
+    /// shape.
+    pub fn indicators(&self) -> Vec<Indicator> {
+        self.setting("indicators")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn set_indicators(&self, indicators: &[Indicator]) {
+        if let Ok(json) = serde_json::to_string(indicators) {
+            self.set_setting("indicators", &json);
+        }
+    }
+
     // -- saved themes ------------------------------------------------------
 
     pub fn custom_themes(&self) -> Vec<Theme> {
@@ -909,6 +926,27 @@ mod tests {
         assert_eq!(store.cached_series(), 1);
 
         let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn indicators_round_trip() {
+        use omacharts_engine::IndicatorKind;
+        let store = Store::memory().unwrap();
+        assert!(store.indicators().is_empty());
+
+        let set = vec![Indicator::new(1, IndicatorKind::Sma), Indicator::new(2, IndicatorKind::Vwap)];
+        store.set_indicators(&set);
+        assert_eq!(store.indicators(), set);
+
+        store.set_indicators(&[]);
+        assert!(store.indicators().is_empty());
+    }
+
+    #[test]
+    fn an_unreadable_indicator_list_is_ignored_rather_than_fatal() {
+        let store = Store::memory().unwrap();
+        store.set_setting("indicators", "{ this is not json");
+        assert!(store.indicators().is_empty());
     }
 
     #[test]

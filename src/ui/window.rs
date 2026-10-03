@@ -16,13 +16,13 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, Instrument, Provider, SearchIndex, Session, Timeframe,
+    resample, Indicator, Instrument, Provider, SearchIndex, Session, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
-use crate::ui::chart::ChartView;
+use crate::ui::chart::{ChartView, Drawn};
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
@@ -69,6 +69,8 @@ pub struct Window {
     legend: gtk::Label,
     /// Regular or extended hours.
     session: Rc<RefCell<Session>>,
+    /// One set of indicators, shared by every symbol.
+    indicators: Rc<RefCell<Vec<Indicator>>>,
     /// The preset strip, so a typed resolution can update it.
     timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
 }
@@ -122,6 +124,7 @@ impl Window {
             )),
             symbol_button,
             legend: readout.clone(),
+            indicators: Rc::new(RefCell::new(store.indicators())),
             session: Rc::new(RefCell::new(
                 store
                     .setting(crate::ui::chart_settings::SETTING_SESSION)
@@ -491,14 +494,8 @@ impl Window {
         entry.set_position(-1);
     }
 
-    fn open_chart_settings(self: &Rc<Self>) {
-        let this = self.clone();
-        crate::ui::chart_settings::ChartSettings::present(
-            &self.window,
-            self.store.clone(),
-            self.session.clone(),
-            Rc::new(move || this.redraw_current()),
-        );
+    pub fn open_chart_settings(self: &Rc<Self>) {
+        crate::ui::chart_settings::ChartSettings::present(self, self.store.clone());
     }
 
     /// Re-fold and repaint what is on screen, after something that changes
@@ -706,6 +703,7 @@ impl Window {
         } else {
             bars
         };
+        self.recompute_indicators(instrument, timeframe, &bars);
         let bars = Rc::new(bars);
         {
             let mut series = self.series.borrow_mut();
@@ -717,6 +715,72 @@ impl Window {
             series.insert((key.to_string(), timeframe), bars.clone());
         }
         self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
+    }
+
+    /// Run the indicators over the bars now on screen and hand them to the
+    /// chart, coloured.
+    ///
+    /// Colour comes from the theme's palette by slot, so a set of indicators
+    /// is distinguishable without anyone choosing anything — and follows the
+    /// theme when it changes.
+    fn recompute_indicators(
+        self: &Rc<Self>,
+        instrument: &Instrument,
+        timeframe: Timeframe,
+        bars: &[omacharts_engine::Bar],
+    ) {
+        let theme = self.theming.borrow().theme();
+        let drawn: Vec<Drawn> = self
+            .indicators
+            .borrow()
+            .iter()
+            .enumerate()
+            .map(|(slot, indicator)| Drawn {
+                color: indicator.color(&theme, slot),
+                output: omacharts_engine::indicators::compute(
+                    indicator,
+                    bars,
+                    instrument.session_origin,
+                    timeframe,
+                ),
+                indicator: indicator.clone(),
+            })
+            .collect();
+        self.chart.set_indicators(drawn);
+    }
+
+    /// Replace the set of indicators and redraw.
+    pub fn set_indicators(self: &Rc<Self>, indicators: Vec<Indicator>) {
+        self.store.set_indicators(&indicators);
+        *self.indicators.borrow_mut() = indicators;
+        self.redraw_current();
+    }
+
+    /// The active theme, for anything that needs to resolve a colour.
+    pub fn theme(&self) -> omacharts_engine::Theme {
+        self.theming.borrow().theme()
+    }
+
+    pub fn session(&self) -> Rc<RefCell<Session>> {
+        self.session.clone()
+    }
+
+    pub fn search(&self) -> Rc<SymbolSearch> {
+        self.search.clone()
+    }
+
+    /// Re-fold and repaint, after something that changes how the bars are read.
+    pub fn refresh(self: &Rc<Self>) {
+        self.redraw_current();
+    }
+
+    pub fn indicators(&self) -> Vec<Indicator> {
+        self.indicators.borrow().clone()
+    }
+
+    /// An id nothing on the chart is using.
+    pub fn next_indicator_id(&self) -> u32 {
+        self.indicators.borrow().iter().map(|i| i.id).max().unwrap_or(0) + 1
     }
 
     fn restore_last_symbol(self: &Rc<Self>) {

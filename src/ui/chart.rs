@@ -15,7 +15,8 @@ use std::rc::Rc;
 
 use gtk::cairo;
 use gtk::prelude::*;
-use omacharts_engine::{Bar, BarScheme, Instrument, Theme, Timeframe};
+use omacharts_engine::indicators::{vwap, Output, Profile};
+use omacharts_engine::{Bar, BarScheme, Indicator, Instrument, Theme, Timeframe};
 
 use crate::ui::colors;
 use gtk::glib;
@@ -35,6 +36,17 @@ const MAX_PRICE_ZOOM: f64 = 40.0;
 
 /// Pixels of drag for one doubling of either scale.
 const DRAG_PER_DOUBLING: f64 = 180.0;
+
+/// One indicator, computed and coloured, ready to draw.
+///
+/// The chart does no arithmetic: the window computes outputs through the
+/// engine and resolves colours through the theme, and this is what arrives.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Drawn {
+    pub indicator: Indicator,
+    pub output: Output,
+    pub color: String,
+}
 
 /// What the crosshair is over, handed to the window for the readout.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -58,6 +70,7 @@ struct State {
     /// user pans away.
     anchored: bool,
     drag: Option<Drag>,
+    indicators: Vec<Drawn>,
     stale: bool,
     loading: bool,
     /// Multiplier on the auto-fitted price range. 1.0 shows exactly what the
@@ -200,6 +213,7 @@ impl ChartView {
             visible: 160,
             pointer: None,
             anchored: true,
+            indicators: Vec::new(),
             drag: None,
             stale: false,
             loading: false,
@@ -240,6 +254,11 @@ impl ChartView {
             state.visible = 160;
         }
         drop(state);
+        self.area.queue_draw();
+    }
+
+    pub fn set_indicators(&self, indicators: Vec<Drawn>) {
+        self.state.borrow_mut().indicators = indicators;
         self.area.queue_draw();
     }
 
@@ -635,7 +654,11 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
 
     draw_price_grid(cr, state, plot_x, plot_w, plot_y, price_h, low, high, &to_y);
     draw_time_axis(cr, state, bars, plot_x, plot_w, height, bar_w, first);
+    // Shaded things go under the candles; lines go over. A band drawn on top
+    // of the bars hides the thing it is describing.
+    draw_indicator_fills(cr, state, first, visible, plot_x, bar_w, &to_y);
     draw_candles(cr, state, bars, plot_x, bar_w, &to_y);
+    draw_indicator_lines(cr, state, first, visible, plot_x, bar_w, &to_y);
 
     if max_volume > 0.0 {
         draw_volume(cr, state, bars, plot_x, bar_w, plot_y + price_h + 6.0, volume_h, max_volume);
@@ -1008,6 +1031,208 @@ fn draw_stale_marker(cr: &cairo::Context, state: &State, width: f64) {
     colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.95);
     cr.move_to(x + 6.0, PAD + 11.5);
     let _ = cr.show_text(text);
+}
+
+/// Band shading and volume profiles, beneath the bars.
+fn draw_indicator_fills(
+    cr: &cairo::Context,
+    state: &State,
+    first: usize,
+    visible: usize,
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+        match &drawn.output {
+            Output::Bands(bands) => {
+                // Rings between consecutive bands, never from the middle each
+                // time: stacked centre fills turn a cloud into a wash.
+                // Each ring is bounded by the band inside it; the innermost
+                // one is bounded by the line itself.
+                let mut inner: Option<(&Vec<Option<f64>>, &Vec<Option<f64>>)> = None;
+                for (index, (upper, lower)) in
+                    bands.upper.iter().zip(bands.lower.iter()).enumerate()
+                {
+                    let style = vwap::band_style(index, bands.upper.len());
+                    let (above, below) = inner.unwrap_or((&bands.vwap, &bands.vwap));
+                    colors::set_source_alpha(cr, &drawn.color, style.fill_alpha);
+                    fill_between(cr, upper, above, first, visible, plot_x, bar_w, to_y);
+                    fill_between(cr, below, lower, first, visible, plot_x, bar_w, to_y);
+                    inner = Some((upper, lower));
+                }
+            }
+            Output::Profiles(profiles) => {
+                draw_profiles(cr, state, drawn, profiles, first, visible, plot_x, bar_w, to_y);
+            }
+            Output::Line(_) => {}
+        }
+    }
+}
+
+/// Indicator lines, over the bars.
+fn draw_indicator_lines(
+    cr: &cairo::Context,
+    state: &State,
+    first: usize,
+    visible: usize,
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
+        match &drawn.output {
+            Output::Line(values) => {
+                colors::set_source(cr, &drawn.color);
+                cr.set_line_width(1.4);
+                stroke_series(cr, values, first, visible, plot_x, bar_w, to_y);
+            }
+            Output::Bands(bands) => {
+                cr.save().ok();
+                for (index, (upper, lower)) in
+                    bands.upper.iter().zip(bands.lower.iter()).enumerate()
+                {
+                    let style = vwap::band_style(index, bands.upper.len());
+                    cr.set_dash(if style.dashed { &[2.0, 3.0] } else { &[] }, 0.0);
+                    cr.set_line_width(1.0);
+                    colors::set_source_alpha(cr, &drawn.color, style.line_alpha);
+                    stroke_series(cr, upper, first, visible, plot_x, bar_w, to_y);
+                    stroke_series(cr, lower, first, visible, plot_x, bar_w, to_y);
+                }
+                cr.restore().ok();
+                colors::set_source(cr, &drawn.color);
+                cr.set_line_width(1.6);
+                stroke_series(cr, &bands.vwap, first, visible, plot_x, bar_w, to_y);
+            }
+            Output::Profiles(_) => {}
+        }
+    }
+}
+
+/// One histogram per period, anchored where its period begins.
+#[allow(clippy::too_many_arguments)]
+fn draw_profiles(
+    cr: &cairo::Context,
+    state: &State,
+    drawn: &Drawn,
+    profiles: &[Profile],
+    first: usize,
+    visible: usize,
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    let last = first + visible;
+    for profile in profiles {
+        if profile.last_bar < first || profile.first_bar >= last {
+            continue;
+        }
+        let left = plot_x + (profile.first_bar.max(first) - first) as f64 * bar_w;
+        // A profile may use at most this much of its own period's width, so it
+        // describes the bars rather than burying them.
+        let span = ((profile.last_bar.min(last - 1) + 1 - profile.first_bar.max(first)) as f64
+            * bar_w)
+            .max(bar_w)
+            * 0.4;
+
+        let (area_low, area_high) = profile.value_area_bounds();
+        for row in &profile.rows {
+            if row.volume <= 0.0 || profile.max_volume <= 0.0 {
+                continue;
+            }
+            let width = span * (row.volume / profile.max_volume);
+            let top = to_y(row.high);
+            let height = (to_y(row.low) - top).max(1.0);
+            let inside = row.low >= area_low && row.high <= area_high;
+            colors::set_source_alpha(cr, &drawn.color, if inside { 0.30 } else { 0.14 });
+            cr.rectangle(left, top, width, height.max(1.0));
+            let _ = cr.fill();
+        }
+
+        // The point of control, across the period it belongs to.
+        let y = to_y(profile.poc_price()).round() + 0.5;
+        colors::set_source_alpha(cr, &drawn.color, 0.85);
+        cr.set_line_width(1.0);
+        cr.move_to(left, y);
+        cr.line_to(left + span, y);
+        let _ = cr.stroke();
+        let _ = state;
+    }
+}
+
+/// Stroke a series, breaking the path wherever it has no value.
+#[allow(clippy::too_many_arguments)]
+fn stroke_series(
+    cr: &cairo::Context,
+    values: &[Option<f64>],
+    first: usize,
+    visible: usize,
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    let mut drawing = false;
+    for i in 0..visible {
+        let x = plot_x + (i as f64 + 0.5) * bar_w;
+        match values.get(first + i).copied().flatten() {
+            Some(value) => {
+                let y = to_y(value);
+                if drawing {
+                    cr.line_to(x, y);
+                } else {
+                    cr.move_to(x, y);
+                    drawing = true;
+                }
+            }
+            // A gap is a gap. Joining across it would draw a line through
+            // prices that were never there.
+            None => drawing = false,
+        }
+    }
+    let _ = cr.stroke();
+}
+
+/// Fill the region between two series.
+#[allow(clippy::too_many_arguments)]
+fn fill_between(
+    cr: &cairo::Context,
+    upper: &[Option<f64>],
+    lower: &[Option<f64>],
+    first: usize,
+    visible: usize,
+    plot_x: f64,
+    bar_w: f64,
+    to_y: &impl Fn(f64) -> f64,
+) {
+    let mut run: Vec<(f64, f64, f64)> = Vec::new();
+    let flush = |run: &mut Vec<(f64, f64, f64)>| {
+        if run.len() < 2 {
+            run.clear();
+            return;
+        }
+        cr.move_to(run[0].0, run[0].1);
+        for (x, y, _) in run.iter().skip(1) {
+            cr.line_to(*x, *y);
+        }
+        for (x, _, y2) in run.iter().rev() {
+            cr.line_to(*x, *y2);
+        }
+        cr.close_path();
+        let _ = cr.fill();
+        run.clear();
+    };
+
+    for i in 0..visible {
+        let x = plot_x + (i as f64 + 0.5) * bar_w;
+        match (
+            upper.get(first + i).copied().flatten(),
+            lower.get(first + i).copied().flatten(),
+        ) {
+            (Some(a), Some(b)) => run.push((x, to_y(a), to_y(b))),
+            _ => flush(&mut run),
+        }
+    }
+    flush(&mut run);
 }
 
 // ---------------------------------------------------------------------------
