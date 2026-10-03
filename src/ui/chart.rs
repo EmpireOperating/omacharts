@@ -265,14 +265,18 @@ impl State {
     }
 }
 
+/// Something the window hangs off the chart after building it. Optional
+/// because the chart is constructed before there is a window to tell.
+type Handler<F> = Rc<RefCell<Option<Box<F>>>>;
+
 pub struct ChartView {
     pub area: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
-    on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>>,
-    on_context_menu: Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>,
+    on_hover: Handler<dyn Fn(Option<Hover>)>,
+    on_context_menu: Handler<dyn Fn(f64, f64)>,
     /// Told when a pane's edge has been dragged, so the indicator it belongs
     /// to can be stored at its new height.
-    on_pane_resize: Rc<RefCell<Option<Box<dyn Fn(u32, f64)>>>>,
+    on_pane_resize: Handler<dyn Fn(u32, f64)>,
 }
 
 impl ChartView {
