@@ -1370,6 +1370,9 @@ impl Window {
     fn chart_menu(self: &Rc<Self>, x: f64, y: f64) {
         let menu = gio::Menu::new();
 
+        // Choices live behind a named item rather than loose in the menu: a
+        // flat list of radio buttons makes you read every option to find out
+        // what the menu is even about.
         let bars = gio::Menu::new();
         for style in BarStyle::ALL {
             let item = gio::MenuItem::new(Some(style.label()), None);
@@ -1379,7 +1382,7 @@ impl Window {
             );
             bars.append_item(&item);
         }
-        menu.append_section(None, &bars);
+        menu.append_submenu(Some("Bar style"), &bars);
 
         let sessions = gio::Menu::new();
         for session in Session::ALL {
@@ -1390,7 +1393,7 @@ impl Window {
             );
             sessions.append_item(&item);
         }
-        menu.append_section(None, &sessions);
+        menu.append_submenu(Some("Session"), &sessions);
 
         let rest = gio::Menu::new();
         rest.append(Some("Indicators…"), Some("chart.indicators"));
