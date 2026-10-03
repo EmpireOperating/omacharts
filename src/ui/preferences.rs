@@ -73,7 +73,6 @@ impl Preferences {
         });
         rebuild(&context);
         build_data_page(&context);
-        build_desktop_group(&context);
 
         dialog.present(Some(parent));
     }
@@ -107,6 +106,9 @@ fn rebuild(context: &Rc<Context>) {
     }
 
     groups.push(resolutions_group(context));
+    // Where the app shows up outside its own window belongs with how it looks,
+    // not with where its data comes from.
+    groups.extend(desktop_group());
 
     for group in &groups {
         context.page.add(group);
@@ -476,10 +478,10 @@ fn build_data_page(context: &Rc<Context>) {
 }
 
 /// The bar widget: one switch, and the truth about what it did.
-fn build_desktop_group(context: &Rc<Context>) {
+fn desktop_group() -> Option<adw::PreferencesGroup> {
     let home = crate::store::home();
     if !crate::bar_plugin::available(&home) {
-        return;
+        return None;
     }
 
     let group = adw::PreferencesGroup::new();
@@ -528,7 +530,7 @@ fn build_desktop_group(context: &Rc<Context>) {
     row.add_suffix(&switch);
     group.add(&row);
 
-    context.data_page.add(&group);
+    Some(group)
 }
 
 fn apply(context: &Rc<Context>) {

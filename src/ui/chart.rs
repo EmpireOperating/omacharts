@@ -309,6 +309,8 @@ pub struct ChartView {
     on_pane_resize: Handler<dyn Fn(u32, f64)>,
     /// Told when a strip's close box was clicked.
     on_pane_close: Handler<dyn Fn(u32)>,
+    /// Right-clicking the price axis, which has its own short menu.
+    on_axis_menu: Handler<dyn Fn(f64, f64)>,
 }
 
 impl ChartView {
@@ -348,6 +350,7 @@ impl ChartView {
             on_context_menu: Rc::new(RefCell::new(None)),
             on_pane_resize: Rc::new(RefCell::new(None)),
             on_pane_close: Rc::new(RefCell::new(None)),
+            on_axis_menu: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
         view.wire_pointer();
@@ -419,6 +422,31 @@ impl ChartView {
 
     pub fn set_pane_close_handler(&self, handler: impl Fn(u32) + 'static) {
         *self.on_pane_close.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn set_axis_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
+        *self.on_axis_menu.borrow_mut() = Some(Box::new(handler));
+    }
+
+    /// Is the price scale fitting itself to what is on screen?
+    ///
+    /// False only once the axis has been dragged: until then the menu's
+    /// "auto scale" is describing what is already happening, which is why it
+    /// has to be shown as a state rather than offered as an action.
+    pub fn price_auto(&self) -> bool {
+        self.state.borrow().price_auto
+    }
+
+    pub fn set_price_auto(&self, auto: bool) {
+        {
+            let mut state = self.state.borrow_mut();
+            state.price_auto = auto;
+            if auto {
+                state.price_zoom = 1.0;
+                state.price_offset = 0.0;
+            }
+        }
+        self.area.queue_draw();
     }
 
     pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
@@ -781,9 +809,9 @@ impl ChartView {
     fn wire_axis_menu(self: &Rc<Self>) {
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_SECONDARY);
-        let state = self.state.clone();
         let area = self.area.clone();
         let on_context_menu = self.on_context_menu.clone();
+        let on_axis_menu = self.on_axis_menu.clone();
         click.connect_pressed(move |_, _, x, y| {
             let (width, height) = (area.width() as f64, area.height() as f64);
             if region_at(x, y, width, height) != Region::PriceAxis {
@@ -793,40 +821,11 @@ impl ChartView {
                 }
                 return;
             }
-            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let popover = gtk::Popover::new();
-            popover.set_child(Some(&items));
-            popover.set_parent(&area);
-            popover.set_has_arrow(false);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-
-            for (label, reset_all) in [("Auto scale price", false), ("Reset chart (Alt+R)", true)] {
-                let button = gtk::Button::with_label(label);
-                button.add_css_class("flat");
-                if let Some(child) = button.child().and_downcast::<gtk::Label>() {
-                    child.set_xalign(0.0);
-                }
-                let state = state.clone();
-                let area = area.clone();
-                let popover_weak = popover.downgrade();
-                button.connect_clicked(move |_| {
-                    let mut s = state.borrow_mut();
-                    if reset_all {
-                        s.reset_view();
-                    } else {
-                        s.price_auto = true;
-                        s.price_zoom = 1.0;
-                        s.price_offset = 0.0;
-                    }
-                    drop(s);
-                    area.queue_draw();
-                    if let Some(p) = popover_weak.upgrade() {
-                        p.popdown();
-                    }
-                });
-                items.append(&button);
+            // The axis has its own menu, built by whoever owns the chart so it
+            // is a real menu like every other one rather than a box of buttons.
+            if let Some(handler) = on_axis_menu.borrow().as_ref() {
+                handler(x, y);
             }
-            popover.popup();
         });
         self.area.add_controller(click);
     }

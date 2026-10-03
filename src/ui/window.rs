@@ -198,6 +198,8 @@ const LAST_TIMEFRAME: &str = "last_timeframe";
 const SHOW_WATCHLIST: &str = "show_watchlist";
 /// How wide the rail was left, in pixels.
 const SETTING_SIDEBAR_WIDTH: &str = "sidebar_width";
+/// Whether the bar widget has been put in the bar once already.
+const SETTING_WIDGET_OFFERED: &str = "bar_widget_offered";
 const DEFAULT_SIDEBAR_WIDTH: i32 = 280;
 pub const SETTING_BAR_STYLE: &str = "bar_style";
 pub const SETTING_SHOW_GRID: &str = "show_grid";
@@ -264,6 +266,7 @@ pub struct Window {
     linked_action: RefCell<Option<gio::SimpleAction>>,
     bar_style_action: RefCell<Option<gio::SimpleAction>>,
     session_action: RefCell<Option<gio::SimpleAction>>,
+    auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
     store: Rc<Store>,
@@ -323,6 +326,7 @@ impl Window {
             linked_action: RefCell::new(None),
             bar_style_action: RefCell::new(None),
             session_action: RefCell::new(None),
+            auto_scale_action: RefCell::new(None),
             chart_host: chart_host.clone(),
             store: store.clone(),
             index: index.clone(),
@@ -389,6 +393,11 @@ impl Window {
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
+
+        // The widget is part of the app, so it arrives with it rather than
+        // waiting to be discovered in the settings.
+        let installer = this.clone();
+        glib::idle_add_local_once(move || installer.offer_bar_widget());
 
         // The long tail of listings arrives on a thread once the window is up:
         // the names you are most likely to type are already in the curated half.
@@ -460,6 +469,12 @@ impl Window {
             popup_menu(&model, &strip, x, y);
         });
         pane.strip.add_controller(strip_menu);
+
+        let axis_owner = self.clone();
+        pane.view.set_axis_menu_handler(move |x, y| {
+            axis_owner.focus(id);
+            axis_owner.price_axis_menu(x, y);
+        });
 
         let menu_owner = self.clone();
         pane.view.set_context_menu_handler(move |x, y| {
@@ -1401,6 +1416,26 @@ impl Window {
         });
     }
 
+    /// Put the bar widget in the bar, the first time this runs on a desktop
+    /// that has one.
+    ///
+    /// Once, and remembered. Taking the widget out is a choice, and a choice
+    /// that undid itself on the next launch would not be one — so the question
+    /// is recorded as asked, rather than inferred from whether the widget
+    /// happens to be there.
+    fn offer_bar_widget(self: &Rc<Self>) {
+        let home = crate::store::home();
+        if self.store.setting_bool(SETTING_WIDGET_OFFERED, false)
+            || !crate::bar_plugin::available(&home)
+        {
+            return;
+        }
+        self.store.set_setting_bool(SETTING_WIDGET_OFFERED, true);
+        if let Err(error) = crate::bar_plugin::install(&home) {
+            eprintln!("omacharts: bar widget not installed: {error}");
+        }
+    }
+
     fn wire_theme_polling(self: &Rc<Self>) {
         let this = self.clone();
         glib::timeout_add_seconds_local(THEME_POLL_SECONDS, move || {
@@ -2226,6 +2261,28 @@ impl Window {
         popup_menu(&menu, &self.window, wx, wy);
     }
 
+    /// The price axis has its own menu, and its own question: whether the
+    /// scale fits itself to what is on screen.
+    ///
+    /// Shown as a state rather than offered as an action, because it is on
+    /// unless you have dragged the axis — "Auto scale price" as a plain item
+    /// looked broken, since clicking it usually asked for what was already
+    /// happening. Turning it off is what lets the chart be dragged up and down.
+    fn price_axis_menu(self: &Rc<Self>, x: f64, y: f64) {
+        if let Some(action) = self.auto_scale_action.borrow().as_ref() {
+            action.set_state(&self.focused_pane().view.price_auto().to_variant());
+        }
+        let menu = gio::Menu::new();
+        menu.append(Some("Auto scale price"), Some("chart.auto-scale"));
+        let rest = gio::Menu::new();
+        rest.append(Some("Reset chart"), Some("chart.reset-view"));
+        menu.append_section(None, &rest);
+
+        let area = self.focused_pane().view.area.clone();
+        let (wx, wy) = area.translate_coordinates(&self.window, x, y).unwrap_or((x, y));
+        popup_menu(&menu, &self.window, wx, wy);
+    }
+
     /// The actions the chart's menus drive.
     ///
     /// Stateful actions rather than plain ones, so the menu draws the current
@@ -2294,6 +2351,25 @@ impl Window {
         });
         actions.add_action(&linked);
         *self.linked_action.borrow_mut() = Some(linked);
+
+        let auto_scale = gio::SimpleAction::new_stateful(
+            "auto-scale",
+            None,
+            &self.focused_pane().view.price_auto().to_variant(),
+        );
+        let this = self.clone();
+        auto_scale.connect_activate(move |action, _| {
+            let next = !this.focused_pane().view.price_auto();
+            action.set_state(&next.to_variant());
+            this.focused_pane().view.set_price_auto(next);
+        });
+        actions.add_action(&auto_scale);
+        *self.auto_scale_action.borrow_mut() = Some(auto_scale);
+
+        let reset_view = gio::SimpleAction::new("reset-view", None);
+        let this = self.clone();
+        reset_view.connect_activate(move |_, _| this.focused_pane().view.reset_view());
+        actions.add_action(&reset_view);
 
         let settings = gio::SimpleAction::new("settings", None);
         let this = self.clone();
