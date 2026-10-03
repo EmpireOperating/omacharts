@@ -381,8 +381,14 @@ impl Window {
                     this.cycle_focus();
                     return glib::Propagation::Stop;
                 }
-                // Back to the chart, from wherever the keyboard ended up.
+                // Back to the chart, from wherever the keyboard ended up —
+                // but a dialog gets Escape first. Closing what is open is what
+                // Escape means, and this controller sits on the window, above
+                // everything presented into it.
                 Key::Escape => {
+                    if this.window.visible_dialog().is_some() {
+                        return glib::Propagation::Proceed;
+                    }
                     this.chart.area.grab_focus();
                     return glib::Propagation::Stop;
                 }
@@ -617,26 +623,70 @@ impl Window {
         );
     }
 
+    /// The shortcuts, grouped and aligned.
+    ///
+    /// A list of rows rather than a block of text: an alert dialog centres
+    /// whatever it is given, which turns two columns into a ragged mess.
     fn show_shortcuts(self: &Rc<Self>) {
-        let body = "Type a letter   Find a symbol\n\
-                    Type a number   Set the resolution\n\
-                    Ctrl+K          Find a symbol\n\
-                    Ctrl+I          Chart settings and indicators\n\
-                    Ctrl+,          Preferences\n\
-                    \n\
-                    Ctrl+B · F9     Show or hide the watchlist\n\
-                    F6              Move between chart and watchlist\n\
-                    Esc             Back to the chart\n\
-                    ↑ ↓             Next or previous symbol\n\
-                    Ctrl+↑ ↓        Next or previous section\n\
-                    Delete          Remove the symbol from the watchlist\n\
-                    \n\
-                    ← →             Pan\n\
-                    + −             Zoom\n\
-                    End             Jump to the latest bar\n\
-                    Alt+R           Reset the chart";
-        let dialog = adw::AlertDialog::new(Some("Keyboard shortcuts"), Some(body));
-        dialog.add_response("close", "Close");
+        let page = adw::PreferencesPage::new();
+
+        let sections: [(&str, &[(&str, &str)]); 3] = [
+            (
+                "Finding things",
+                &[
+                    ("Type a letter", "Find a symbol"),
+                    ("Type a number", "Set the resolution"),
+                    ("Ctrl+K", "Find a symbol"),
+                    ("Ctrl+I", "Chart settings and indicators"),
+                    ("Ctrl+,", "Preferences"),
+                ],
+            ),
+            (
+                "Watchlist",
+                &[
+                    ("Ctrl+B · F9", "Show or hide"),
+                    ("F6", "Move between chart and watchlist"),
+                    ("↑ ↓", "Next or previous symbol"),
+                    ("Ctrl+↑ ↓", "Next or previous section"),
+                    ("Delete", "Remove the symbol"),
+                ],
+            ),
+            (
+                "Chart",
+                &[
+                    ("← →", "Pan"),
+                    ("+ −", "Zoom"),
+                    ("End", "Jump to the latest bar"),
+                    ("Alt+R", "Reset the view"),
+                    ("Esc", "Back to the chart"),
+                ],
+            ),
+        ];
+
+        for (title, shortcuts) in sections {
+            let group = adw::PreferencesGroup::new();
+            group.set_title(title);
+            for (keys, what) in shortcuts {
+                let row = adw::ActionRow::new();
+                row.set_title(what);
+                let label = gtk::Label::new(Some(keys));
+                label.add_css_class("keycap");
+                label.set_valign(gtk::Align::Center);
+                row.add_suffix(&label);
+                group.add(&row);
+            }
+            page.add(&group);
+        }
+
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&page));
+
+        let dialog = adw::Dialog::new();
+        dialog.set_title("Keyboard shortcuts");
+        dialog.set_content_width(480);
+        dialog.set_content_height(620);
+        dialog.set_child(Some(&toolbar));
         dialog.present(Some(&self.window));
     }
 

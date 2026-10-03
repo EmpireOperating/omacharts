@@ -259,6 +259,16 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
 .legend-gear:hover { opacity: 1; }
 
+/* Keys read as keys. */
+.keycap {
+  font-size: 0.85em;
+  font-feature-settings: 'tnum';
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: alpha(@card_fg_color, 0.08);
+  border: 1px solid alpha(@card_fg_color, 0.10);
+}
+
 .legend-row { padding: 0 0 1px 1px; }
 .legend-indicator { font-size: 0.78em; opacity: 0.75; }
 .legend-indicator-hidden { opacity: 0.35; text-decoration: line-through; }
