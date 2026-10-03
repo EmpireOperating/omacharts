@@ -852,9 +852,17 @@ impl Window {
             }
         });
 
+        // Anchored to the resolution strip, which is what it is about. Hanging
+        // it off the symbol button put it under the wrong heading entirely.
         let popover = gtk::Popover::new();
         popover.set_child(Some(&content));
-        popover.set_parent(&self.symbol_button);
+        popover.set_parent(&self.timeframe_strip);
+        // Every number typed builds a fresh one, so each has to let go of the
+        // strip when it closes or they pile up on it.
+        popover.connect_closed(|popover| {
+            let popover = popover.clone();
+            glib::idle_add_local_once(move || popover.unparent());
+        });
 
         let this = self.clone();
         let popover_weak = popover.downgrade();
