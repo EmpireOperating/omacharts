@@ -298,7 +298,7 @@ fn appearance_group(
     // does not, and showing that as a switch beats a button whose label has to
     // describe a state it is sitting next to.
     let follow_row = adw::ActionRow::new();
-    follow_row.set_title("Follow the theme");
+    follow_row.set_title("Automatic");
     follow_row.set_subtitle(
         "Takes the next colour from the theme palette, and changes with it",
     );
