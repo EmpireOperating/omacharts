@@ -26,6 +26,10 @@ use gtk::glib;
 const PRICE_AXIS_W: f64 = 64.0;
 const TIME_AXIS_H: f64 = 24.0;
 const PAD: f64 = 10.0;
+/// Space between the price chart and a pane, and between two panes.
+const PANE_GAP: f64 = 6.0;
+/// The least of the chart price keeps, however many panes are stacked below.
+const MIN_PRICE_SHARE: f64 = 0.45;
 
 /// Fewest bars we will zoom into, and the most we will draw at once.
 const MIN_VISIBLE: usize = 12;
@@ -672,14 +676,26 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
     let plot_y = PAD;
     let total_h = (height - TIME_AXIS_H - PAD).max(1.0);
-    // Volume is an indicator now, so the pane exists only while one is on the
-    // chart, and it is that indicator that says how tall it is.
-    let volume_share = state.indicators.iter().find_map(|drawn| match &drawn.output {
-        Output::Volume { height, .. } if drawn.indicator.visible => Some(*height),
-        _ => None,
-    });
-    let volume_h = volume_share.map(|share| (total_h * share).min(220.0)).unwrap_or(0.0);
-    let price_h = (total_h - volume_h - if volume_h > 0.0 { 6.0 } else { 0.0 }).max(1.0);
+    // Volume, RSI and ATR each want a strip of their own, stacked under the
+    // price in the order they are listed. Price keeps most of the chart
+    // whatever is stacked below it: three panes sharing the window equally
+    // would leave the candles — the thing you came for — as a sliver.
+    let panes: Vec<(&Drawn, f64)> = state
+        .indicators
+        .iter()
+        .filter(|drawn| drawn.indicator.visible)
+        .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn, share)))
+        .collect();
+    let wanted: f64 = panes.iter().map(|(_, share)| share).sum();
+    let squeeze = if wanted > 1.0 - MIN_PRICE_SHARE {
+        (1.0 - MIN_PRICE_SHARE) / wanted
+    } else {
+        1.0
+    };
+    let pane_heights: Vec<f64> =
+        panes.iter().map(|(_, share)| (total_h * share * squeeze).min(220.0)).collect();
+    let panes_h: f64 = pane_heights.iter().sum::<f64>() + PANE_GAP * panes.len() as f64;
+    let price_h = (total_h - panes_h).max(1.0);
 
     // Price scale over what is visible, padded so candles never touch the
     // edges.
@@ -721,8 +737,19 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     draw_candles(cr, state, bars, plot_x, bar_w, &to_y);
     draw_indicator_lines(cr, state, first, visible, plot_x, bar_w, &to_y);
 
-    if volume_h > 0.0 && max_volume > 0.0 {
-        draw_volume(cr, state, bars, plot_x, bar_w, plot_y + price_h + 6.0, volume_h, max_volume);
+    let mut pane_y = plot_y + price_h + PANE_GAP;
+    for ((drawn, _), pane_h) in panes.iter().zip(&pane_heights) {
+        match &drawn.output {
+            Output::Volume { .. } if max_volume > 0.0 => {
+                draw_volume(cr, state, bars, plot_x, bar_w, pane_y, *pane_h, max_volume);
+            }
+            Output::Pane(pane) => draw_pane(
+                cr, state, pane, drawn, plot_x, plot_w, bar_w, pane_y, *pane_h, width, first,
+                visible,
+            ),
+            _ => {}
+        }
+        pane_y += pane_h + PANE_GAP;
     }
 
     draw_last_price(cr, state, plot_x, plot_w, width, decimals, &to_y);
@@ -1006,6 +1033,126 @@ fn draw_volume(
     }
 }
 
+/// One indicator in its own strip: guides, then the line.
+///
+/// The strip carries its own name because the legend at the top cannot say
+/// which of three stacked panes is which, and a pane you have to count down to
+/// identify is a pane you misread.
+#[allow(clippy::too_many_arguments)]
+fn draw_pane(
+    cr: &cairo::Context,
+    state: &State,
+    pane: &omacharts_engine::indicators::Pane,
+    drawn: &Drawn,
+    plot_x: f64,
+    plot_w: f64,
+    bar_w: f64,
+    top: f64,
+    height: f64,
+    width: f64,
+    first: usize,
+    visible: usize,
+) {
+    let values = &pane.values[first.min(pane.values.len())..(first + visible).min(pane.values.len())];
+    let (low, high) = match pane.bounds {
+        Some(bounds) => bounds,
+        // Fit what is on screen, with a little air: an ATR pressed against the
+        // top and bottom of its strip has no shape to read.
+        None => {
+            let mut low = f64::MAX;
+            let mut high = f64::MIN;
+            for value in values.iter().flatten() {
+                low = low.min(*value);
+                high = high.max(*value);
+            }
+            if !low.is_finite() || !high.is_finite() {
+                return;
+            }
+            if (high - low).abs() < f64::EPSILON {
+                (low - 1.0, high + 1.0)
+            } else {
+                let air = (high - low) * 0.12;
+                (low - air, high + air)
+            }
+        }
+    };
+    let to_y = |value: f64| top + height * (high - value) / (high - low);
+
+    // The band between the guides, so overbought and oversold read as regions
+    // rather than two lines you have to remember the meaning of.
+    if let Some((from, to)) = pane.band {
+        cr.rectangle(plot_x, to_y(to), plot_w, (to_y(from) - to_y(to)).abs());
+        colors::set_source_alpha(cr, &state.theme.ui.grid, 0.35);
+        let _ = cr.fill();
+    }
+
+    cr.save().ok();
+    cr.set_line_width(1.0);
+    colors::set_source_alpha(cr, &state.theme.ui.grid, 0.9);
+    for guide in &pane.guides {
+        let y = to_y(*guide).round() + 0.5;
+        cr.move_to(plot_x, y);
+        cr.line_to(plot_x + plot_w, y);
+    }
+    let _ = cr.stroke();
+    cr.restore().ok();
+
+    // The scale, written where the price axis is written. Fixed scales label
+    // their guides; a fitted one labels its extremes, which is the only way to
+    // know what the line is worth.
+    cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(10.0);
+    colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.75);
+    let marks: Vec<(f64, String)> = if pane.bounds.is_some() {
+        pane.guides.iter().map(|g| (*g, format!("{g:.0}"))).collect()
+    } else {
+        let decimals = decimals_for(nice_step(high - low, 3));
+        vec![(low, format!("{low:.decimals$}")), (high, format!("{high:.decimals$}"))]
+    };
+    for (value, text) in marks {
+        let y = to_y(value);
+        if y < top || y > top + height {
+            continue;
+        }
+        cr.move_to(plot_x + plot_w + 6.0, (y + 3.0).min(top + height));
+        let _ = cr.show_text(&text);
+    }
+    let _ = width;
+
+    // Its name, top left of its own strip.
+    cr.set_font_size(10.0);
+    colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.8);
+    cr.move_to(plot_x + 2.0, top + 11.0);
+    let _ = cr.show_text(&drawn.indicator.label_for(state.timeframe));
+
+    // The line last, over its own furniture.
+    let stroke = drawn.indicator.stroke;
+    if stroke.is_hidden() {
+        return;
+    }
+    cr.save().ok();
+    cr.set_line_width(stroke.width);
+    cr.set_dash(&stroke.style.dashes(stroke.width), 0.0);
+    colors::set_source(cr, &drawn.color);
+    let mut pen_down = false;
+    for (i, value) in values.iter().enumerate() {
+        let Some(value) = value else {
+            pen_down = false;
+            continue;
+        };
+        let x = plot_x + (i as f64 + 0.5) * bar_w;
+        let y = to_y(*value).clamp(top, top + height);
+        if pen_down {
+            cr.line_to(x, y);
+        } else {
+            cr.move_to(x, y);
+            pen_down = true;
+        }
+    }
+    let _ = cr.stroke();
+    cr.restore().ok();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_last_price(
     cr: &cairo::Context,
@@ -1192,7 +1339,9 @@ fn draw_indicator_fills(
                 draw_profiles(cr, state, drawn, profiles, first, visible, plot_x, bar_w, to_y);
             }
             // Drawn as its own pane, after the price plot.
-            Output::Volume { .. } | Output::Line(_) => {}
+            // Both draw in their own strip, where the price scale does not
+            // reach, so nothing to do over the candles.
+            Output::Volume { .. } | Output::Pane(_) | Output::Line(_) => {}
         }
     }
 }
@@ -1248,7 +1397,7 @@ fn draw_indicator_lines(
                     cr.restore().ok();
                 }
             }
-            Output::Profiles(_) | Output::Volume { .. } => {}
+            Output::Profiles(_) | Output::Volume { .. } | Output::Pane(_) => {}
         }
     }
 }

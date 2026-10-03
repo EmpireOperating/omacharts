@@ -23,6 +23,9 @@ pub const SETTING_SESSION: &str = "chart_session";
 enum Focus {
     Chart,
     Indicators,
+    /// Straight past the list to the picker: adding one is the thing people
+    /// open this page to do.
+    AddIndicator,
     Indicator(u32),
 }
 
@@ -37,6 +40,11 @@ impl ChartSettings {
     /// Straight to the indicators.
     pub fn present_indicators(window: &Rc<Window>, store: Rc<Store>) {
         ChartSettings::open(window, store, Focus::Indicators);
+    }
+
+    /// Straight to the picker, for the hotkey that adds one.
+    pub fn present_add_indicator(window: &Rc<Window>, store: Rc<Store>) {
+        ChartSettings::open(window, store, Focus::AddIndicator);
     }
 
     /// Straight to one indicator's panel, for the gear beside it on the chart.
@@ -68,6 +76,18 @@ impl ChartSettings {
         match focus {
             Focus::Chart => {}
             Focus::Indicators => dialog.set_visible_page(&indicators_page),
+            Focus::AddIndicator => {
+                dialog.set_visible_page(&indicators_page);
+                // After the dialog has laid out: the picker hangs off the list
+                // and a popover over a widget with no allocation yet lands in
+                // the corner of the window.
+                let window = window.clone();
+                let dialog_for_pick = dialog.clone();
+                let list = list.clone();
+                glib::idle_add_local_once(move || {
+                    pick_indicator(&list.group.clone(), &window, &dialog_for_pick, &list);
+                });
+            }
             Focus::Indicator(id) => {
                 dialog.set_visible_page(&indicators_page);
                 open_indicator_panel(window, &dialog, &list, id);
@@ -194,7 +214,7 @@ fn rebuild_indicators(
     list.group.set_description(Some(if indicators.is_empty() {
         "Nothing yet."
     } else {
-        "Drawn in order, each taking the next colour from the theme."
+        "Stacked and drawn in order. Colours come from the theme's palette."
     }));
 
     let add = gtk::Button::from_icon_name("list-add-symbolic");
@@ -209,8 +229,8 @@ fn rebuild_indicators(
     });
     list.group.set_header_suffix(Some(&add));
 
-    for (slot, indicator) in indicators.iter().enumerate() {
-        list.push(&indicator_row(window, dialog, list, slot, indicator));
+    for (position, indicator) in indicators.iter().enumerate() {
+        list.push(&indicator_row(window, dialog, list, &indicators, position, indicator));
     }
 
     if indicators.is_empty() {
@@ -233,10 +253,12 @@ fn indicator_row(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
     list: &IndicatorList,
-    slot: usize,
+    all: &[Indicator],
+    position: usize,
     indicator: &Indicator,
 ) -> adw::ActionRow {
     let id = indicator.id;
+    let slot = omacharts_engine::palette_slot(all, id);
     let row = adw::ActionRow::new();
     row.set_title(&indicator.label());
     row.set_subtitle(indicator.kind.name());
@@ -254,6 +276,35 @@ fn indicator_row(
         let _ = cr.fill();
     });
     row.add_prefix(&swatch);
+
+    // Order is a property of the list, so its controls sit on the list side of
+    // the row. It decides two things at once: which strip is stacked above
+    // which under the chart, and which line is drawn over which on it.
+    //
+    // Added back to front because a prefix is prepended, not appended: the
+    // swatch goes on first so it ends up nearest the title, and down before up
+    // so the pair reads the way it points.
+    let last = all.len().saturating_sub(1);
+    row.add_prefix(&reorder_button(
+        window,
+        dialog,
+        list,
+        id,
+        "go-down-symbolic",
+        "Move down",
+        position < last,
+        1,
+    ));
+    row.add_prefix(&reorder_button(
+        window,
+        dialog,
+        list,
+        id,
+        "go-up-symbolic",
+        "Move up",
+        position > 0,
+        -1,
+    ));
 
     let visible = gtk::Switch::new();
     visible.set_active(indicator.visible);
@@ -291,6 +342,40 @@ fn indicator_row(
     row
 }
 
+#[allow(clippy::too_many_arguments)]
+fn reorder_button(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    id: u32,
+    icon: &str,
+    tooltip: &str,
+    enabled: bool,
+    delta: isize,
+) -> gtk::Button {
+    let button = gtk::Button::from_icon_name(icon);
+    button.add_css_class("flat");
+    button.set_valign(gtk::Align::Center);
+    button.set_tooltip_text(Some(tooltip));
+    button.set_sensitive(enabled);
+
+    let window = window.clone();
+    let dialog = dialog.clone();
+    let list = list.clone();
+    button.connect_clicked(move |_| {
+        let mut indicators = window.indicators();
+        let Some(at) = indicators.iter().position(|i| i.id == id) else { return };
+        let to = at as isize + delta;
+        if to < 0 || to as usize >= indicators.len() {
+            return;
+        }
+        indicators.swap(at, to as usize);
+        window.set_indicators(indicators);
+        rebuild_indicators(&window, &dialog, &list);
+    });
+    button
+}
+
 /// The indicator's own panel, pushed over the list.
 fn open_indicator_panel(
     window: &Rc<Window>,
@@ -315,11 +400,10 @@ fn open_indicator_panel_for(
     fresh: bool,
 ) {
     let indicators = window.indicators();
-    let Some((slot, indicator)) =
-        indicators.iter().enumerate().find(|(_, i)| i.id == id).map(|(s, i)| (s, i.clone()))
-    else {
+    let Some(indicator) = indicators.iter().find(|i| i.id == id).cloned() else {
         return;
     };
+    let slot = omacharts_engine::palette_slot(&indicators, id);
 
     let page = adw::PreferencesPage::new();
     page.add(&parameters_group(window, dialog, list, &indicator));
@@ -540,20 +624,45 @@ fn parameters_group(
             group.add(&reset_row(window, dialog, list, id, *reset));
         }
         Params::Volume { height } => {
+            group.add(&pane_height_row(window, dialog, list, id, *height));
+        }
+        Params::Rsi { period, height, overbought, oversold } => {
             group.add(&spin_row(
-                window,
-                dialog,
-                list,
-                id,
-                "Pane height %",
-                height * 100.0,
-                5.0,
-                60.0,
-                1.0,
+                window, dialog, list, id, "Period", *period as f64, 2.0, 200.0, 1.0,
                 move |indicator, value| {
-                    indicator.params = Params::Volume { height: value / 100.0 };
+                    if let Params::Rsi { period, .. } = &mut indicator.params {
+                        *period = value as usize;
+                    }
                 },
             ));
+            group.add(&spin_row(
+                window, dialog, list, id, "Overbought", *overbought, 50.0, 100.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Rsi { overbought, .. } = &mut indicator.params {
+                        *overbought = value;
+                    }
+                },
+            ));
+            group.add(&spin_row(
+                window, dialog, list, id, "Oversold", *oversold, 0.0, 50.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Rsi { oversold, .. } = &mut indicator.params {
+                        *oversold = value;
+                    }
+                },
+            ));
+            group.add(&pane_height_row(window, dialog, list, id, *height));
+        }
+        Params::Atr { period, height } => {
+            group.add(&spin_row(
+                window, dialog, list, id, "Period", *period as f64, 2.0, 200.0, 1.0,
+                move |indicator, value| {
+                    if let Params::Atr { period, .. } = &mut indicator.params {
+                        *period = value as usize;
+                    }
+                },
+            ));
+            group.add(&pane_height_row(window, dialog, list, id, *height));
         }
         Params::VolumeProfile { reset, rows, value_area } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
@@ -722,7 +831,10 @@ fn reset_row(
         update(&window, id, |indicator| match &mut indicator.params {
             Params::Vwap { reset, .. } => *reset = chosen,
             Params::VolumeProfile { reset, .. } => *reset = chosen,
-            Params::MovingAverage { .. } | Params::Volume { .. } => {}
+            Params::MovingAverage { .. }
+            | Params::Volume { .. }
+            | Params::Rsi { .. }
+            | Params::Atr { .. } => {}
         });
         rebuild_indicators(&window, &dialog, &list);
     });
@@ -759,6 +871,39 @@ fn spin_row(
         rebuild_indicators(&window, &dialog, &list);
     });
     row
+}
+
+/// How much of the chart an indicator's own strip takes.
+///
+/// One row for every indicator that has a strip, rather than one per kind: the
+/// question is the same whichever of them is asking it.
+fn pane_height_row(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    id: u32,
+    height: f64,
+) -> adw::SpinRow {
+    spin_row(
+        window,
+        dialog,
+        list,
+        id,
+        "Pane height %",
+        height * 100.0,
+        5.0,
+        60.0,
+        1.0,
+        move |indicator, value| {
+            let share = value / 100.0;
+            match &mut indicator.params {
+                Params::Volume { height }
+                | Params::Rsi { height, .. }
+                | Params::Atr { height, .. } => *height = share,
+                _ => {}
+            }
+        },
+    )
 }
 
 /// How a volume profile is divided up: automatically, or by a number.

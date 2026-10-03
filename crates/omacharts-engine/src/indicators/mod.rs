@@ -9,6 +9,7 @@
 //! so adding four indicators gives four colours that already work together,
 //! in any theme, including one the user edited.
 
+pub mod oscillators;
 pub mod periods;
 pub mod profile;
 pub mod vwap;
@@ -90,11 +91,20 @@ pub enum Kind {
     Vwap,
     VolumeProfile,
     Volume,
+    Rsi,
+    Atr,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] =
-        [Kind::Volume, Kind::Sma, Kind::Ema, Kind::Vwap, Kind::VolumeProfile];
+    pub const ALL: [Kind; 7] = [
+        Kind::Volume,
+        Kind::Sma,
+        Kind::Ema,
+        Kind::Vwap,
+        Kind::VolumeProfile,
+        Kind::Rsi,
+        Kind::Atr,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -103,6 +113,8 @@ impl Kind {
             Kind::Vwap => "VWAP",
             Kind::VolumeProfile => "Volume Profile",
             Kind::Volume => "Volume",
+            Kind::Rsi => "Relative Strength Index",
+            Kind::Atr => "Average True Range",
         }
     }
 
@@ -114,6 +126,8 @@ impl Kind {
             Kind::Vwap => "VWAP",
             Kind::VolumeProfile => "VP",
             Kind::Volume => "Vol",
+            Kind::Rsi => "RSI",
+            Kind::Atr => "ATR",
         }
     }
 
@@ -126,6 +140,8 @@ impl Kind {
             Kind::Vwap => &["vwap", "volume weighted", "average price", "bands"],
             Kind::VolumeProfile => &["volume profile", "vp", "poc", "value area", "tpo"],
             Kind::Volume => &["volume", "vol", "turnover"],
+            Kind::Rsi => &["rsi", "relative strength", "oscillator", "momentum", "overbought"],
+            Kind::Atr => &["atr", "average true range", "volatility", "range", "stop"],
         }
     }
 
@@ -136,6 +152,8 @@ impl Kind {
             Kind::Vwap => "vwap",
             Kind::VolumeProfile => "volume_profile",
             Kind::Volume => "volume",
+            Kind::Rsi => "rsi",
+            Kind::Atr => "atr",
         }
     }
 
@@ -150,6 +168,16 @@ impl Kind {
                 value_area: 0.70,
             },
             Kind::Volume => Params::Volume { height: 0.18 },
+            // Fourteen bars, overbought at seventy, oversold at thirty: the
+            // numbers Wilder published and the ones every other chart shows,
+            // so a level somebody is watching elsewhere is the same level here.
+            Kind::Rsi => Params::Rsi {
+                period: 14,
+                height: 0.16,
+                overbought: 70.0,
+                oversold: 30.0,
+            },
+            Kind::Atr => Params::Atr { period: 14, height: 0.16 },
         }
     }
 }
@@ -178,6 +206,16 @@ pub enum Params {
     },
     Volume {
         /// How much of the chart's height the pane takes.
+        height: f64,
+    },
+    Rsi {
+        period: usize,
+        height: f64,
+        overbought: f64,
+        oversold: f64,
+    },
+    Atr {
+        period: usize,
         height: f64,
     },
 }
@@ -236,6 +274,9 @@ impl Indicator {
             Params::Vwap { reset, .. } => format!("VWAP · {}", effective(*reset).label()),
             Params::VolumeProfile { reset, .. } => format!("VP · {}", effective(*reset).label()),
             Params::Volume { .. } => "Volume".to_string(),
+            Params::Rsi { period, .. } | Params::Atr { period, .. } => {
+                format!("{} {period}", self.kind.short_name())
+            }
         }
     }
 
@@ -252,6 +293,17 @@ impl Indicator {
     }
 }
 
+/// Which palette slot an indicator takes.
+///
+/// By age rather than by position in the list. Ids are handed out in order, so
+/// ranking by id survives reordering: moving a pane down the stack should move
+/// the pane, not repaint two unrelated lines. Removing one still shifts the
+/// colours of everything newer, which is the same thing that has always
+/// happened and is the price of not storing a colour nobody chose.
+pub fn palette_slot(indicators: &[Indicator], id: u32) -> usize {
+    indicators.iter().filter(|other| other.id < id).count()
+}
+
 /// What computing an indicator produces.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Output {
@@ -263,6 +315,39 @@ pub enum Output {
     Profiles(Vec<Profile>),
     /// Volume per bar, with the share of the chart its pane takes.
     Volume { values: Vec<f64>, height: f64 },
+    /// A series drawn in its own strip under the price, on its own scale.
+    Pane(Pane),
+}
+
+/// An indicator that cannot share the price scale, and so gets a strip of its
+/// own under the chart.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Pane {
+    pub values: Vec<Option<f64>>,
+    /// Share of the chart's height this strip takes.
+    pub height: f64,
+    /// The scale it always uses, or `None` to fit whatever is on screen.
+    ///
+    /// An RSI is always 0 to 100 — half its meaning is where the line sits
+    /// between them — while an ATR is a price distance with no natural
+    /// ceiling, and fitting it is the only way to see its shape.
+    pub bounds: Option<(f64, f64)>,
+    /// Horizontal reference lines.
+    pub guides: Vec<f64>,
+    /// The pair of guides worth shading between, if any.
+    pub band: Option<(f64, f64)>,
+}
+
+impl Output {
+    /// The share of the chart's height this indicator wants for its own strip,
+    /// if it needs one at all.
+    pub fn pane_height(&self) -> Option<f64> {
+        match self {
+            Output::Volume { height, .. } => Some(*height),
+            Output::Pane(pane) => Some(pane.height),
+            _ => None,
+        }
+    }
 }
 
 /// Compute an indicator over `bars`.
@@ -287,6 +372,20 @@ pub fn compute(
             session_origin,
             bands,
         )),
+        (Kind::Rsi, Params::Rsi { period, height, overbought, oversold }) => Output::Pane(Pane {
+            values: oscillators::rsi(bars, *period),
+            height: height.clamp(0.05, 0.6),
+            bounds: Some((0.0, 100.0)),
+            guides: vec![*oversold, 50.0, *overbought],
+            band: Some((*oversold, *overbought)),
+        }),
+        (Kind::Atr, Params::Atr { period, height }) => Output::Pane(Pane {
+            values: oscillators::atr(bars, *period),
+            height: height.clamp(0.05, 0.6),
+            bounds: None,
+            guides: Vec::new(),
+            band: None,
+        }),
         (Kind::Volume, Params::Volume { height }) => Output::Volume {
             values: bars.iter().map(|bar| bar.volume).collect(),
             height: height.clamp(0.05, 0.6),

@@ -624,6 +624,13 @@ impl Window {
                     this.chart.area.grab_focus();
                     return glib::Propagation::Stop;
                 }
+                // Ctrl+Shift+I skips the list and opens the picker, because
+                // adding one is what you usually came for. It has to be tested
+                // before plain Ctrl+I or that arm swallows it.
+                Key::i | Key::I if ctrl && shift => {
+                    this.add_indicator();
+                    return glib::Propagation::Stop;
+                }
                 // Ctrl+I goes to the indicators; Ctrl+Shift+, to the chart's
                 // settings, pairing with Ctrl+, for the app's.
                 Key::i | Key::I if ctrl => {
@@ -888,6 +895,11 @@ impl Window {
         crate::ui::chart_settings::ChartSettings::present_indicators(self, self.store.clone());
     }
 
+    /// Open the indicators page with the picker already up.
+    pub fn add_indicator(self: &Rc<Self>) {
+        crate::ui::chart_settings::ChartSettings::present_add_indicator(self, self.store.clone());
+    }
+
     /// Re-fold and repaint what is on screen, after something that changes
     /// how the bars are read rather than which bars they are.
     fn redraw_current(self: &Rc<Self>) {
@@ -923,6 +935,7 @@ impl Window {
                     ("Type a number", "Set the resolution"),
                     ("Ctrl+K", "Find a symbol"),
                     ("Ctrl+I", "Indicators"),
+                    ("Ctrl+Shift+I", "Add an indicator"),
                     ("Ctrl+Shift+,", "Chart settings"),
                     ("Ctrl+,", "Preferences"),
                     ("? · Ctrl+?", "This list"),
@@ -1239,13 +1252,11 @@ impl Window {
         bars: &[omacharts_engine::Bar],
     ) {
         let theme = self.theming.borrow().theme();
-        let drawn: Vec<Drawn> = self
-            .indicators
-            .borrow()
+        let all = self.indicators.borrow().clone();
+        let drawn: Vec<Drawn> = all
             .iter()
-            .enumerate()
-            .map(|(slot, indicator)| Drawn {
-                color: indicator.color(&theme, slot),
+            .map(|indicator| Drawn {
+                color: indicator.color(&theme, omacharts_engine::palette_slot(&all, indicator.id)),
                 output: omacharts_engine::indicators::compute(
                     indicator,
                     bars,
@@ -1279,9 +1290,10 @@ impl Window {
         let theme = self.theming.borrow().theme();
 
         let timeframe = *self.timeframe.borrow();
-        for (slot, indicator) in self.indicators.borrow().iter().enumerate() {
+        let all = self.indicators.borrow().clone();
+        for indicator in all.iter() {
             let id = indicator.id;
-            let colour = indicator.color(&theme, slot);
+            let colour = indicator.color(&theme, omacharts_engine::palette_slot(&all, id));
 
             let dot = gtk::DrawingArea::new();
             dot.set_size_request(8, 8);
