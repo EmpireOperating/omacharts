@@ -1122,7 +1122,7 @@ fn draw_indicator_fills(
                 for (index, (upper, lower)) in
                     bands.upper.iter().zip(bands.lower.iter()).enumerate()
                 {
-                    let style = vwap::band_style(index, bands.upper.len());
+                    let style = vwap::band_style(index);
                     let (above, below) = inner.unwrap_or((&bands.vwap, &bands.vwap));
                     colors::set_source_alpha(cr, &drawn.color, style.fill_alpha);
                     fill_between(cr, upper, above, first, visible, plot_x, bar_w, to_y);
@@ -1160,10 +1160,17 @@ fn draw_indicator_lines(
                 for (index, (upper, lower)) in
                     bands.upper.iter().zip(bands.lower.iter()).enumerate()
                 {
-                    let style = vwap::band_style(index, bands.upper.len());
-                    cr.set_dash(if style.dashed { &[2.0, 3.0] } else { &[] }, 0.0);
+                    let style = vwap::band_style(index);
+                    cr.set_dash(if style.dashed { &[3.0, 3.0] } else { &[] }, 0.0);
                     cr.set_line_width(1.0);
-                    colors::set_source_alpha(cr, &drawn.color, style.line_alpha);
+                    // The shaded band's edges are drawn in the chart's own
+                    // background, so the shading ends cleanly rather than being
+                    // boxed in by lines competing with the ones further out.
+                    if style.edge_is_background {
+                        colors::set_source(cr, &state.theme.ui.background);
+                    } else {
+                        colors::set_source_alpha(cr, &drawn.color, style.line_alpha);
+                    }
                     stroke_series(cr, upper, first, visible, plot_x, bar_w, to_y);
                     stroke_series(cr, lower, first, visible, plot_x, bar_w, to_y);
                 }

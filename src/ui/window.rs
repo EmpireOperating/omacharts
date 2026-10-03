@@ -23,6 +23,7 @@ use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::chart::{ChartView, Drawn};
+use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
@@ -91,6 +92,8 @@ pub struct Window {
     symbol_button: gtk::Button,
     /// The chart's legend: what this is, and at what resolution.
     legend: gtk::Label,
+    /// One row per indicator, under the legend.
+    indicator_legend: gtk::Box,
     /// Regular or extended hours.
     session: Rc<RefCell<Session>>,
     /// One set of indicators, shared by every symbol.
@@ -153,6 +156,11 @@ impl Window {
             )),
             symbol_button,
             legend: readout.clone(),
+            indicator_legend: {
+                let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                rows.set_halign(gtk::Align::Start);
+                rows
+            },
             indicators: Rc::new(RefCell::new(store.indicators())),
             bar_style: Rc::new(RefCell::new(
                 store
@@ -186,16 +194,21 @@ impl Window {
         gear.set_valign(gtk::Align::Center);
 
         let legend_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        legend_bar.set_halign(gtk::Align::Start);
-        legend_bar.set_valign(gtk::Align::Start);
-        legend_bar.set_margin_start(12);
-        legend_bar.set_margin_top(6);
         legend_bar.append(&readout);
         legend_bar.append(&gear);
 
+        // The legend stack: what you are looking at, then what is drawn on it.
+        let legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        legend.set_halign(gtk::Align::Start);
+        legend.set_valign(gtk::Align::Start);
+        legend.set_margin_start(12);
+        legend.set_margin_top(6);
+        legend.append(&legend_bar);
+        legend.append(&this.indicator_legend);
+
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&chart.area));
-        overlay.add_overlay(&legend_bar);
+        overlay.add_overlay(&legend);
         split.set_content(Some(&overlay));
 
         let opener = this.clone();
@@ -214,6 +227,7 @@ impl Window {
         this.wire_responses(receiver);
         this.wire_theme_polling();
 
+        this.rebuild_indicator_legend();
         this.restore_last_symbol();
         this
     }
@@ -849,7 +863,87 @@ impl Window {
     pub fn set_indicators(self: &Rc<Self>, indicators: Vec<Indicator>) {
         self.store.set_indicators(&indicators);
         *self.indicators.borrow_mut() = indicators;
+        self.rebuild_indicator_legend();
         self.redraw_current();
+    }
+
+    /// The indicator rows under the legend: a dot, a name, and the two things
+    /// you reach for without opening anything — hide it, or go to its settings.
+    ///
+    /// Deliberately faint. These sit over the drawing, and the drawing is the
+    /// point; they come up to full strength when the pointer is near.
+    fn rebuild_indicator_legend(self: &Rc<Self>) {
+        while let Some(child) = self.indicator_legend.first_child() {
+            self.indicator_legend.remove(&child);
+        }
+        let theme = self.theming.borrow().theme();
+
+        for (slot, indicator) in self.indicators.borrow().iter().enumerate() {
+            let id = indicator.id;
+            let colour = indicator.color(&theme, slot);
+
+            let dot = gtk::DrawingArea::new();
+            dot.set_size_request(8, 8);
+            dot.set_valign(gtk::Align::Center);
+            let dot_colour = colour.clone();
+            dot.set_draw_func(move |_, cr, width, height| {
+                colors::set_source(cr, &dot_colour);
+                let radius = (width.min(height) as f64) / 2.0;
+                cr.arc(
+                    width as f64 / 2.0,
+                    height as f64 / 2.0,
+                    radius,
+                    0.0,
+                    std::f64::consts::TAU,
+                );
+                let _ = cr.fill();
+            });
+
+            let label = gtk::Label::new(Some(&indicator.label()));
+            label.add_css_class("legend-indicator");
+            label.set_xalign(0.0);
+            if !indicator.visible {
+                label.add_css_class("legend-indicator-hidden");
+            }
+
+            let toggle = gtk::Button::from_icon_name(if indicator.visible {
+                "view-reveal-symbolic"
+            } else {
+                "view-conceal-symbolic"
+            });
+            toggle.add_css_class("flat");
+            toggle.add_css_class("legend-button");
+            toggle.set_tooltip_text(Some(if indicator.visible { "Hide" } else { "Show" }));
+            let this = self.clone();
+            toggle.connect_clicked(move |_| {
+                let mut indicators = this.indicators();
+                if let Some(found) = indicators.iter_mut().find(|i| i.id == id) {
+                    found.visible = !found.visible;
+                }
+                this.set_indicators(indicators);
+            });
+
+            let settings = gtk::Button::from_icon_name("emblem-system-symbolic");
+            settings.add_css_class("flat");
+            settings.add_css_class("legend-button");
+            settings.set_tooltip_text(Some("Settings"));
+            let this = self.clone();
+            settings.connect_clicked(move |_| {
+                crate::ui::chart_settings::ChartSettings::present_indicator(
+                    &this,
+                    this.store.clone(),
+                    id,
+                );
+            });
+
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+            row.add_css_class("legend-row");
+            row.append(&dot);
+            row.append(&label);
+            row.append(&toggle);
+            row.append(&settings);
+            self.indicator_legend.append(&row);
+        }
     }
 
     /// The active theme, for anything that needs to resolve a colour.

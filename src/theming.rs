@@ -254,10 +254,23 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
-/* The legend's gear sits over the drawing, so it stays out of the way until
-   the pointer is near it. */
+/* The legend sits over the drawing, and the drawing is the point. Everything
+   here stays faint until the pointer is near it. */
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
 .legend-gear:hover { opacity: 1; }
+
+.legend-row { padding: 0 0 1px 1px; }
+.legend-indicator { font-size: 0.78em; opacity: 0.75; }
+.legend-indicator-hidden { opacity: 0.35; text-decoration: line-through; }
+.legend-button {
+  opacity: 0;
+  min-width: 18px;
+  min-height: 18px;
+  padding: 0;
+  -gtk-icon-size: 12px;
+}
+.legend-row:hover .legend-button { opacity: 0.55; }
+.legend-button:hover { opacity: 1; }
 ",
     );
     css

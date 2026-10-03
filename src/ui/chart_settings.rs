@@ -22,6 +22,10 @@ pub struct ChartSettings;
 
 impl ChartSettings {
     pub fn present(window: &Rc<Window>, store: Rc<Store>) {
+        ChartSettings::open(window, store, None);
+    }
+
+    fn open(window: &Rc<Window>, store: Rc<Store>, focus: Option<u32>) {
         let dialog = adw::PreferencesDialog::new();
         dialog.set_title("Chart");
         dialog.set_content_width(560);
@@ -42,11 +46,15 @@ impl ChartSettings {
         rebuild_indicators(window, &dialog, &list);
 
         dialog.present(Some(&window.window));
+        if let Some(id) = focus {
+            open_indicator_panel(window, &dialog, &list, id);
+        }
     }
 
-    /// Open straight onto the indicators, for the button on the chart.
-    pub fn present_indicators(window: &Rc<Window>, store: Rc<Store>) {
-        ChartSettings::present(window, store);
+    /// Open straight onto one indicator's panel, for the gear beside it on the
+    /// chart.
+    pub fn present_indicator(window: &Rc<Window>, store: Rc<Store>, id: u32) {
+        ChartSettings::open(window, store, Some(id));
     }
 }
 

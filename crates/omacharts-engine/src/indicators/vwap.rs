@@ -20,27 +20,48 @@ pub struct Bands {
 
 /// How one band is drawn.
 ///
-/// Derived from the band's position rather than stored, so three bands get a
-/// coherent ramp and changing the deviations cannot produce a set that reads
-/// wrong. Fills are rings between consecutive bands, never from the centre
-/// each time — stacking those is what turns a cloud into a wash.
+/// Only the first band is shaded, as a single region from its lower edge to
+/// its upper one — the area price spends most of its time in. The outer bands
+/// are lines alone: shading those as well stacks into a wash that says less
+/// than the lines do.
+///
+/// The first band's own edges are drawn in the chart background rather than in
+/// the band colour, so the shaded area ends cleanly instead of being boxed in
+/// by two lines competing with the ones further out.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct BandStyle {
     pub line_alpha: f64,
-    /// Alpha for the ring between this band and the one inside it.
+    /// Shading between this band's edges. Zero for every band but the first.
     pub fill_alpha: f64,
     pub dashed: bool,
+    /// Draw the edge in the chart's background colour rather than the band's.
+    pub edge_is_background: bool,
 }
 
-pub fn band_style(index: usize, total: usize) -> BandStyle {
-    let total = total.max(1);
-    // 0 at the innermost band, 1 at the outermost.
-    let t = if total == 1 { 0.0 } else { index as f64 / (total - 1) as f64 };
-    BandStyle {
-        line_alpha: 0.70 - 0.38 * t,
-        fill_alpha: 0.11 - 0.07 * t,
-        // The innermost band is solid: it is the one people read against.
-        dashed: index > 0,
+pub fn band_style(index: usize) -> BandStyle {
+    match index {
+        // The shaded band. Its edges disappear into the chart.
+        0 => BandStyle {
+            line_alpha: 1.0,
+            fill_alpha: 0.16,
+            dashed: false,
+            edge_is_background: true,
+        },
+        // The middle band is dashed, so it reads as a marker rather than a
+        // boundary.
+        1 => BandStyle {
+            line_alpha: 0.75,
+            fill_alpha: 0.0,
+            dashed: true,
+            edge_is_background: false,
+        },
+        // Everything further out is a plain line.
+        _ => BandStyle {
+            line_alpha: 0.75,
+            fill_alpha: 0.0,
+            dashed: false,
+            edge_is_background: false,
+        },
     }
 }
 
@@ -200,20 +221,31 @@ mod tests {
     }
 
     #[test]
-    fn band_styling_fades_outward() {
-        let styles: Vec<BandStyle> = (0..3).map(|i| band_style(i, 3)).collect();
-        assert!(styles[0].line_alpha > styles[1].line_alpha);
-        assert!(styles[1].line_alpha > styles[2].line_alpha);
-        assert!(styles[0].fill_alpha > styles[2].fill_alpha);
-        assert!(!styles[0].dashed, "the innermost band is solid");
-        assert!(styles[1].dashed && styles[2].dashed);
-        assert!(styles.iter().all(|s| s.line_alpha > 0.0 && s.fill_alpha > 0.0));
+    fn only_the_first_band_is_shaded() {
+        assert!(band_style(0).fill_alpha > 0.0);
+        for index in 1..6 {
+            assert_eq!(band_style(index).fill_alpha, 0.0, "band {index} should be a line only");
+        }
     }
 
     #[test]
-    fn a_single_band_is_drawn_at_full_strength() {
-        let style = band_style(0, 1);
-        assert!(!style.dashed);
-        assert!((style.line_alpha - 0.70).abs() < 1e-9);
+    fn the_shaded_bands_edges_disappear_into_the_chart() {
+        assert!(band_style(0).edge_is_background);
+        assert!(!band_style(1).edge_is_background);
+        assert!(!band_style(2).edge_is_background);
+    }
+
+    #[test]
+    fn the_middle_band_is_dashed_and_the_outer_one_is_not() {
+        assert!(!band_style(0).dashed, "the shaded band has no dashes to show");
+        assert!(band_style(1).dashed);
+        assert!(!band_style(2).dashed);
+    }
+
+    #[test]
+    fn every_band_is_drawn_at_all() {
+        for index in 0..6 {
+            assert!(band_style(index).line_alpha > 0.0, "band {index}");
+        }
     }
 }
