@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::symbols::InstrumentKind;
+
 /// One candle. `ts` is the unix second the bar opens at.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Bar {
@@ -234,28 +236,85 @@ impl Timeframe {
     }
 }
 
-/// How many decimals a price deserves, given how finely the chart is ruled.
+/// How many decimals a price deserves, given how finely the chart is ruled and
+/// what is being priced.
 ///
-/// Two answers have to agree here. The gridline spacing says how much
-/// precision the *chart* needs: lines 5 apart do not want three decimals. The
-/// price itself says how much precision the *instrument* needs: EURUSD moves
-/// in the fourth decimal, and rounding it to the step makes a day's range look
-/// like nothing happened.
+/// Two answers have to agree. The gridline spacing says what the *chart*
+/// needs: lines 50 apart do not want three decimals. The instrument says what
+/// the *market* quotes: a currency major is quoted to five places and moves in
+/// the fourth, so rounding it to the step makes a day's range look like
+/// nothing happened. The finer of the two wins.
 ///
-/// Taking the finer of the two is what keeps the axis, the last-price chip and
-/// the watchlist from giving the same price three different ways.
-pub fn price_decimals(step: f64, price: f64) -> usize {
+/// Kind matters and magnitude alone cannot stand in for it. EURUSD at 1.12
+/// and USDJPY at 157 are both currency majors quoted to a fractional pip, but
+/// that is five decimals for one and three for the other — and a share price
+/// of 1.12 wants neither.
+pub fn price_decimals(step: f64, price: f64, kind: Option<InstrumentKind>) -> usize {
     let from_step = if step > 0.0 {
         (-step.log10().floor()).clamp(0.0, 8.0) as usize
     } else {
-        2
+        0
     };
-    let from_price = match price.abs() {
-        p if p >= 20.0 => 2,
-        p if p >= 1.0 => 4,
-        _ => 6,
+
+    let size = price.abs();
+    let from_instrument = match kind {
+        // Quoted to a fractional pip: five places, or three where the quote
+        // runs in the hundreds, as the yen pairs do.
+        Some(InstrumentKind::Fx) if size >= 20.0 => 3,
+        Some(InstrumentKind::Fx) => 5,
+        _ => match size {
+            p if p >= 20.0 => 2,
+            p if p >= 1.0 => 4,
+            _ => 6,
+        },
     };
-    from_step.max(from_price)
+    from_step.max(from_instrument)
+}
+
+/// A bar whose body is this small a fraction of its range is a doji.
+const DOJI: f64 = 0.05;
+/// Above this share of doji-like bars, the opens are not real opens.
+const DEGENERATE: f64 = 0.6;
+
+/// Give a continuously-traded series the opens it should have had.
+///
+/// A market that never closes has no auction open: today's open is yesterday's
+/// close, and that is how every charting platform draws it. Yahoo follows that
+/// for crypto — BTC's open matches the previous close to a thousandth of a
+/// percent — and does not for its FX symbols, where the daily open and close
+/// are the same quote taken at the same moment. The result is a chart of
+/// nothing but dojis with long wicks: the highs and lows are real, the bodies
+/// are an artefact.
+///
+/// Only applied when the series is actually degenerate, so a provider that
+/// gives real opens keeps them, and only the open moves — highs, lows and
+/// closes are left exactly as they came. An open outside its own bar's range
+/// is clamped into it, because a weekend gap must not produce a candle whose
+/// body escapes its wick.
+pub fn repair_continuous_opens(bars: &[Bar]) -> Vec<Bar> {
+    if !opens_are_degenerate(bars) {
+        return bars.to_vec();
+    }
+    let mut out = bars.to_vec();
+    for i in 1..out.len() {
+        let previous_close = out[i - 1].close;
+        out[i].open = previous_close.clamp(out[i].low, out[i].high);
+    }
+    out
+}
+
+/// Does this series have bodies, or only wicks?
+pub fn opens_are_degenerate(bars: &[Bar]) -> bool {
+    let measurable: Vec<&Bar> = bars.iter().filter(|b| b.high > b.low).collect();
+    // Too few bars to tell; leave them alone.
+    if measurable.len() < 20 {
+        return false;
+    }
+    let doji = measurable
+        .iter()
+        .filter(|b| (b.close - b.open).abs() / (b.high - b.low) < DOJI)
+        .count();
+    doji as f64 / measurable.len() as f64 > DEGENERATE
 }
 
 /// Fold `src` into `target`.
@@ -458,23 +517,110 @@ mod tests {
     }
 
     #[test]
-    fn prices_are_written_as_finely_as_the_chart_or_the_instrument_needs() {
-        // An index ruled every 50 points: two decimals is already generous.
-        assert_eq!(price_decimals(50.0, 7722.72), 2);
-        // A currency pair ruled every 0.005: the step says three, but the pair
-        // moves in the fourth, which is why it was being shown as 1.126.
-        assert_eq!(price_decimals(0.005, 1.1257), 4);
-        // And a chart ruled finer than the instrument still gets the finer.
-        assert_eq!(price_decimals(0.0001, 1.1257), 4);
-        assert_eq!(price_decimals(0.00001, 1.1257), 5);
-        // Something priced in pennies.
-        assert_eq!(price_decimals(0.0001, 0.00042), 6);
+    fn currency_majors_are_quoted_to_a_fractional_pip() {
+        let fx = Some(InstrumentKind::Fx);
+        // EURUSD ruled every 0.005: the step says three, the market says five.
+        // This is the case that showed 1.126 for a pair trading at 1.12481.
+        assert_eq!(price_decimals(0.005, 1.1248, fx), 5);
+        assert_eq!(price_decimals(0.0005, 1.3240, fx), 5);
+        // The yen pairs run in the hundreds and are quoted to three.
+        assert_eq!(price_decimals(0.5, 157.83, fx), 3);
     }
 
     #[test]
-    fn a_degenerate_step_still_gives_an_answer() {
-        assert_eq!(price_decimals(0.0, 100.0), 2);
-        assert_eq!(price_decimals(-1.0, 100.0), 2);
+    fn everything_else_is_quoted_by_its_size() {
+        // An index ruled every 50 points: two decimals is already generous.
+        assert_eq!(price_decimals(50.0, 7722.72, Some(InstrumentKind::Index)), 2);
+        assert_eq!(price_decimals(1.0, 233.95, Some(InstrumentKind::Equity)), 2);
+        // A share priced like a currency pair is still a share.
+        assert_eq!(price_decimals(0.005, 1.12, Some(InstrumentKind::Equity)), 4);
+        assert_eq!(price_decimals(0.0001, 0.00042, Some(InstrumentKind::Crypto)), 6);
+    }
+
+    #[test]
+    fn a_chart_ruled_finer_than_the_market_still_gets_the_finer() {
+        let fx = Some(InstrumentKind::Fx);
+        assert_eq!(price_decimals(0.000001, 1.1248, fx), 6);
+        assert_eq!(price_decimals(0.001, 7722.72, Some(InstrumentKind::Index)), 3);
+    }
+
+    #[test]
+    fn a_degenerate_step_or_unknown_instrument_still_gives_an_answer() {
+        assert_eq!(price_decimals(0.0, 100.0, None), 2);
+        assert_eq!(price_decimals(-1.0, 100.0, None), 2);
+        assert_eq!(price_decimals(0.0, 1.5, None), 4);
+    }
+
+    #[test]
+    fn a_series_of_dojis_gets_its_opens_back() {
+        // What Yahoo returns for a currency pair: real highs and lows, and an
+        // open that is the close.
+        let series: Vec<Bar> = (0..60)
+            .map(|i| {
+                let close = 1.10 + i as f64 * 0.001;
+                Bar {
+                    ts: i as i64 * 86_400,
+                    open: close,
+                    high: close + 0.004,
+                    low: close - 0.004,
+                    close,
+                    volume: 0.0,
+                }
+            })
+            .collect();
+        assert!(opens_are_degenerate(&series));
+
+        let fixed = repair_continuous_opens(&series);
+        assert_eq!(fixed[0].open, series[0].open, "the first bar has no yesterday");
+        for i in 1..fixed.len() {
+            assert_eq!(fixed[i].open, series[i - 1].close, "today opens where yesterday left off");
+            // Nothing else moved.
+            assert_eq!(fixed[i].high, series[i].high);
+            assert_eq!(fixed[i].low, series[i].low);
+            assert_eq!(fixed[i].close, series[i].close);
+        }
+    }
+
+    #[test]
+    fn a_series_with_real_bodies_is_left_alone() {
+        let series: Vec<Bar> = (0..60)
+            .map(|i| {
+                let open = 100.0 + i as f64;
+                Bar {
+                    ts: i as i64 * 86_400,
+                    open,
+                    high: open + 3.0,
+                    low: open - 1.0,
+                    close: open + 2.0,
+                    volume: 1.0,
+                }
+            })
+            .collect();
+        assert!(!opens_are_degenerate(&series));
+        assert_eq!(repair_continuous_opens(&series), series);
+    }
+
+    #[test]
+    fn a_repaired_open_never_escapes_its_own_bar() {
+        // A weekend gap: yesterday closed well above today's whole range.
+        let series = vec![
+            Bar { ts: 0, open: 2.0, high: 2.0, low: 2.0, close: 2.0, volume: 0.0 },
+            Bar { ts: 86_400, open: 1.0, high: 1.05, low: 0.95, close: 1.0, volume: 0.0 },
+        ];
+        let mut long = vec![series[0]];
+        long.extend(std::iter::repeat_n(series[1], 40));
+        let fixed = repair_continuous_opens(&long);
+        for bar in &fixed {
+            assert!(bar.open >= bar.low && bar.open <= bar.high, "{bar:?}");
+        }
+    }
+
+    #[test]
+    fn too_short_a_series_is_not_judged() {
+        let series: Vec<Bar> = (0..5)
+            .map(|i| Bar { ts: i, open: 1.0, high: 1.1, low: 0.9, close: 1.0, volume: 0.0 })
+            .collect();
+        assert!(!opens_are_degenerate(&series));
     }
 
     #[test]

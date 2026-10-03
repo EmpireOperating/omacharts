@@ -1186,6 +1186,14 @@ impl Window {
         timeframe: Timeframe,
         bars: Vec<omacharts_engine::Bar>,
     ) {
+        // Yahoo's currency pairs come back with the open equal to the close,
+        // which draws a chart of nothing but dojis. Continuous markets open
+        // where they left off.
+        let bars = if instrument.kind == omacharts_engine::InstrumentKind::Fx {
+            omacharts_engine::repair_continuous_opens(&bars)
+        } else {
+            bars
+        };
         let bars = omacharts_engine::session::filter(
             &bars,
             *self.session.borrow(),

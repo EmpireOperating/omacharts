@@ -667,7 +667,7 @@ impl Watchlist {
             let RowKind::Entry { instrument, cells, .. } = kind else { continue };
             let quote = (self.quote)(instrument);
             for (column, label) in cells {
-                write_cell(label, *column, quote);
+                write_cell(label, *column, quote, instrument.kind);
             }
         }
     }
@@ -686,7 +686,7 @@ impl Watchlist {
         label.add_css_class("caption");
         label.set_xalign(1.0);
         label.set_width_chars(column.width_chars());
-        write_cell(&label, column, quote);
+        write_cell(&label, column, quote, instrument.kind);
         label
     }
 
@@ -849,7 +849,13 @@ fn parse_drag(value: &glib::Value) -> Option<(i64, Entry)> {
 }
 
 /// Put a quote into one value label, direction colouring included.
-fn write_cell(label: &gtk::Label, column: Column, quote: Option<Quote>) {
+fn write_cell(
+    label: &gtk::Label,
+    column: Column,
+    quote: Option<Quote>,
+    kind: omacharts_engine::InstrumentKind,
+) {
+    let decimals = quote.map(|q| decimals_for(q.last, kind)).unwrap_or(2);
     for class in ["change-up", "change-down", "change-flat", "dim-label"] {
         label.remove_css_class(class);
     }
@@ -859,8 +865,8 @@ fn write_cell(label: &gtk::Label, column: Column, quote: Option<Quote>) {
         return;
     };
     match column {
-        Column::Last => label.set_text(&format!("{:.*}", decimals_for(q.last), q.last)),
-        Column::Change => label.set_text(&format!("{:+.*}", decimals_for(q.last), q.change)),
+        Column::Last => label.set_text(&format!("{:.*}", decimals, q.last)),
+        Column::Change => label.set_text(&format!("{:+.*}", decimals, q.change)),
         Column::ChangePct => label.set_text(&format!("{:+.2}%", q.change_pct)),
         Column::Symbol => {}
     }
@@ -875,8 +881,8 @@ fn write_cell(label: &gtk::Label, column: Column, quote: Option<Quote>) {
 /// The engine owns the rule so the rail and the chart cannot give the same
 /// price two ways. There is no gridline here, so only the instrument has an
 /// opinion.
-fn decimals_for(price: f64) -> usize {
-    omacharts_engine::price_decimals(0.0, price)
+fn decimals_for(price: f64, kind: omacharts_engine::InstrumentKind) -> usize {
+    omacharts_engine::price_decimals(0.0, price, Some(kind))
 }
 
 /// Pop a real menu up where the pointer is.
@@ -936,20 +942,23 @@ mod tests {
     }
 
     #[test]
-    fn prices_get_the_decimals_they_deserve() {
-        assert_eq!(decimals_for(7722.72), 2, "an index");
-        assert_eq!(decimals_for(233.95), 2, "a stock");
-        assert_eq!(decimals_for(84908.12), 2, "bitcoin");
-        assert_eq!(decimals_for(1.1734), 4, "a currency pair");
-        assert_eq!(decimals_for(0.00042), 6, "a small-cap crypto");
+    fn prices_get_the_decimals_their_market_quotes() {
+        use omacharts_engine::InstrumentKind::*;
+        assert_eq!(decimals_for(7722.72, Index), 2, "an index");
+        assert_eq!(decimals_for(233.95, Equity), 2, "a stock");
+        assert_eq!(decimals_for(84908.12, Crypto), 2, "bitcoin");
+        assert_eq!(decimals_for(1.1248, Fx), 5, "a currency major");
+        assert_eq!(decimals_for(157.83, Fx), 3, "a yen pair");
+        assert_eq!(decimals_for(0.00042, Crypto), 6, "a small coin");
     }
 
     #[test]
     fn a_currency_move_does_not_round_away_to_nothing() {
         let change = 0.0008_f64;
-        let formatted = format!("{:+.*}", decimals_for(1.1734), change);
+        let formatted =
+            format!("{:+.*}", decimals_for(1.1734, omacharts_engine::InstrumentKind::Fx), change);
         assert_ne!(formatted, "+0.00");
-        assert_eq!(formatted, "+0.0008");
+        assert_eq!(formatted, "+0.00080");
     }
 
     #[test]
