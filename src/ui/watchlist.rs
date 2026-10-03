@@ -360,7 +360,7 @@ impl Watchlist {
 
     fn remove_entry(self: &Rc<Self>, section_id: i64, entry: &Entry) {
         self.store.remove_from_section(section_id, &entry.symbol, entry.suffix.as_deref());
-        self.rebuild();
+        self.changed();
     }
 
     /// Select the first symbol of the next or previous section.
@@ -401,6 +401,13 @@ impl Watchlist {
                 row.grab_focus();
             }
         }
+    }
+
+    /// The list itself changed: redraw it, and tell the bar widget so it does
+    /// not sit a refresh interval behind.
+    pub fn changed(self: &Rc<Self>) {
+        self.rebuild();
+        crate::bar_plugin::notify_changed();
     }
 
     /// Rebuild the whole rail. A few dozen rows, so there is nothing to gain
@@ -518,7 +525,7 @@ impl Watchlist {
             if !text.is_empty() {
                 this.store.rename_section(id, &text);
             }
-            this.rebuild();
+            this.changed();
         });
         let focus = gtk::EventControllerFocus::new();
         let stack_weak = stack.downgrade();
@@ -550,7 +557,7 @@ impl Watchlist {
         target.connect_drop(move |_, value, _, _| {
             let Some((from, moving)) = parse_drag(value) else { return false };
             this.store.move_entry_to_section(from, id, &moving, None);
-            this.rebuild();
+            this.changed();
             true
         });
         row.add_controller(target);
@@ -723,7 +730,7 @@ impl Watchlist {
                 return false;
             }
             this.store.move_entry_to_section(from, section_id, &moving, Some(&onto));
-            this.rebuild();
+            this.changed();
             true
         });
         row.add_controller(target);
@@ -746,7 +753,7 @@ impl Watchlist {
         let this = self.clone();
         self.search.present(&self.widget, &title, move |instrument| {
             this.store.add_to_section(section_id, &instrument.symbol, instrument.suffix.as_deref());
-            this.rebuild();
+            this.changed();
         });
     }
 
@@ -764,7 +771,7 @@ impl Watchlist {
             let name = entry.text().trim().to_string();
             if !name.is_empty() {
                 this.store.add_section(&name);
-                this.rebuild();
+                this.changed();
             }
             if let Some(popover) = popover_weak.upgrade() {
                 popover.popdown();
@@ -807,7 +814,7 @@ impl Watchlist {
         dialog.connect_response(None, move |_, response| {
             if response == "remove" {
                 this.store.remove_section(id);
-                this.rebuild();
+                this.changed();
             }
         });
         dialog.present(Some(anchor));

@@ -13,6 +13,7 @@ Item {
 
   property var settings: ({})
   property var sections: []
+  property var colors: null
   property string lastError: ""
   property double updatedAt: 0
   readonly property bool refreshing: watchlistProcess.running
@@ -80,6 +81,7 @@ Item {
       // Replaced only on a good answer: a failed refresh should leave the
       // last quotes on screen rather than blanking the bar.
       root.sections = parsed.sections
+      if (parsed.colors) root.colors = parsed.colors
       root.lastError = ""
       root.updatedAt = Date.now()
     }

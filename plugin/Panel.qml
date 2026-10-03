@@ -1,6 +1,8 @@
 import QtQuick
+import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -15,9 +17,11 @@ Panel {
   id: root
   moduleName: "jorgemanrubia.omacharts"
   ipcTarget: "jorgemanrubia.omacharts"
-  // Lets the panel be opened from a keybinding:
+  // Its own handler rather than the base one, so the app can push a refresh
+  // the moment the watchlist changes instead of leaving the bar a timer
+  // behind. Also lets the panel be opened from a keybinding:
   //   omarchy-shell jorgemanrubia.omacharts toggle
-  manageIpc: true
+  manageIpc: false
 
   property int selectedIndex: 0
 
@@ -52,9 +56,12 @@ Panel {
   readonly property color dim: Qt.darker(foreground, 1.6)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  // Up and down are the chart's own colours, so the bar agrees with the window.
-  readonly property color up: "#3fb950"
-  readonly property color down: "#f85149"
+  // Up and down come from the app, which derives them from the desktop theme.
+  // Hardcoding them here would leave the bar on last year's palette the moment
+  // anyone changed their theme.
+  readonly property var palette: service.colors
+  readonly property color up: palette && palette.up ? palette.up : "#3fb950"
+  readonly property color down: palette && palette.down ? palette.down : "#f85149"
 
   function colorFor(change) {
     var way = Model.direction(change)
@@ -73,6 +80,15 @@ Panel {
   }
 
   onOpenedChanged: if (opened) service.refreshIfStale()
+
+  IpcHandler {
+    target: "jorgemanrubia.omacharts"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): void { root.service.refresh() }
+  }
 
   BarIconButton {
     id: button
@@ -106,8 +122,10 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(330))
+    // Asked for what the rows want, capped — the scroller takes it from there.
     contentHeight: panel.fittedContentHeight(
-      content.implicitHeight + Style.space(12), Style.space(620))
+      Math.min(rowsColumn.implicitHeight + Style.space(100), Style.space(620)),
+      Style.space(620))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -163,6 +181,19 @@ Panel {
           font.pixelSize: Style.space(12)
           color: root.dim
         }
+
+        // A watchlist outgrows any panel worth putting on a bar, so the rows
+        // scroll and the title and the way out stay where you left them.
+        ScrollView {
+          Layout.fillWidth: true
+          Layout.fillHeight: true
+          clip: true
+          ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+
+          ColumnLayout {
+            id: rowsColumn
+            width: Math.max(0, parent.width)
+            spacing: Style.space(6)
 
         Repeater {
           model: root.rows
@@ -259,6 +290,8 @@ Panel {
                 }
               }
             }
+          }
+        }
           }
         }
 

@@ -747,6 +747,11 @@ impl Window {
             (theming.theme(), theming.bar_scheme())
         };
         self.chart.restyle(theme, scheme);
+        // Indicators without a colour of their own take one from the theme's
+        // palette, and that answer just changed. Repainting without asking
+        // again leaves them wearing the old theme's colours.
+        self.rebuild_indicator_legend();
+        self.redraw_current();
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.rebuild();
         }
@@ -961,6 +966,9 @@ impl Window {
     fn set_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
         *self.timeframe.borrow_mut() = timeframe;
         self.store.set_setting(LAST_TIMEFRAME, &timeframe.key());
+        // A promoted reset period changes with the resolution, so the legend
+        // has to be rewritten when the resolution does.
+        self.rebuild_indicator_legend();
         let instrument = self.current.borrow().clone();
         if let Some(instrument) = instrument {
             self.show(instrument);
@@ -1190,6 +1198,7 @@ impl Window {
         }
         let theme = self.theming.borrow().theme();
 
+        let timeframe = *self.timeframe.borrow();
         for (slot, indicator) in self.indicators.borrow().iter().enumerate() {
             let id = indicator.id;
             let colour = indicator.color(&theme, slot);
@@ -1211,7 +1220,7 @@ impl Window {
                 let _ = cr.fill();
             });
 
-            let label = gtk::Label::new(Some(&indicator.label()));
+            let label = gtk::Label::new(Some(&indicator.label_for(timeframe)));
             label.add_css_class("legend-indicator");
             label.set_xalign(0.0);
             if !indicator.visible {

@@ -21,6 +21,21 @@ fn plugins_dir(home: &Path) -> PathBuf {
     home.join(".config/omarchy/plugins")
 }
 
+/// Tell the bar widget the watchlist changed.
+///
+/// Fire and forget: the widget may not be installed, the shell may not be
+/// running, and neither is a problem worth reporting. Without this the bar
+/// sits a refresh interval behind every add and remove, which looks like it
+/// is not listening.
+pub fn notify_changed() {
+    let _ = std::process::Command::new("omarchy-shell")
+        .args([PLUGIN_ID, "refresh"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Is this an Omarchy desktop at all?
 pub fn available(home: &Path) -> bool {
     shell_config(home).is_file() && plugins_dir(home).is_dir()

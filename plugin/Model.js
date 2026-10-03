@@ -11,6 +11,10 @@ function parse(text) {
     var parsed = JSON.parse(text)
     return {
       sections: Array.isArray(parsed.sections) ? parsed.sections : [],
+      // The app derives these from the desktop theme and sends them with the
+      // data, so the bar and the window cannot disagree about what up looks
+      // like.
+      colors: parsed.colors || null,
       updatedAt: parsed.updatedAt || 0,
       error: parsed.error || ""
     }

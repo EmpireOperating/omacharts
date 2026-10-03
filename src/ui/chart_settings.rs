@@ -283,6 +283,22 @@ fn open_indicator_panel(
     list: &IndicatorList,
     id: u32,
 ) {
+    open_indicator_panel_for(window, dialog, list, id, false)
+}
+
+/// One indicator's panel.
+///
+/// `fresh` is the one that was just added: it gets Add and Cancel rather than
+/// Done, and cancelling takes it back off the chart. Settings apply as you
+/// change them either way — the buttons are about whether you meant to add it,
+/// not about committing a form.
+fn open_indicator_panel_for(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    id: u32,
+    fresh: bool,
+) {
     let indicators = window.indicators();
     let Some((slot, indicator)) =
         indicators.iter().enumerate().find(|(_, i)| i.id == id).map(|(s, i)| (s, i.clone()))
@@ -297,8 +313,34 @@ fn open_indicator_panel(
         page.add(&group);
     }
 
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(false);
+
+    let confirm = gtk::Button::with_label(if fresh { "Add" } else { "Done" });
+    confirm.add_css_class("suggested-action");
+    let dialog_for_confirm = dialog.clone();
+    confirm.connect_clicked(move |_| {
+        dialog_for_confirm.pop_subpage();
+    });
+    header.pack_end(&confirm);
+
+    if fresh {
+        let cancel = gtk::Button::with_label("Cancel");
+        let window_for_cancel = window.clone();
+        let dialog_for_cancel = dialog.clone();
+        let list_for_cancel = list.clone();
+        cancel.connect_clicked(move |_| {
+            let kept: Vec<Indicator> =
+                window_for_cancel.indicators().into_iter().filter(|i| i.id != id).collect();
+            window_for_cancel.set_indicators(kept);
+            rebuild_indicators(&window_for_cancel, &dialog_for_cancel, &list_for_cancel);
+            dialog_for_cancel.pop_subpage();
+        });
+        header.pack_start(&cancel);
+    }
+
     let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.add_top_bar(&header);
     toolbar.set_content(Some(&page));
 
     let subpage = adw::NavigationPage::new(&toolbar, &indicator.label());
@@ -812,8 +854,9 @@ fn pick_indicator(
         if let Some(popover) = popover_weak.upgrade() {
             popover.popdown();
         }
-        // Straight into its settings: you added it to set it up.
-        open_indicator_panel(&window, &dialog, &indicator_list, id);
+        // Straight into its settings: you added it to set it up, and that
+        // panel is where you say whether you meant it.
+        open_indicator_panel_for(&window, &dialog, &indicator_list, id, true);
     });
 
     // A GtkSearchEntry swallows Escape to clear itself, so closing hangs off

@@ -194,11 +194,31 @@ impl Indicator {
     }
 
     /// How the summary row labels it: "SMA 50", "VWAP · Session".
+    ///
+    /// The stored settings, which is what the settings page should show.
     pub fn label(&self) -> String {
+        self.describe(None)
+    }
+
+    /// What it is actually doing on this chart.
+    ///
+    /// A reset period too fine for the timeframe is promoted before computing,
+    /// so a session VWAP on a weekly chart is really a quarterly one. The
+    /// legend has to say the promoted period or it is describing a chart that
+    /// is not on screen.
+    pub fn label_for(&self, timeframe: Timeframe) -> String {
+        self.describe(Some(timeframe))
+    }
+
+    fn describe(&self, timeframe: Option<Timeframe>) -> String {
+        let effective = |reset: Reset| match timeframe {
+            Some(timeframe) => reset.effective_for(timeframe),
+            None => reset,
+        };
         match &self.params {
             Params::MovingAverage { period } => format!("{} {period}", self.kind.short_name()),
-            Params::Vwap { reset, .. } => format!("VWAP · {}", reset.label()),
-            Params::VolumeProfile { reset, .. } => format!("VP · {}", reset.label()),
+            Params::Vwap { reset, .. } => format!("VWAP · {}", effective(*reset).label()),
+            Params::VolumeProfile { reset, .. } => format!("VP · {}", effective(*reset).label()),
         }
     }
 
@@ -407,6 +427,26 @@ mod tests {
         assert_eq!(Indicator::new(2, Kind::Ema).label(), "EMA 21");
         assert_eq!(Indicator::new(3, Kind::Vwap).label(), "VWAP · Session");
         assert_eq!(Indicator::new(4, Kind::VolumeProfile).label(), "VP · Session");
+    }
+
+    #[test]
+    fn the_legend_names_the_period_actually_in_use() {
+        let vwap = Indicator::new(1, Kind::Vwap);
+        // Stored as a session reset, and that is what settings should show.
+        assert_eq!(vwap.label(), "VWAP · Session");
+        // But a session is one bar on a weekly chart, so it is promoted — and
+        // saying "Session" there would describe a chart nobody is looking at.
+        assert_eq!(vwap.label_for(Timeframe::weeks(1)), "VWAP · Quarter");
+        assert_eq!(vwap.label_for(Timeframe::days(1)), "VWAP · Month");
+        // Intraday, nothing is promoted and the two agree.
+        assert_eq!(vwap.label_for(Timeframe::minutes(5)), "VWAP · Session");
+    }
+
+    #[test]
+    fn a_moving_average_reads_the_same_everywhere() {
+        let sma = Indicator::new(1, Kind::Sma);
+        assert_eq!(sma.label(), "SMA 50");
+        assert_eq!(sma.label_for(Timeframe::weeks(1)), "SMA 50");
     }
 
     #[test]

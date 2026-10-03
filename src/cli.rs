@@ -115,8 +115,32 @@ pub fn watchlist_json(refresh_first: bool) -> String {
         }
         out.push_str("]}");
     }
-    out.push_str(&format!("],\"updatedAt\":{}}}", chrono::Utc::now().timestamp()));
+    out.push_str(&format!(
+        "],\"colors\":{},\"updatedAt\":{}}}",
+        colors_json(),
+        chrono::Utc::now().timestamp()
+    ));
     out
+}
+
+/// The direction colours, derived exactly as the app derives them.
+///
+/// Sent with the data rather than hardcoded in the widget, so the bar and the
+/// window cannot disagree about what up looks like — and so changing the
+/// desktop theme moves both.
+fn colors_json() -> String {
+    let home = crate::store::home();
+    let theme = omacharts_engine::omarchy::current(&home)
+        .unwrap_or_else(|| omacharts_engine::theme::builtin_themes()[0].clone());
+    let bars = omacharts_engine::theme_bars(&theme);
+    use omacharts_engine::Direction;
+    format!(
+        "{{\"up\":{},\"down\":{},\"flat\":{},\"foreground\":{}}}",
+        json_string(bars.outline(Direction::Up)),
+        json_string(bars.outline(Direction::Down)),
+        json_string(bars.outline(Direction::Flat)),
+        json_string(&theme.ui.text),
+    )
 }
 
 fn entry_json(store: &Store, provider: &Yahoo, instrument: &Instrument) -> String {
@@ -170,6 +194,16 @@ omacharts — market charts
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_payload_carries_the_themes_direction_colours() {
+        let parsed: serde_json::Value = serde_json::from_str(&colors_json()).unwrap();
+        for key in ["up", "down", "flat", "foreground"] {
+            let value = parsed[key].as_str().unwrap_or_default();
+            assert!(value.starts_with('#') && value.len() >= 7, "{key}: {value:?}");
+        }
+        assert_ne!(parsed["up"], parsed["down"], "up and down must differ");
+    }
 
     #[test]
     fn strings_are_escaped() {
