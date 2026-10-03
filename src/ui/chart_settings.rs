@@ -383,7 +383,7 @@ fn colour_row(
     let row = adw::ActionRow::new();
     row.set_title(title);
 
-    let default = gtk::Button::with_label("Set default");
+    let default = gtk::Button::with_label("Reset");
     default.add_css_class("flat");
     default.add_css_class("subtle-link");
     default.set_valign(gtk::Align::Center);
