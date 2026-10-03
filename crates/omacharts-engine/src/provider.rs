@@ -44,6 +44,13 @@ pub struct Capability {
     /// How far back the provider will go, in days. `None` means "as far as it
     /// has".
     pub history_days: Option<u32>,
+    /// The widest window a single request may ask for, in days.
+    ///
+    /// Separate from `history_days` because providers cap the two
+    /// independently: Yahoo keeps a month of one-minute bars but refuses to
+    /// hand over more than a week at a time, and asking for the month returns
+    /// nothing at all rather than an error.
+    pub max_request_days: Option<u32>,
 }
 
 pub trait Provider: Send + Sync {

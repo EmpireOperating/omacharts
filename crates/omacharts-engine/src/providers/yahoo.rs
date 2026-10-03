@@ -29,14 +29,20 @@ const AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
 /// Anything else is folded from one of these by the caller, which is why a
 /// three-minute chart works at all.
 const CAPABILITIES: &[Capability] = &[
-    Capability { timeframe: Timeframe::minutes(1), history_days: Some(30) },
-    Capability { timeframe: Timeframe::minutes(2), history_days: Some(60) },
-    Capability { timeframe: Timeframe::minutes(5), history_days: Some(60) },
-    Capability { timeframe: Timeframe::minutes(15), history_days: Some(60) },
-    Capability { timeframe: Timeframe::minutes(30), history_days: Some(60) },
-    Capability { timeframe: Timeframe::minutes(90), history_days: Some(60) },
-    Capability { timeframe: Timeframe::hours(1), history_days: Some(730) },
-    Capability { timeframe: Timeframe::days(1), history_days: None },
+    // One-minute bars are kept for a month but served a week at a time, and
+    // asking for the month returns an empty series rather than an error.
+    Capability {
+        timeframe: Timeframe::minutes(1),
+        history_days: Some(30),
+        max_request_days: Some(7),
+    },
+    Capability { timeframe: Timeframe::minutes(2), history_days: Some(60), max_request_days: None },
+    Capability { timeframe: Timeframe::minutes(5), history_days: Some(60), max_request_days: None },
+    Capability { timeframe: Timeframe::minutes(15), history_days: Some(60), max_request_days: None },
+    Capability { timeframe: Timeframe::minutes(30), history_days: Some(60), max_request_days: None },
+    Capability { timeframe: Timeframe::minutes(90), history_days: Some(60), max_request_days: None },
+    Capability { timeframe: Timeframe::hours(1), history_days: Some(730), max_request_days: None },
+    Capability { timeframe: Timeframe::days(1), history_days: None, max_request_days: None },
 ];
 
 /// Smallest gap between two requests the user is waiting on.
@@ -149,12 +155,15 @@ impl Yahoo {
     /// returning month-ends for the old part of the series and days only near
     /// the end. A chart built on that looks fine and is wrong.
     fn full_window_days(timeframe: Timeframe) -> i64 {
-        match CAPABILITIES.iter().find(|c| c.timeframe == timeframe).and_then(|c| c.history_days) {
-            Some(days) => days as i64,
-            // Daily and coarser: two decades is more than any chart needs and
-            // well inside the window Yahoo serves honestly.
-            None => 20 * 365,
-        }
+        let capability = CAPABILITIES.iter().find(|c| c.timeframe == timeframe);
+        // Daily and coarser: two decades is more than any chart needs and well
+        // inside the window Yahoo serves honestly.
+        let history = capability.and_then(|c| c.history_days).map(i64::from).unwrap_or(20 * 365);
+        let per_request = capability
+            .and_then(|c| c.max_request_days)
+            .map(i64::from)
+            .unwrap_or(i64::MAX);
+        history.min(per_request)
     }
 
     fn url(symbol: &str, timeframe: Timeframe, since: Option<i64>) -> Result<String, ProviderError> {
@@ -497,6 +506,34 @@ mod tests {
                 < Yahoo::full_window_days(Timeframe::days(1))
         );
         assert_eq!(Yahoo::full_window_days(Timeframe::minutes(5)), 60);
+    }
+
+    #[test]
+    fn a_request_never_exceeds_the_per_request_cap() {
+        // One-minute bars exist for a month but are served a week at a time.
+        // Asking for the month hands back an empty series, which is how a
+        // three-minute chart ended up saying "no data for this symbol".
+        assert_eq!(Yahoo::full_window_days(Timeframe::minutes(1)), 7);
+
+        let url = Yahoo::url("AAPL", Timeframe::minutes(1), None).unwrap();
+        let from: i64 = url
+            .split("period1=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .and_then(|v| v.parse().ok())
+            .expect("period1");
+        let days = (chrono::Utc::now().timestamp() - from) / 86_400;
+        assert!((6..=8).contains(&days), "asked for {days} days of one-minute bars");
+    }
+
+    #[test]
+    fn every_capability_can_be_asked_for_in_one_request() {
+        for capability in CAPABILITIES {
+            let days = Yahoo::full_window_days(capability.timeframe);
+            if let Some(cap) = capability.max_request_days {
+                assert!(days <= cap as i64, "{:?}", capability.timeframe);
+            }
+        }
     }
 
     #[test]

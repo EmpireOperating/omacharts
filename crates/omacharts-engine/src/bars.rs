@@ -94,6 +94,26 @@ impl Timeframe {
         self.key()
     }
 
+    /// Spelled out, for confirming what was typed.
+    ///
+    /// Reads back the *normalised* resolution, so typing "240" says "4 hours"
+    /// — which is both the honest answer and the thing worth knowing before
+    /// pressing Enter.
+    pub fn description(self) -> String {
+        let count = self.count.max(1);
+        let unit = match self.unit {
+            Unit::Minute => "minute",
+            Unit::Hour => "hour",
+            Unit::Day => "day",
+            Unit::Week => "week",
+        };
+        if count == 1 {
+            format!("1 {unit}")
+        } else {
+            format!("{count} {unit}s")
+        }
+    }
+
     /// Parse what someone typed.
     ///
     /// A bare number means minutes, the way every charting package has worked
@@ -342,6 +362,25 @@ mod tests {
                 native.key()
             );
         }
+    }
+
+    #[test]
+    fn resolutions_read_back_in_words() {
+        assert_eq!(Timeframe::minutes(1).description(), "1 minute");
+        assert_eq!(Timeframe::minutes(3).description(), "3 minutes");
+        assert_eq!(Timeframe::hours(1).description(), "1 hour");
+        assert_eq!(Timeframe::hours(4).description(), "4 hours");
+        assert_eq!(Timeframe::days(1).description(), "1 day");
+        assert_eq!(Timeframe::weeks(2).description(), "2 weeks");
+    }
+
+    #[test]
+    fn what_you_type_reads_back_normalised() {
+        // Typing 240 is typing four hours, and should say so.
+        assert_eq!(Timeframe::parse("240").unwrap().description(), "4 hours");
+        assert_eq!(Timeframe::parse("60").unwrap().description(), "1 hour");
+        assert_eq!(Timeframe::parse("3").unwrap().description(), "3 minutes");
+        assert_eq!(Timeframe::parse("7d").unwrap().description(), "1 week");
     }
 
     #[test]

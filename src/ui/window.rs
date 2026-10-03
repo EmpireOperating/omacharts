@@ -65,6 +65,8 @@ pub struct Window {
     series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
     timeframe: Rc<RefCell<Timeframe>>,
     symbol_button: gtk::Button,
+    /// The chart's legend: what this is, and at what resolution.
+    legend: gtk::Label,
     /// The preset strip, so a typed resolution can update it.
     timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
 }
@@ -93,6 +95,14 @@ impl Window {
         symbol_button.add_css_class("flat");
         symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
+        let readout = gtk::Label::new(None);
+        readout.add_css_class("readout-symbol");
+        readout.set_halign(gtk::Align::Start);
+        readout.set_valign(gtk::Align::Start);
+        readout.set_margin_start(14);
+        readout.set_margin_top(10);
+        readout.set_can_target(false);
+
         let this = Rc::new(Window {
             window: window.clone(),
             chart: chart.clone(),
@@ -112,6 +122,7 @@ impl Window {
                     .unwrap_or(Timeframe::days(1)),
             )),
             symbol_button,
+            legend: readout.clone(),
             timeframe_buttons: RefCell::new(None),
         });
 
@@ -124,7 +135,10 @@ impl Window {
         split.set_collapsed(false);
         split.set_show_sidebar(store.setting_bool(SHOW_WATCHLIST, true));
 
-        split.set_content(Some(&chart.area));
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&chart.area));
+        overlay.add_overlay(&readout);
+        split.set_content(Some(&overlay));
 
         let header = this.build_header(&split);
         let toolbar = adw::ToolbarView::new();
@@ -242,6 +256,7 @@ impl Window {
             move |instrument| this.show(instrument),
         )
     }
+
 
 
     fn wire_shortcuts(self: &Rc<Self>) {
@@ -399,9 +414,40 @@ impl Window {
         hint.add_css_class("caption");
         hint.set_xalign(0.0);
 
+        // Says what is about to happen, as it is typed. "240" reading back as
+        // "4 hours" is the whole reason this is here.
+        let preview = gtk::Label::new(None);
+        preview.add_css_class("caption");
+        preview.set_xalign(0.0);
+
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         content.append(&hint);
         content.append(&entry);
+        content.append(&preview);
+
+        let describe = |text: &str, preview: &gtk::Label| {
+            preview.remove_css_class("dim-label");
+            preview.remove_css_class("error");
+            match Timeframe::parse(text) {
+                Some(timeframe) => preview.set_text(&timeframe.description()),
+                None if text.trim().is_empty() => {
+                    preview.set_text("3, 15, 4h, 1D");
+                    preview.add_css_class("dim-label");
+                }
+                None => {
+                    preview.set_text("not a resolution");
+                    preview.add_css_class("error");
+                }
+            }
+        };
+        describe(&entry.text(), &preview);
+
+        let preview_weak = preview.downgrade();
+        entry.connect_changed(move |entry| {
+            if let Some(preview) = preview_weak.upgrade() {
+                describe(&entry.text(), &preview);
+            }
+        });
 
         let popover = gtk::Popover::new();
         popover.set_child(Some(&content));
@@ -476,6 +522,8 @@ impl Window {
         let native = timeframe.native();
 
         self.symbol_button.set_label(&instrument.display_symbol());
+        self.legend
+            .set_text(&format!("{}  ·  {}", instrument.display_symbol(), timeframe.label()));
         self.window
             .set_title(Some(&format!("{} · omacharts", instrument.display_symbol())));
         *self.current.borrow_mut() = Some(instrument.clone());
