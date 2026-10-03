@@ -456,7 +456,9 @@ impl Window {
                     this.show_shortcuts();
                     return glib::Propagation::Stop;
                 }
-                Key::w if ctrl => {
+                // Close and quit are the same thing while there is one
+                // window, but both keys exist because people reach for both.
+                Key::w | Key::q if ctrl => {
                     this.window.close();
                     return glib::Propagation::Stop;
                 }
@@ -691,6 +693,8 @@ impl Window {
                     ("Ctrl+K", "Find a symbol"),
                     ("Ctrl+I", "Chart settings and indicators"),
                     ("Ctrl+,", "Preferences"),
+                    ("Ctrl+?", "This list"),
+                    ("Ctrl+W · Ctrl+Q", "Close"),
                 ],
             ),
             (
