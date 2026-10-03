@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libadwaita-1-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked --bin omacharts
+      - name: Name the archive after the tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir="omacharts-$version-x86_64-linux"
+          mkdir "$dir"
+          cp target/release/omacharts LICENSE README.md "$dir/"
+          cp -r assets packaging "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+          sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            omacharts-*-x86_64-linux.tar.gz
+            omacharts-*-x86_64-linux.tar.gz.sha256
+          generate_release_notes: true

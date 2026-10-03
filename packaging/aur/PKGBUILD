@@ -1,0 +1,56 @@
+# Maintainer: Jorge Manrubia <jorge@37signals.com>
+pkgname=omacharts
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Fast, beautiful market charts for the Linux desktop'
+arch=('x86_64' 'aarch64')
+url='https://github.com/jorgemanrubia/omacharts'
+license=('MIT')
+depends=('gtk4' 'libadwaita')
+makedepends=('cargo')
+# SQLite and ring are compiled from C by build scripts. makepkg's default
+# link-time optimisation hands the linker GCC's LTO bytecode, which rustc's
+# linker does not read, and every one of their symbols comes back undefined.
+options=('!lto')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  # Vendor up front so the build itself needs no network, which is what
+  # makepkg expects and what a clean chroot enforces.
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --bin omacharts
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  # The engine's tests and the app's own; neither needs a display.
+  cargo test --frozen --release --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  local id='com.jorgemanrubia.Omacharts'
+
+  install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+  install -Dm644 "packaging/$id.desktop" "$pkgdir/usr/share/applications/$id.desktop"
+
+  for size in 16 24 32 48 64 128 256 512; do
+    install -Dm644 "assets/icons/${size}x${size}/$id.png" \
+      "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/$id.png"
+  done
+  install -Dm644 "assets/icons/$id.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/$id.svg"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

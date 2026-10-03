@@ -1,0 +1,16 @@
+pkgbase = omacharts
+	pkgdesc = Fast, beautiful market charts for the Linux desktop
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/jorgemanrubia/omacharts
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	depends = gtk4
+	depends = libadwaita
+	options = !lto
+	source = omacharts-0.1.0.tar.gz::https://github.com/jorgemanrubia/omacharts/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = SKIP
+
+pkgname = omacharts

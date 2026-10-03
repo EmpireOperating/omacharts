@@ -907,7 +907,15 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
         let popover = popover.clone();
         glib::idle_add_local_once(move || popover.unparent());
     });
-    popover.popup();
+    // Popped from an idle, not here. GtkPopoverMenu inserts its section
+    // separators from an idle after this callback returns, and a popup surface
+    // is sized once, when it is first shown — GTK never re-presents a mapped
+    // popover for a resize that started inside it. Showing it now measures a
+    // menu two separators short of itself, and the scroller inside every
+    // GtkPopoverMenu absorbs the difference by scrolling, which is why the last
+    // item sat under the bottom corner. The separator sync runs at a higher
+    // idle priority than this one, so by the time it pops it is whole.
+    glib::idle_add_local_once(move || popover.popup());
 }
 
 #[cfg(test)]

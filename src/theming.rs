@@ -265,26 +265,6 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
-/* GtkPopoverMenu keeps its items in a scroller, and the popover measures the
-   scroller rather than the padded box around it. So a menu that fits perfectly
-   is still a dozen pixels short of its own contents: it scrolls, and the last
-   item sits on the rounded corner with nothing under it.
-
-   The padding is one part of it and the one-pixel border above and below is
-   the other; neither is counted. Zeroing both takes the slack away, and the
-   breathing room goes on the items as margins instead, which every level does
-   count. Measured through the live widget tree with the real menu — two
-   submenus and three sections — requested and allocated heights now match
-   exactly, so there is nothing left to scroll. */
-popover.menu contents {
-  padding-top: 0;
-  padding-bottom: 0;
-  border-top-width: 0;
-  border-bottom-width: 0;
-}
-popover.menu modelbutton:first-child { margin-top: 6px; }
-popover.menu modelbutton:last-child { margin-bottom: 6px; }
-
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
    it is on — a chart that follows the rail says so by the icon being there at
    full strength, and one that does not says so by the icon being nearly gone.
