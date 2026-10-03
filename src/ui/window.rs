@@ -33,6 +33,67 @@ use gtk::gio;
 /// often enough to feel immediate.
 const THEME_POLL_SECONDS: u32 = 2;
 
+/// What Ctrl+B should do next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WatchlistAction {
+    Open,
+    Focus,
+    Close,
+}
+
+/// The whole of the Ctrl+B decision, kept separate from the widgets so it can
+/// be read — and tested — without one.
+fn watchlist_action(open: bool, focused: bool) -> WatchlistAction {
+    match (open, focused) {
+        (false, _) => WatchlistAction::Open,
+        (true, false) => WatchlistAction::Focus,
+        (true, true) => WatchlistAction::Close,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_key_walks_the_watchlist_open_focused_closed() {
+        // Closed: open it.
+        assert_eq!(watchlist_action(false, false), WatchlistAction::Open);
+        // Open, keyboard elsewhere: bring the keyboard here.
+        assert_eq!(watchlist_action(true, false), WatchlistAction::Focus);
+        // Open and focused: you are done with it.
+        assert_eq!(watchlist_action(true, true), WatchlistAction::Close);
+    }
+
+    #[test]
+    fn pressing_it_repeatedly_cycles_rather_than_sticking() {
+        // Starting closed and unfocused, three presses return to the start.
+        let mut open = false;
+        let mut focused = false;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let action = watchlist_action(open, focused);
+            seen.push(action);
+            match action {
+                WatchlistAction::Open => {
+                    open = true;
+                    focused = true;
+                }
+                WatchlistAction::Focus => focused = true,
+                WatchlistAction::Close => {
+                    open = false;
+                    focused = false;
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![WatchlistAction::Open, WatchlistAction::Close, WatchlistAction::Open],
+        );
+        assert!(open && focused, "back where we started");
+    }
+}
+
 /// One row of a popover menu, optionally ticked.
 fn menu_item(label: &str, selected: bool) -> gtk::Button {
     let tick = gtk::Image::from_icon_name(if selected {
@@ -367,18 +428,9 @@ impl Window {
                     this.open_search();
                     return glib::Propagation::Stop;
                 }
-                // Show and hide the rail. F9 is the platform's sidebar key.
+                // One key for the rail: open it, focus it, then close it.
                 Key::b if ctrl => {
                     this.toggle_watchlist();
-                    return glib::Propagation::Stop;
-                }
-                Key::F9 => {
-                    this.toggle_watchlist();
-                    return glib::Propagation::Stop;
-                }
-                // Move the keyboard between panes, the way F6 does elsewhere.
-                Key::F6 => {
-                    this.cycle_focus();
                     return glib::Propagation::Stop;
                 }
                 // Back to the chart, from wherever the keyboard ended up —
@@ -644,8 +696,7 @@ impl Window {
             (
                 "Watchlist",
                 &[
-                    ("Ctrl+B · F9", "Show or hide"),
-                    ("F6", "Move between chart and watchlist"),
+                    ("Ctrl+B", "Open, focus, then close"),
                     ("↑ ↓", "Next or previous symbol"),
                     ("Ctrl+↑ ↓", "Next or previous section"),
                     ("Delete", "Remove the symbol"),
@@ -1074,40 +1125,43 @@ impl Window {
         popover.popup();
     }
 
-    /// Show or hide the rail.
+    /// One key for the whole watchlist, doing the obvious next thing.
     ///
-    /// Opening it puts the keyboard on the selected symbol, because the reason
-    /// to open a watchlist is almost always to move through it — having to
-    /// click a row first to make the arrows work is a step nobody wants.
+    /// Closed, open it and put the keyboard on it — the reason to open a
+    /// watchlist is almost always to move through it. Open but not focused,
+    /// focus it. Open and focused, you are done with it, so close it.
     pub fn toggle_watchlist(self: &Rc<Self>) {
-        let showing = !self.split.shows_sidebar();
-        self.split.set_show_sidebar(showing);
-        self.store.set_setting_bool(SHOW_WATCHLIST, showing);
+        let focused = self
+            .watchlist
+            .borrow()
+            .as_ref()
+            .map(|w| w.has_focus())
+            .unwrap_or(false);
 
-        if showing {
-            if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
-                // The sidebar is not realised until the frame after it is
-                // revealed, so focus has to wait for it.
-                glib::idle_add_local_once(move || watchlist.grab_focus());
+        match watchlist_action(self.split.shows_sidebar(), focused) {
+            WatchlistAction::Open => {
+                self.split.set_show_sidebar(true);
+                self.store.set_setting_bool(SHOW_WATCHLIST, true);
+                if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
+                    // The sidebar is not realised until the frame after it is
+                    // revealed, so focus has to wait for it.
+                    glib::idle_add_local_once(move || watchlist.grab_focus());
+                }
             }
-        } else {
-            self.chart.area.grab_focus();
+            WatchlistAction::Focus => {
+                if let Some(watchlist) = self.watchlist.borrow().as_ref() {
+                    watchlist.grab_focus();
+                }
+            }
+            WatchlistAction::Close => {
+                self.split.set_show_sidebar(false);
+                self.store.set_setting_bool(SHOW_WATCHLIST, false);
+                self.chart.area.grab_focus();
+            }
         }
     }
 
-    /// Move the keyboard between the chart and the rail, the way F6 does
-    /// everywhere else on this desktop.
-    pub fn cycle_focus(self: &Rc<Self>) {
-        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
-        if watchlist.has_focus() {
-            self.chart.area.grab_focus();
-        } else {
-            if !self.split.shows_sidebar() {
-                self.toggle_watchlist();
-            }
-            watchlist.grab_focus();
-        }
-    }
+
 
     pub fn search(&self) -> Rc<SymbolSearch> {
         self.search.clone()
