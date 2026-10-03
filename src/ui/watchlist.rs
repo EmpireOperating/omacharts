@@ -110,7 +110,13 @@ pub fn columns_to_string(columns: &[Column]) -> String {
 #[derive(Clone)]
 enum RowKind {
     Header { section_id: i64 },
-    Entry { section_id: i64, entry: Entry, instrument: Instrument },
+    Entry {
+        section_id: i64,
+        entry: Entry,
+        instrument: Instrument,
+        /// The value labels, so a new quote can be written straight into them.
+        cells: Vec<(Column, gtk::Label)>,
+    },
 }
 
 pub struct Watchlist {
@@ -412,13 +418,14 @@ impl Watchlist {
                 let Some(instrument) = self.index.find(&entry.symbol, entry.suffix.as_deref()) else {
                     continue;
                 };
-                let row = self.entry_row(section.id, entry, instrument);
+                let (row, cells) = self.entry_row(section.id, entry, instrument);
                 row.set_visible(!section.collapsed);
                 self.list.append(&row);
                 kinds.push(RowKind::Entry {
                     section_id: section.id,
                     entry: entry.clone(),
                     instrument: instrument.clone(),
+                    cells,
                 });
             }
         }
@@ -578,7 +585,7 @@ impl Watchlist {
         section_id: i64,
         entry: &Entry,
         instrument: &Instrument,
-    ) -> gtk::ListBoxRow {
+    ) -> (gtk::ListBoxRow, Vec<(Column, gtk::Label)>) {
         let quote = (self.quote)(instrument);
         let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row_box.set_margin_top(4);
@@ -586,8 +593,13 @@ impl Watchlist {
         row_box.set_margin_start(12);
         row_box.set_margin_end(10);
 
+        let mut cells = Vec::new();
         for column in self.columns.borrow().iter() {
-            row_box.append(&self.cell(*column, instrument, quote));
+            let label = self.cell(*column, instrument, quote);
+            row_box.append(&label);
+            if *column != Column::Symbol {
+                cells.push((*column, label));
+            }
         }
 
         let row = gtk::ListBoxRow::new();
@@ -597,49 +609,40 @@ impl Watchlist {
 
         self.wire_row_removal(&row, section_id, entry);
         self.wire_row_reorder(&row, section_id, entry);
-        row
+        (row, cells)
+    }
+
+    /// Write new numbers into the rows that are already there.
+    ///
+    /// Prefetching means quotes arrive constantly, and rebuilding the rail for
+    /// each one tears down every widget — which loses the selection, steals
+    /// focus mid-keypress, and flickers. Only the values change, so only the
+    /// values are written.
+    pub fn refresh_quotes(&self) {
+        for kind in self.rows.borrow().iter() {
+            let RowKind::Entry { instrument, cells, .. } = kind else { continue };
+            let quote = (self.quote)(instrument);
+            for (column, label) in cells {
+                write_cell(label, *column, quote);
+            }
+        }
     }
 
     fn cell(&self, column: Column, instrument: &Instrument, quote: Option<Quote>) -> gtk::Label {
         let label = gtk::Label::new(None);
-        match column {
-            Column::Symbol => {
-                label.set_text(&instrument.display_symbol());
-                label.set_xalign(0.0);
-                label.set_hexpand(true);
-                label.add_css_class("symbol-row-ticker");
-                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                return label;
-            }
-            Column::Last => match quote {
-                Some(q) => label.set_text(&format!("{:.2}", q.last)),
-                None => label.set_text("–"),
-            },
-            Column::Change => match quote {
-                Some(q) => label.set_text(&format!("{:+.2}", q.change)),
-                None => label.set_text("–"),
-            },
-            Column::ChangePct => match quote {
-                Some(q) => label.set_text(&format!("{:+.2}%", q.change_pct)),
-                None => label.set_text(""),
-            },
+        if column == Column::Symbol {
+            label.set_text(&instrument.display_symbol());
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            label.add_css_class("symbol-row-ticker");
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            return label;
         }
-
         label.add_css_class("numeric");
         label.add_css_class("caption");
         label.set_xalign(1.0);
         label.set_width_chars(column.width_chars());
-
-        match quote {
-            // Direction is defined once, in the engine; this just wears it.
-            Some(q) if column != Column::Last => {
-                label.add_css_class(
-                    omacharts_engine::Direction::of_change(q.change).css_class(),
-                );
-            }
-            None => label.add_css_class("dim-label"),
-            _ => {}
-        }
+        write_cell(&label, column, quote);
         label
     }
 
@@ -801,6 +804,41 @@ impl Watchlist {
     }
 }
 
+/// Put a quote into one value label, direction colouring included.
+fn write_cell(label: &gtk::Label, column: Column, quote: Option<Quote>) {
+    for class in ["change-up", "change-down", "change-flat", "dim-label"] {
+        label.remove_css_class(class);
+    }
+    let Some(q) = quote else {
+        label.set_text(if column == Column::ChangePct { "" } else { "–" });
+        label.add_css_class("dim-label");
+        return;
+    };
+    match column {
+        Column::Last => label.set_text(&format!("{:.*}", decimals_for(q.last), q.last)),
+        Column::Change => label.set_text(&format!("{:+.*}", decimals_for(q.last), q.change)),
+        Column::ChangePct => label.set_text(&format!("{:+.2}%", q.change_pct)),
+        Column::Symbol => {}
+    }
+    if column != Column::Last {
+        // Direction is defined once, in the engine; this just wears it.
+        label.add_css_class(omacharts_engine::Direction::of_change(q.change).css_class());
+    }
+}
+
+/// How many decimals a price of this size deserves.
+///
+/// Two is right for a stock and absurd for a currency pair: EURUSD moving
+/// 0.0008 rounds to "+0.00", which reads as "nothing happened" when the
+/// percent column says otherwise.
+fn decimals_for(price: f64) -> usize {
+    match price.abs() {
+        p if p >= 20.0 => 2,
+        p if p >= 1.0 => 4,
+        _ => 6,
+    }
+}
+
 /// A flat row in one of the little context menus.
 fn menu_item(label: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
@@ -846,6 +884,23 @@ mod tests {
         let columns = vec![Column::Symbol, Column::Last, Column::ChangePct];
         let stored = columns_to_string(&columns);
         assert_eq!(parse_columns(Some(&stored)), columns);
+    }
+
+    #[test]
+    fn prices_get_the_decimals_they_deserve() {
+        assert_eq!(decimals_for(7722.72), 2, "an index");
+        assert_eq!(decimals_for(233.95), 2, "a stock");
+        assert_eq!(decimals_for(84908.12), 2, "bitcoin");
+        assert_eq!(decimals_for(1.1734), 4, "a currency pair");
+        assert_eq!(decimals_for(0.00042), 6, "a small-cap crypto");
+    }
+
+    #[test]
+    fn a_currency_move_does_not_round_away_to_nothing() {
+        let change = 0.0008_f64;
+        let formatted = format!("{:+.*}", decimals_for(1.1734), change);
+        assert_ne!(formatted, "+0.00");
+        assert_eq!(formatted, "+0.0008");
     }
 
     #[test]

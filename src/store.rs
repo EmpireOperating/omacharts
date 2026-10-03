@@ -128,6 +128,35 @@ impl Store {
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')",
             [],
         )?;
+        self.invalidate_stale_cache()?;
+        Ok(())
+    }
+
+    /// Throw away cached bars written by a version that fetched them wrongly.
+    ///
+    /// Bumped when the *content* of the cache stops being trustworthy rather
+    /// than when its shape changes — version 2 is the daily series fetched
+    /// with `range=max`, which Yahoo silently coarsened into month-ends. Those
+    /// bars look perfectly valid, so nothing else would ever notice them.
+    fn invalidate_stale_cache(&self) -> rusqlite::Result<()> {
+        const CACHE_VERSION: i64 = 2;
+        let stored: i64 = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'cache_version'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        if stored == CACHE_VERSION {
+            return Ok(());
+        }
+        self.conn.execute("DELETE FROM bar_series", [])?;
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('cache_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![CACHE_VERSION.to_string()],
+        )?;
         Ok(())
     }
 
@@ -851,6 +880,35 @@ mod tests {
         let entry = |s: &str| Entry { symbol: s.into(), suffix: None };
         store.move_entry(id, &entry("ZZ"), &entry("A"));
         assert_eq!(store.watchlist()[0].entries.len(), 1);
+    }
+
+    #[test]
+    fn a_cache_written_by_an_older_version_is_discarded_once() {
+        let file = std::env::temp_dir().join(format!("omacharts-cache-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+
+        {
+            let store = Store::open_at(&file).unwrap();
+            store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
+            store.set_setting("keep", "me");
+            // Pretend it was written before the fix.
+            store
+                .conn
+                .execute("UPDATE meta SET value = '1' WHERE key = 'cache_version'", [])
+                .unwrap();
+        }
+
+        let store = Store::open_at(&file).unwrap();
+        assert_eq!(store.cached_series(), 0, "stale bars are dropped");
+        assert_eq!(store.setting("keep").as_deref(), Some("me"), "settings survive");
+
+        // And a second open does not drop anything again.
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
+        drop(store);
+        let store = Store::open_at(&file).unwrap();
+        assert_eq!(store.cached_series(), 1);
+
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]

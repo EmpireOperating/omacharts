@@ -141,8 +141,13 @@ impl Window {
         this.wire_theme_polling();
 
         this.restore_last_symbol();
-        // Fill the rest of the rail while the first chart is being looked at.
-        this.prefetch_watchlist();
+
+        // Fill the rest of the rail, but not until the window is actually up.
+        // Queuing it walks the whole watchlist and asks the database what it
+        // already has, and none of that belongs between launch and first paint.
+        let deferred = this.clone();
+        glib::idle_add_local_once(move || deferred.prefetch_watchlist());
+
         this
     }
 
@@ -543,7 +548,7 @@ impl Window {
             // Something we prefetched. Not our chart, but the rail's change
             // column may now have numbers it did not have a moment ago.
             if let Some(watchlist) = self.watchlist.borrow().as_ref() {
-                watchlist.rebuild();
+                watchlist.refresh_quotes();
             }
             return;
         }
@@ -555,7 +560,7 @@ impl Window {
         self.chart.set_stale(stale);
         self.chart.set_loading(false);
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
-            watchlist.rebuild();
+            watchlist.refresh_quotes();
         }
     }
 

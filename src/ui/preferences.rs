@@ -233,9 +233,9 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
         row.add_suffix(&delete);
     } else {
         row.set_title("Make it yours");
-        row.set_subtitle("Duplicate this to edit its colours.");
+        row.set_subtitle("Edit the theme colours.");
 
-        let button = gtk::Button::with_label("Duplicate");
+        let button = gtk::Button::with_label("Customize");
         button.set_valign(gtk::Align::Center);
         let ctx = context.clone();
         button.connect_clicked(move |_| {

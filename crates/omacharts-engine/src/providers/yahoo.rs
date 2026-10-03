@@ -129,13 +129,18 @@ impl Yahoo {
         })
     }
 
-    /// The whole history Yahoo will serve at this resolution.
-    fn full_range(timeframe: Timeframe) -> &'static str {
+    /// How much history to ask for when we have none, in days.
+    ///
+    /// Never `range=max` for daily bars. Yahoo honours the interval only
+    /// within a bounded window: ask for everything and it quietly coarsens,
+    /// returning month-ends for the old part of the series and days only near
+    /// the end. A chart built on that looks fine and is wrong.
+    fn full_window_days(timeframe: Timeframe) -> i64 {
         match CAPABILITIES.iter().find(|c| c.timeframe == timeframe).and_then(|c| c.history_days) {
-            Some(days) if days <= 30 => "1mo",
-            Some(days) if days <= 60 => "60d",
-            Some(_) => "2y",
-            None => "max",
+            Some(days) => days as i64,
+            // Daily and coarser: two decades is more than any chart needs and
+            // well inside the window Yahoo serves honestly.
+            None => 20 * 365,
         }
     }
 
@@ -144,20 +149,15 @@ impl Yahoo {
             ProviderError::Unsupported(format!("{} is folded, not fetched", timeframe.label()))
         })?;
         let encoded = encode(symbol);
-        Ok(match since {
-            // An explicit window is how a tail fetch stays small: ask for what
-            // is missing, not for a range that re-sends what we already have.
-            Some(from) => {
-                let to = chrono::Utc::now().timestamp() + timeframe.seconds();
-                format!(
-                    "{ENDPOINT}/{encoded}?interval={interval}&period1={from}&period2={to}"
-                )
-            }
-            None => format!(
-                "{ENDPOINT}/{encoded}?interval={interval}&range={}",
-                Self::full_range(timeframe)
-            ),
-        })
+        // Always an explicit window. For a tail fetch it is how the request
+        // stays small; for a first fetch it is what stops Yahoo coarsening the
+        // series behind our back.
+        let now = chrono::Utc::now().timestamp();
+        let to = now + timeframe.seconds();
+        let from = since.unwrap_or_else(|| now - Self::full_window_days(timeframe) * 86_400);
+        Ok(format!(
+            "{ENDPOINT}/{encoded}?interval={interval}&period1={from}&period2={to}"
+        ))
     }
 }
 
@@ -287,7 +287,7 @@ impl Provider for Yahoo {
                     let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
                     throttle.record_success();
                     drop(throttle);
-                    return parse_chart(&body);
+                    return parse_chart(&body).map(|bars| collapse_days(bars, timeframe));
                 }
                 Err(ProviderError::RateLimited) => {
                     let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
@@ -362,6 +362,34 @@ pub fn parse_chart(body: &serde_json::Value) -> Result<Vec<Bar>, ProviderError> 
     Ok(bars)
 }
 
+/// Fold bars that land on the same day into one, for daily and coarser.
+///
+/// Yahoo appends a partial bar for the session in progress, stamped with the
+/// current time rather than the session's open. On a daily series that is a
+/// second bar for today, and anything comparing the last two closes — a
+/// change column, say — reads a change of exactly zero.
+fn collapse_days(bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
+    if !matches!(timeframe.unit, Unit::Day | Unit::Week) || bars.len() < 2 {
+        return bars;
+    }
+    let day_of = |ts: i64| ts.div_euclid(86_400);
+    let mut out: Vec<Bar> = Vec::with_capacity(bars.len());
+    for bar in bars {
+        match out.last_mut() {
+            // The later bar is the more complete one, but the day's extremes
+            // belong to the day, not to whichever slice arrived last.
+            Some(last) if day_of(last.ts) == day_of(bar.ts) => {
+                last.high = last.high.max(bar.high);
+                last.low = last.low.min(bar.low);
+                last.close = bar.close;
+                last.volume = last.volume.max(bar.volume);
+            }
+            _ => out.push(bar),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,15 +440,63 @@ mod tests {
     }
 
     #[test]
-    fn urls_encode_and_window_correctly() {
+    fn urls_encode_and_always_use_an_explicit_window() {
         let full = Yahoo::url("^GSPC", Timeframe::days(1), None).unwrap();
         assert!(full.contains("%5EGSPC"), "{full}");
-        assert!(full.contains("interval=1d") && full.contains("range=max"), "{full}");
+        assert!(full.contains("interval=1d"), "{full}");
+        // Never range=max: it makes Yahoo coarsen a daily series into
+        // month-ends without saying so.
+        assert!(!full.contains("range="), "{full}");
+        assert!(full.contains("period1=") && full.contains("period2="), "{full}");
 
         let tail = Yahoo::url("GC=F", Timeframe::hours(1), Some(1_700_000_000)).unwrap();
         assert!(tail.contains("GC%3DF"), "{tail}");
         assert!(tail.contains("period1=1700000000"), "{tail}");
-        assert!(!tail.contains("range="), "{tail}");
+    }
+
+    #[test]
+    fn intraday_asks_for_less_history_than_daily() {
+        assert!(
+            Yahoo::full_window_days(Timeframe::minutes(5))
+                < Yahoo::full_window_days(Timeframe::days(1))
+        );
+        assert_eq!(Yahoo::full_window_days(Timeframe::minutes(5)), 60);
+    }
+
+    #[test]
+    fn a_partial_bar_for_today_does_not_become_a_second_day() {
+        let bar = |ts, close, volume| Bar {
+            ts,
+            open: close,
+            high: close + 1.0,
+            low: close - 1.0,
+            close,
+            volume,
+        };
+        // Yesterday, today's session bar, and today's partial update.
+        let day = 86_400;
+        let bars = vec![
+            bar(10 * day, 100.0, 500.0),
+            bar(11 * day, 110.0, 400.0),
+            bar(11 * day + 50_000, 112.0, 450.0),
+        ];
+        let out = collapse_days(bars, Timeframe::days(1));
+        assert_eq!(out.len(), 2, "today must be one bar");
+        assert_eq!(out[1].close, 112.0, "the later close wins");
+        assert_eq!(out[1].high, 113.0, "the day keeps its extreme");
+        assert_eq!(out[1].volume, 450.0);
+
+        // And the change between the last two closes is no longer zero.
+        assert_ne!(out[1].close, out[0].close);
+    }
+
+    #[test]
+    fn intraday_bars_are_left_alone() {
+        let bar = |ts| Bar { ts, open: 1.0, high: 1.0, low: 1.0, close: 1.0, volume: 1.0 };
+        let bars = vec![bar(0), bar(300), bar(600)];
+        assert_eq!(collapse_days(bars.clone(), Timeframe::minutes(5)).len(), 3);
+        // But a daily series with three stamps on one day is one bar.
+        assert_eq!(collapse_days(bars, Timeframe::days(1)).len(), 1);
     }
 
     #[test]
