@@ -201,6 +201,9 @@ pub struct Window {
     symbol_button: gtk::Button,
     /// The chart's legend: what this is, and at what resolution.
     legend: gtk::Label,
+    /// The gear beside the legend. Also what the add-indicator picker hangs
+    /// off, since it sits where the indicators are listed.
+    legend_gear: gtk::Button,
     /// One row per indicator, under the legend.
     indicator_legend: gtk::Box,
     /// Regular or extended hours.
@@ -245,6 +248,12 @@ impl Window {
         readout.set_valign(gtk::Align::Center);
         readout.set_can_target(false);
 
+        let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
+        gear.add_css_class("flat");
+        gear.add_css_class("legend-gear");
+        gear.set_tooltip_text(Some("Chart settings"));
+        gear.set_valign(gtk::Align::Center);
+
         let split = adw::OverlaySplitView::new();
 
         let this = Rc::new(Window {
@@ -267,6 +276,7 @@ impl Window {
             )),
             symbol_button,
             legend: readout.clone(),
+            legend_gear: gear.clone(),
             indicator_legend: {
                 let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 rows.set_halign(gtk::Align::Start);
@@ -306,12 +316,6 @@ impl Window {
         split.set_sidebar(Some(&watchlist.widget));
         split.set_collapsed(false);
         split.set_show_sidebar(store.setting_bool(SHOW_WATCHLIST, true));
-
-        let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
-        gear.add_css_class("flat");
-        gear.add_css_class("legend-gear");
-        gear.set_tooltip_text(Some("Chart settings"));
-        gear.set_valign(gtk::Align::Center);
 
         let legend_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         legend_bar.append(&readout);
@@ -903,9 +907,9 @@ impl Window {
         crate::ui::chart_settings::ChartSettings::present_indicators(self, self.store.clone());
     }
 
-    /// Open the indicators page with the picker already up.
+    /// The indicator picker, on its own, beside the legend.
     pub fn add_indicator(self: &Rc<Self>) {
-        crate::ui::chart_settings::ChartSettings::present_add_indicator(self, self.store.clone());
+        crate::ui::chart_settings::add_indicator(self, &self.legend_gear);
     }
 
     /// Re-fold and repaint what is on screen, after something that changes
