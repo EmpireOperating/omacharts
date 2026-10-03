@@ -1,8 +1,8 @@
 //! The main window.
 //!
-//! A header bar, a chart, and a watchlist that can be hidden outright. The
-//! chart is the main character: the chrome is one row of controls and
-//! everything else is the drawing.
+//! A chart, a watchlist that can be hidden outright, and the window's own
+//! controls floating over its top-right corner. The chart is the main
+//! character: there is no header bar, and nothing but the drawing takes room.
 //!
 //! Nothing here waits on the network. Opening a symbol paints whatever the
 //! cache holds immediately, asks a worker for the gap, and repaints when the
@@ -344,12 +344,14 @@ impl Window {
 
         split.set_start_child(Some(&chart_host));
 
-        let header = this.build_header(&this.split);
-        let toolbar = adw::ToolbarView::new();
-        toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(split));
+        // No header bar: the window's controls float over its top-right
+        // corner, and the chart gets the row the bar used to take.
+        let corner = this.build_corner(&this.split);
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(split));
+        overlay.add_overlay(&corner);
         this.restore_sidebar_width();
-        window.set_content(Some(&toolbar));
+        window.set_content(Some(&overlay));
 
         // The first chart. Everything else is a split of this one.
         let first = this.new_pane(
@@ -873,20 +875,36 @@ impl Window {
             .find_map(|p| p.instrument.borrow().clone())
     }
 
-    fn build_header(self: &Rc<Self>, split: &gtk::Paned) -> adw::HeaderBar {
-        let header = adw::HeaderBar::new();
-
+    /// The window's own controls, over its top-right corner: the watchlist
+    /// toggle and the main menu.
+    ///
+    /// There is no header bar. It was a band across the whole window holding
+    /// an app name, two buttons and the desktop's close button — which on a
+    /// tiling desktop is furniture and everywhere else is Alt+F4 — and it cost
+    /// every chart in the top row forty-seven pixels. The cluster sits over
+    /// the rail when it is open, which is where the HIG puts a sidebar's menu,
+    /// and over the top-right chart when it is not.
+    ///
+    /// A `WindowHandle`, so the cluster is also what the window is dragged by,
+    /// double-clicked to maximise and right-clicked for the window menu —
+    /// everything a header bar's blank space did.
+    fn build_corner(self: &Rc<Self>, split: &gtk::Paned) -> gtk::WindowHandle {
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("win.preferences"));
         menu.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
         let menu_button = gtk::MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         menu_button.set_menu_model(Some(&menu));
-        header.pack_end(&menu_button);
+        menu_button.set_tooltip_text(Some("Main Menu"));
+        // F10 opens the primary menu, and the header bar used to be the only
+        // thing saying this menu was the primary one.
+        menu_button.set_primary(true);
+        menu_button.add_css_class("flat");
 
         let toggle = gtk::ToggleButton::new();
         toggle.set_icon_name("sidebar-show-right-symbolic");
         toggle.set_tooltip_text(Some("Watchlist (Ctrl+B)"));
+        toggle.add_css_class("flat");
         toggle.set_active(split.end_child().map(|rail| rail.is_visible()).unwrap_or(false));
         let split_weak = split.downgrade();
         let store = self.store.clone();
@@ -896,7 +914,6 @@ impl Window {
             }
             store.set_setting_bool(SHOW_WATCHLIST, toggle.is_active());
         });
-        header.pack_end(&toggle);
 
         // Ctrl+B needs to drive the button so its pressed state stays honest.
         let action = gio::SimpleAction::new("watchlist", None);
@@ -908,7 +925,16 @@ impl Window {
         });
         self.window.add_action(&action);
 
-        header
+        let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        cluster.add_css_class("window-corner");
+        cluster.append(&toggle);
+        cluster.append(&menu_button);
+
+        let handle = gtk::WindowHandle::new();
+        handle.set_child(Some(&cluster));
+        handle.set_halign(gtk::Align::End);
+        handle.set_valign(gtk::Align::Start);
+        handle
     }
 
     /// Fill the resolution strip from the list.
@@ -1505,6 +1531,7 @@ impl Window {
                     ("Ctrl+Shift+I", "Add an indicator"),
                     ("Ctrl+Shift+,", "Chart settings"),
                     ("Ctrl+,", "Preferences"),
+                    ("F10", "Main menu"),
                     ("? · Ctrl+?", "This list"),
                     ("Ctrl+W · Ctrl+Q", "Close"),
                 ],

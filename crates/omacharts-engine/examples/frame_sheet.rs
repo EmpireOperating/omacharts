@@ -149,11 +149,11 @@ fn intro(html: &mut String, count: usize) {
 <p>Two things need drawing, then. Something that says where one chart stops and the next starts, which is also the handle you drag to resize them. And something that says which pane is focused. Both have to be quiet, because the chart is the main character and a border around every pane would be furniture competing with the candles. Both have to come from the theme, so they look as much a part of Nord or Rose Pine as the window chrome does. And both have to survive the themes that make everything hard: the ones that are nearly black, the ones that are nearly white, the ones with a grey accent and the ones whose accent is the colour their candles already wear.</p>
 <h2>What is drawn</h2>
 <p>The idiom is the window manager's, because an Omarchy user already reads it without thinking: windows sit on a gap, and the focused one wears a thin border in the theme's accent.</p>
-<p>The <strong>gutter</strong> between two panes is {gutter}px of the window surface, the same colour the sidebar and the header sit on, so the gap between charts is the window showing through, as gaps between windows show the desktop. A theme that put its surface on top of its chart (Lupine's are a pixel value apart) has the gutter lifted off the chart until it reads as a gap. The gutter is the drag handle; under the pointer it takes on half the ring's colour, enough to say it moves.</p>
+<p>The <strong>gutter</strong> between two panes is {gutter}px of the window surface, the same colour the sidebar sits on, so the gap between charts is the window showing through, as gaps between windows show the desktop. A theme that put its surface on top of its chart (Lupine's are a pixel value apart) has the gutter lifted off the chart until it reads as a gap. The gutter is the drag handle; under the pointer it takes on half the ring's colour, enough to say it moves.</p>
 <p>The <strong>focus ring</strong> is a {ring}px border inside the edge of the focused pane, between the chart and the gutter. It keeps the accent's hue, but its lightness is chosen rather than taken: walked away from the chart background until the ring has <b>{contrast}:1</b> contrast on every theme, where the accent as-is would be 1.8:1 on Rose Pine and 5:1 on Hackerman. It then walks on, only as far as it must, to be at least <b>{furniture}</b> ΔE from the axis, the grid, the border and the crosshair, and at least <b>{candle}</b> from either candle colour, so that it can never be read as a line the chart drew. Solitude's accent at ring lightness is its axis line to the pixel; Lumon's is the blue its candles wear; the ring moves off both. Chroma is capped at 0.14, which is what keeps Lupine's and Catppuccin Latte's vivid accents from vibrating as a hairline.</p>
 <p>Unfocused panes get nothing at all. A lone chart, in a window that has not been split, gets nothing either.</p>
 <h2>How to read the pictures</h2>
-<p>Each theme is drawn as a tiled layout at one CSS pixel per pixel: a header, one tall pane and two stacked beside it, so both a vertical and a horizontal gutter appear. The left pane has focus and shows the crosshair; the gutter between the two right-hand panes is shown as it looks under the pointer. Candles, the grid, the axes, the labels, the overlay and the volume strip are the theme's own, drawn the way the chart draws them, including the hairline the chart rules above every indicator strip, which is the line a gutter must not be confused with. The <button type="button" onclick="document.body.classList.toggle('zoom')">2× button</button> doubles everything, which is roughly what a HiDPI screen does.</p>
+<p>Each theme is drawn as a tiled layout at one CSS pixel per pixel: one tall pane and two stacked beside it, so both a vertical and a horizontal gutter appear, with the window's own controls — the watchlist toggle and the main menu — in the top-right corner, where they sit over the chart when the watchlist is closed; there is no header bar. The left pane has focus and shows the crosshair; the gutter between the two right-hand panes is shown as it looks under the pointer. Candles, the grid, the axes, the labels, the overlay and the volume strip are the theme's own, drawn the way the chart draws them, including the hairline the chart rules above every indicator strip, which is the line a gutter must not be confused with. The <button type="button" onclick="document.body.classList.toggle('zoom')">2× button</button> doubles everything, which is roughly what a HiDPI screen does.</p>
 <p><strong>ΔE</strong> is the distance between two colours in OKLab, where black to white is 1.0 and about 0.02 is the least an eye can see. <strong>Contrast</strong> is the WCAG ratio against the chart background. Numbers below a guarantee are marked <span class="bad">like this</span>.</p>
 </section>
 "#,
@@ -256,19 +256,19 @@ fn section(html: &mut String, row: &Row) {
 // ---------------------------------------------------------------------------
 
 const WIDTH: f64 = 760.0;
-const HEADER: f64 = 30.0;
 const HEIGHT: f64 = 400.0;
 const PRICE_AXIS_W: f64 = 64.0;
 const TIME_AXIS_H: f64 = 24.0;
 
-/// A header strip, one tall pane on the left, two stacked on the right, the
-/// gutters between them, and the ring on the left one. Sized in whole pixels
+/// One tall pane on the left, two stacked on the right, the gutters between
+/// them, the ring on the left one, and the window's two corner controls over
+/// the top-right pane. Sized in whole pixels
 /// and drawn with crisp edges, so a one-pixel line is one pixel.
 fn mock(html: &mut String, row: &Row) {
     let ui = &row.theme.ui;
     let frame = &row.frame;
     let gutter = GUTTER_WIDTH as f64;
-    let total_h = HEADER + HEIGHT;
+    let total_h = HEIGHT;
     let _ = write!(
         html,
         r#"<svg width="{WIDTH}" height="{total_h}" viewBox="0 0 {WIDTH} {total_h}" shape-rendering="crispEdges" role="img" aria-label="Tiled charts for {name}">"#,
@@ -276,45 +276,63 @@ fn mock(html: &mut String, row: &Row) {
     );
     // The window: everything the panes do not cover is the surface.
     let _ = write!(html, r#"<rect x="0" y="0" width="{WIDTH}" height="{total_h}" fill="{}"/>"#, ui.surface);
-    // The header, as libadwaita draws it from the theme: toolbar colour, a
-    // hairline of the border colour under it.
-    let _ = write!(
-        html,
-        r#"<rect x="0" y="0" width="{WIDTH}" height="{HEADER}" fill="{}"/><rect x="0" y="{}" width="{WIDTH}" height="1" fill="{}"/>"#,
-        ui.surface_variant,
-        HEADER - 1.0,
-        ui.border
-    );
-    let _ = write!(
-        html,
-        r#"<text x="12" y="19" fill="{}" font-size="12" font-weight="600">omacharts</text>"#,
-        ui.text
-    );
 
     let left_w = ((WIDTH - gutter) / 2.0).floor();
     let right_x = left_w + gutter;
     let right_w = WIDTH - right_x;
     let top_h = ((HEIGHT - gutter) / 2.0).floor();
-    let bottom_y = HEADER + top_h + gutter;
+    let bottom_y = top_h + gutter;
     let bottom_h = HEIGHT - top_h - gutter;
 
     // Gutters. The band between the right-hand panes is shown hovered.
     let _ = write!(
         html,
-        r#"<rect x="{left_w}" y="{HEADER}" width="{gutter}" height="{HEIGHT}" fill="{}"/>"#,
+        r#"<rect x="{left_w}" y="0" width="{gutter}" height="{HEIGHT}" fill="{}"/>"#,
         frame.gutter
     );
     let _ = write!(
         html,
-        r#"<rect x="{right_x}" y="{}" width="{right_w}" height="{gutter}" fill="{}"/>"#,
-        HEADER + top_h,
+        r#"<rect x="{right_x}" y="{top_h}" width="{right_w}" height="{gutter}" fill="{}"/>"#,
         frame.gutter_hover
     );
 
-    pane(html, row, 0.0, HEADER, left_w, HEIGHT, "AAPL  ·  1D", 1, true);
-    pane(html, row, right_x, HEADER, right_w, top_h, "NVDA  ·  1H", 2, false);
+    pane(html, row, 0.0, 0.0, left_w, HEIGHT, "AAPL  ·  1D", 1, true);
+    pane(html, row, right_x, 0.0, right_w, top_h, "NVDA  ·  1H", 2, false);
     pane(html, row, right_x, bottom_y, right_w, bottom_h, "BTC-USD  ·  15m", 3, false);
+    corner(html, row);
     html.push_str("</svg>\n");
+}
+
+/// The window's controls, as `.window-corner` in `src/theming.rs` lays them
+/// out: two 24px buttons with 3px around them, at the window's top-right, in
+/// the text colour at three quarters strength. With the watchlist closed they
+/// sit over the top-right pane, on top of the price axis, which is the
+/// overlap this page exists to show.
+fn corner(html: &mut String, row: &Row) {
+    let ui = &row.theme.ui;
+    let cy = 15.0;
+    let menu_x = WIDTH - 6.0 - 12.0;
+    let toggle_x = menu_x - 24.0;
+    let _ = write!(html, r#"<g fill="{0}" stroke="{0}" opacity="0.75">"#, ui.text);
+    // The watchlist toggle: a frame with its right third filled.
+    let _ = write!(
+        html,
+        r#"<rect x="{}" y="{}" width="14" height="11" rx="1.5" fill="none" stroke-width="1.5"/><rect x="{}" y="{}" width="5" height="11" stroke="none"/>"#,
+        toggle_x - 7.0,
+        cy - 5.5,
+        toggle_x + 2.0,
+        cy - 5.5
+    );
+    // The main menu.
+    for dy in [-4.0, 0.0, 4.0] {
+        let _ = write!(
+            html,
+            r#"<rect x="{}" y="{}" width="14" height="1.5" stroke="none"/>"#,
+            menu_x - 7.0,
+            cy + dy - 0.75
+        );
+    }
+    html.push_str("</g>");
 }
 
 /// One pane: the ring if focused, then the chart inside it, drawn the way

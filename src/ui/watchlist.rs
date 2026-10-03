@@ -175,6 +175,8 @@ impl Watchlist {
         header.set_margin_end(10);
         header.set_margin_top(6);
         header.set_margin_bottom(4);
+        // Stepped down from under the window's corner controls: see `.rail-header`.
+        header.add_css_class("rail-header");
 
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_size_request(248, -1);

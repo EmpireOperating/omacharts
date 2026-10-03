@@ -324,6 +324,29 @@ popover.menu modelbutton:last-child { margin-bottom: 6px; }
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
 .legend-gear:hover { opacity: 1; }
 
+/* The window's own controls — the watchlist toggle and the main menu — sit
+   in the top-right corner, over whatever is there, instead of on a header
+   bar. A header bar is a 47px band across the whole window; it held two
+   buttons, a close button the window manager already provides for, and a
+   title every chart writes in its own corner, and the band cost the charts
+   that height. This is the HIG's overlaid-controls pattern: controls over
+   content, attached to the window's edge, quiet until the pointer is near
+   them. The box is also the window's drag handle, so the blank space at its
+   start is what a header bar would have offered to be grabbed by. */
+.window-corner {
+  padding: 3px 6px 3px 12px;
+  opacity: 0.75;
+  transition: opacity 120ms ease-out;
+}
+.window-corner:hover { opacity: 1; }
+.window-corner button { min-width: 24px; min-height: 24px; padding: 3px; }
+
+/* The corner sits over the rail when the rail is open, which is where the
+   HIG puts a sidebar's menu (above the sidebar list), so the rail's column
+   header steps down out from under it. The step is the corner's height: three
+   pixels of padding either side of a 24px button. */
+.rail-header { margin-top: 30px; }
+
 /* A way back to a default, without shouting about it. */
 .subtle-link {
   font-size: 0.85em;
