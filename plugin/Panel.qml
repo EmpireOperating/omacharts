@@ -15,9 +15,16 @@ Panel {
   id: root
   moduleName: "jorgemanrubia.omacharts"
   ipcTarget: "jorgemanrubia.omacharts"
-  manageIpc: false
+  // Lets the panel be opened from a keybinding:
+  //   omarchy-shell jorgemanrubia.omacharts toggle
+  manageIpc: true
 
   property int selectedIndex: 0
+
+  // The bar lays widgets out by their implicit size. Without this the root is
+  // zero by zero, the button anchored to it is too, and the icon never draws.
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
 
   // Stands in until the host has built the real one, so every binding below
   // can read the same shape rather than guarding for null.
@@ -228,13 +235,13 @@ Panel {
                 text: Model.formatPrice(modelData.last)
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(13)
-                color: modelData.hasQuote ? root.foreground : root.dim
+                color: modelData.hasQuote === true ? root.foreground : root.dim
               }
 
               // The pill is the thing you actually read, which is why it is
               // the only coloured object on the row.
               Rectangle {
-                visible: modelData.hasQuote
+                visible: modelData.hasQuote === true
                 implicitWidth: Math.max(Style.space(58), percent.implicitWidth + Style.space(12))
                 implicitHeight: Style.space(20)
                 radius: Style.space(5)
