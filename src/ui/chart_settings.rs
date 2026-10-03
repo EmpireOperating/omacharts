@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use omacharts_engine::indicators::{self, Kind, Params, Reset};
+use omacharts_engine::indicators::{self, Kind, LineStyle, Params, Reset, Stroke};
 use omacharts_engine::theme::ColorChoice;
 use omacharts_engine::{BarStyle, Indicator, Session};
 
@@ -271,8 +271,11 @@ fn open_indicator_panel(
     };
 
     let page = adw::PreferencesPage::new();
-    page.add(&appearance_group(window, dialog, list, slot, &indicator));
     page.add(&parameters_group(window, dialog, list, &indicator));
+    page.add(&appearance_group(window, dialog, list, slot, &indicator));
+    for group in band_groups(window, dialog, list, slot, &indicator) {
+        page.add(&group);
+    }
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
@@ -282,6 +285,7 @@ fn open_indicator_panel(
     dialog.push_subpage(&subpage);
 }
 
+/// The indicator's own line: colour, weight, pattern.
 fn appearance_group(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
@@ -290,71 +294,127 @@ fn appearance_group(
     indicator: &Indicator,
 ) -> adw::PreferencesGroup {
     let id = indicator.id;
-    let following = indicator.color.is_none();
     let group = adw::PreferencesGroup::new();
-    group.set_title("Appearance");
+    group.set_title("Line");
 
-    // Two states, said plainly. A colour either keeps up with the theme or it
-    // does not, and showing that as a switch beats a button whose label has to
-    // describe a state it is sitting next to.
-    let follow_row = adw::ActionRow::new();
-    follow_row.set_title("Automatic");
-    follow_row.set_subtitle(
-        "Takes the next colour from the theme palette, and changes with it",
-    );
-    let follow = gtk::Switch::new();
-    follow.set_active(following);
-    follow.set_valign(gtk::Align::Center);
-    follow_row.add_suffix(&follow);
-    group.add(&follow_row);
+    group.add(&colour_row(
+        window,
+        dialog,
+        list,
+        "Colour",
+        &indicator.color(&window.theme(), slot),
+        indicator.color.is_none(),
+        move |indicator, hex| {
+            indicator.color = hex.map(|hex| ColorChoice::Fixed { hex });
+        },
+        id,
+    ));
+    group.add(&stroke_rows(window, dialog, list, id, "", indicator.stroke, {
+        move |indicator: &mut Indicator, stroke: Stroke| indicator.stroke = stroke
+    }));
+    group
+}
 
-    let colour_row = adw::ActionRow::new();
-    colour_row.set_title("Colour");
-    colour_row.set_sensitive(!following);
+/// Width and style, as one expander-free pair of rows.
+///
+/// Returns the group they belong to so callers can drop it straight in.
+fn stroke_rows(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    id: u32,
+    prefix: &str,
+    stroke: Stroke,
+    apply: impl Fn(&mut Indicator, Stroke) + Clone + 'static,
+) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+
+    let width = adw::SpinRow::with_range(0.0, 5.0, 0.5);
+    width.set_title(&format!("{prefix}Width"));
+    width.set_subtitle("Zero draws no line");
+    width.set_digits(1);
+    width.set_value(stroke.width);
+    let window_for_width = window.clone();
+    let dialog_for_width = dialog.clone();
+    let list_for_width = list.clone();
+    let apply_width = apply.clone();
+    width.connect_value_notify(move |row| {
+        let value = row.value();
+        let apply = apply_width.clone();
+        update(&window_for_width, id, move |indicator| {
+            apply(indicator, Stroke { width: value, style: stroke.style });
+        });
+        rebuild_indicators(&window_for_width, &dialog_for_width, &list_for_width);
+    });
+    group.add(&width);
+
+    let names: Vec<&str> = LineStyle::ALL.iter().map(|s| s.label()).collect();
+    let style = adw::ComboRow::new();
+    style.set_title(&format!("{prefix}Style"));
+    style.set_model(Some(&gtk::StringList::new(&names)));
+    style.set_selected(LineStyle::ALL.iter().position(|s| *s == stroke.style).unwrap_or(0) as u32);
+    let window_for_style = window.clone();
+    let dialog_for_style = dialog.clone();
+    let list_for_style = list.clone();
+    style.connect_selected_notify(move |row| {
+        let Some(chosen) = LineStyle::ALL.get(row.selected() as usize).copied() else { return };
+        let apply = apply.clone();
+        update(&window_for_style, id, move |indicator| {
+            apply(indicator, Stroke { width: stroke.width, style: chosen });
+        });
+        rebuild_indicators(&window_for_style, &dialog_for_style, &list_for_style);
+    });
+    group.add(&style);
+    group
+}
+
+/// A colour row: a quiet way back to the default, then the swatch.
+#[allow(clippy::too_many_arguments)]
+fn colour_row(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    title: &str,
+    current: &str,
+    is_default: bool,
+    apply: impl Fn(&mut Indicator, Option<String>) + Clone + 'static,
+    id: u32,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+
+    let default = gtk::Button::with_label("Set default");
+    default.add_css_class("flat");
+    default.add_css_class("subtle-link");
+    default.set_valign(gtk::Align::Center);
+    default.set_tooltip_text(Some("Back to the colour the theme gives it"));
+    default.set_sensitive(!is_default);
+    let window_for_default = window.clone();
+    let dialog_for_default = dialog.clone();
+    let list_for_default = list.clone();
+    let apply_for_default = apply.clone();
+    default.connect_clicked(move |_| {
+        let apply = apply_for_default.clone();
+        update(&window_for_default, id, move |indicator| apply(indicator, None));
+        rebuild_indicators(&window_for_default, &dialog_for_default, &list_for_default);
+    });
+    row.add_suffix(&default);
 
     let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-    let current = indicator.color(&window.theme(), slot);
-    button.set_rgba(&colors::parse(&current));
+    button.set_rgba(&colors::parse(current));
     button.set_valign(gtk::Align::Center);
     button.add_css_class("swatch-button");
-
     let window_for_colour = window.clone();
     let dialog_for_colour = dialog.clone();
     let list_for_colour = list.clone();
     button.connect_rgba_notify(move |button| {
         let hex = colors::to_hex(&button.rgba());
-        update(&window_for_colour, id, |i| {
-            i.color = Some(ColorChoice::Fixed { hex: hex.clone() })
-        });
+        let apply = apply.clone();
+        update(&window_for_colour, id, move |indicator| apply(indicator, Some(hex.clone())));
         rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
     });
-    colour_row.add_suffix(&button);
-    group.add(&colour_row);
-
-    // Turning the switch off keeps whatever colour is on screen, so nothing
-    // jumps the moment you take control of it.
-    let window_for_follow = window.clone();
-    let dialog_for_follow = dialog.clone();
-    let list_for_follow = list.clone();
-    let colour_row_weak = colour_row.downgrade();
-    let button_weak = button.downgrade();
-    follow.connect_state_set(move |_, on| {
-        if let Some(row) = colour_row_weak.upgrade() {
-            row.set_sensitive(!on);
-        }
-        let pinned = button_weak.upgrade().map(|b| colors::to_hex(&b.rgba()));
-        update(&window_for_follow, id, |i| {
-            i.color = if on {
-                None
-            } else {
-                pinned.clone().map(|hex| ColorChoice::Fixed { hex })
-            };
-        });
-        rebuild_indicators(&window_for_follow, &dialog_for_follow, &list_for_follow);
-        glib::Propagation::Proceed
-    });
-
-    group
+    row.add_suffix(&button);
+    row
 }
 
 fn parameters_group(
@@ -384,29 +444,8 @@ fn parameters_group(
                 },
             ));
         }
-        Params::Vwap { reset, deviations } => {
+        Params::Vwap { reset, .. } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
-            for (band, multiple) in deviations.iter().enumerate() {
-                group.add(&spin_row(
-                    window,
-                    dialog,
-                    list,
-                    id,
-                    &format!("Band {}", band + 1),
-                    *multiple,
-                    0.1,
-                    6.0,
-                    0.1,
-                    move |indicator, value| {
-                        if let Params::Vwap { deviations, .. } = &mut indicator.params {
-                            while deviations.len() <= band {
-                                deviations.push(value);
-                            }
-                            deviations[band] = value;
-                        }
-                    },
-                ));
-            }
         }
         Params::VolumeProfile { reset, rows, value_area } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
@@ -445,6 +484,125 @@ fn parameters_group(
         }
     }
     group
+}
+
+/// One group per band, because every band has the same half-dozen choices and
+/// burying them in expanders only hides which are on.
+fn band_groups(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    slot: usize,
+    indicator: &Indicator,
+) -> Vec<adw::PreferencesGroup> {
+    let Params::Vwap { bands, .. } = &indicator.params else { return Vec::new() };
+    let id = indicator.id;
+    let line_colour = indicator.color(&window.theme(), slot);
+    let mut groups = Vec::new();
+
+    for (index, band) in bands.iter().enumerate() {
+        let group = adw::PreferencesGroup::new();
+        group.set_title(&format!("Band {}", index + 1));
+
+        let show = adw::ActionRow::new();
+        show.set_title("Show");
+        let switch = gtk::Switch::new();
+        switch.set_active(band.enabled);
+        switch.set_valign(gtk::Align::Center);
+        let window_for_show = window.clone();
+        let dialog_for_show = dialog.clone();
+        let list_for_show = list.clone();
+        switch.connect_state_set(move |_, on| {
+            update(&window_for_show, id, move |indicator| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.enabled = on;
+                    }
+                }
+            });
+            rebuild_indicators(&window_for_show, &dialog_for_show, &list_for_show);
+            glib::Propagation::Proceed
+        });
+        show.add_suffix(&switch);
+        group.add(&show);
+
+        let deviations = adw::SpinRow::with_range(0.1, 6.0, 0.1);
+        deviations.set_title("Standard deviations");
+        deviations.set_digits(1);
+        deviations.set_value(band.deviations);
+        let window_for_dev = window.clone();
+        let dialog_for_dev = dialog.clone();
+        let list_for_dev = list.clone();
+        deviations.connect_value_notify(move |row| {
+            let value = row.value();
+            update(&window_for_dev, id, move |indicator| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.deviations = value;
+                    }
+                }
+            });
+            rebuild_indicators(&window_for_dev, &dialog_for_dev, &list_for_dev);
+        });
+        group.add(&deviations);
+
+        let shaded = adw::ActionRow::new();
+        shaded.set_title("Shaded");
+        shaded.set_subtitle("Fill the area between this band's edges");
+        let fill = gtk::Switch::new();
+        fill.set_active(band.fill);
+        fill.set_valign(gtk::Align::Center);
+        let window_for_fill = window.clone();
+        let dialog_for_fill = dialog.clone();
+        let list_for_fill = list.clone();
+        fill.connect_state_set(move |_, on| {
+            update(&window_for_fill, id, move |indicator| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.fill = on;
+                    }
+                }
+            });
+            rebuild_indicators(&window_for_fill, &dialog_for_fill, &list_for_fill);
+            glib::Propagation::Proceed
+        });
+        shaded.add_suffix(&fill);
+        group.add(&shaded);
+
+        let current = band
+            .color
+            .as_ref()
+            .map(|c| c.resolve(&window.theme()))
+            .unwrap_or_else(|| line_colour.clone());
+        group.add(&colour_row(
+            window,
+            dialog,
+            list,
+            "Colour",
+            &current,
+            band.color.is_none(),
+            move |indicator, hex| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.color = hex.map(|hex| ColorChoice::Fixed { hex });
+                    }
+                }
+            },
+            id,
+        ));
+
+        groups.push(group);
+        groups.push(stroke_rows(window, dialog, list, id, "", band.stroke, {
+            move |indicator: &mut Indicator, stroke: Stroke| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.stroke = stroke;
+                    }
+                }
+            }
+        }));
+    }
+    groups
 }
 
 fn reset_row(

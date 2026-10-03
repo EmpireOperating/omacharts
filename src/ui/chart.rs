@@ -1114,20 +1114,18 @@ fn draw_indicator_fills(
     for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
         match &drawn.output {
             Output::Bands(bands) => {
-                // Rings between consecutive bands, never from the middle each
-                // time: stacked centre fills turn a cloud into a wash.
-                // Each ring is bounded by the band inside it; the innermost
-                // one is bounded by the line itself.
-                let mut inner: Option<(&Vec<Option<f64>>, &Vec<Option<f64>>)> = None;
-                for (index, (upper, lower)) in
-                    bands.upper.iter().zip(bands.lower.iter()).enumerate()
-                {
-                    let style = vwap::band_style(index);
-                    let (above, below) = inner.unwrap_or((&bands.vwap, &bands.vwap));
-                    colors::set_source_alpha(cr, &drawn.color, style.fill_alpha);
-                    fill_between(cr, upper, above, first, visible, plot_x, bar_w, to_y);
-                    fill_between(cr, below, lower, first, visible, plot_x, bar_w, to_y);
-                    inner = Some((upper, lower));
+                // One shaded region, between the first band's own edges: the
+                // area price spends most of its time in, drawn once. Shading
+                // every band stacks into a wash that says less than the lines.
+                for band in bands.bands.iter() {
+                    if !band.enabled || !band.fill {
+                        continue;
+                    }
+                    let colour = band_colour(band, drawn, &state.theme);
+                    colors::set_source_alpha(cr, &colour, vwap::FILL_ALPHA);
+                    fill_between(
+                        cr, &band.upper, &band.lower, first, visible, plot_x, bar_w, to_y,
+                    );
                 }
             }
             Output::Profiles(profiles) => {
@@ -1151,37 +1149,55 @@ fn draw_indicator_lines(
     for drawn in state.indicators.iter().filter(|d| d.indicator.visible) {
         match &drawn.output {
             Output::Line(values) => {
+                let stroke = drawn.indicator.stroke;
+                if stroke.is_hidden() {
+                    continue;
+                }
+                cr.save().ok();
+                cr.set_dash(&stroke.style.dashes(stroke.width), 0.0);
                 colors::set_source(cr, &drawn.color);
-                cr.set_line_width(1.4);
+                cr.set_line_width(stroke.width);
                 stroke_series(cr, values, first, visible, plot_x, bar_w, to_y);
+                cr.restore().ok();
             }
             Output::Bands(bands) => {
                 cr.save().ok();
-                for (index, (upper, lower)) in
-                    bands.upper.iter().zip(bands.lower.iter()).enumerate()
-                {
-                    let style = vwap::band_style(index);
-                    cr.set_dash(if style.dashed { &[3.0, 3.0] } else { &[] }, 0.0);
-                    cr.set_line_width(1.0);
-                    // The shaded band's edges are drawn in the chart's own
-                    // background, so the shading ends cleanly rather than being
-                    // boxed in by lines competing with the ones further out.
-                    if style.edge_is_background {
-                        colors::set_source(cr, &state.theme.ui.background);
-                    } else {
-                        colors::set_source_alpha(cr, &drawn.color, style.line_alpha);
+                for band in bands.bands.iter() {
+                    // A width of zero means no line, which is how a shaded
+                    // band gets a clean edge without painting one in the
+                    // background colour.
+                    if !band.enabled || band.stroke.is_hidden() {
+                        continue;
                     }
-                    stroke_series(cr, upper, first, visible, plot_x, bar_w, to_y);
-                    stroke_series(cr, lower, first, visible, plot_x, bar_w, to_y);
+                    cr.set_dash(&band.stroke.style.dashes(band.stroke.width), 0.0);
+                    cr.set_line_width(band.stroke.width);
+                    colors::set_source(cr, &band_colour(band, drawn, &state.theme));
+                    stroke_series(cr, &band.upper, first, visible, plot_x, bar_w, to_y);
+                    stroke_series(cr, &band.lower, first, visible, plot_x, bar_w, to_y);
                 }
                 cr.restore().ok();
-                colors::set_source(cr, &drawn.color);
-                cr.set_line_width(1.6);
-                stroke_series(cr, &bands.vwap, first, visible, plot_x, bar_w, to_y);
+
+                let stroke = drawn.indicator.stroke;
+                if !stroke.is_hidden() {
+                    cr.save().ok();
+                    cr.set_dash(&stroke.style.dashes(stroke.width), 0.0);
+                    colors::set_source(cr, &drawn.color);
+                    cr.set_line_width(stroke.width);
+                    stroke_series(cr, &bands.vwap, first, visible, plot_x, bar_w, to_y);
+                    cr.restore().ok();
+                }
             }
             Output::Profiles(_) => {}
         }
     }
+}
+
+/// A band's own colour, or the indicator's if it has none.
+fn band_colour(band: &vwap::BandSeries, drawn: &Drawn, theme: &Theme) -> String {
+    band.color
+        .as_ref()
+        .map(|choice| choice.resolve(theme))
+        .unwrap_or_else(|| drawn.color.clone())
 }
 
 /// One histogram per period, anchored where its period begins.

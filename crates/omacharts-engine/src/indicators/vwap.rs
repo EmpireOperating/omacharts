@@ -5,83 +5,112 @@
 //! running VWAP, which is the usual construction and the one that makes the
 //! first band mean "a normal distance from fair value today".
 
+use serde::{Deserialize, Serialize};
+
 use crate::bars::Bar;
+use crate::theme::ColorChoice;
+
+use super::{LineStyle, Stroke};
 
 use super::periods::Reset;
+
+/// One band's definition: how far out it sits, whether it is drawn, and what
+/// colour it is.
+///
+/// Bands are off by default. A VWAP is useful on its own, and three shaded
+/// envelopes appearing the moment you add one is more chart than anybody asked
+/// for.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Band {
+    /// Standard deviations from the line.
+    pub deviations: f64,
+    pub enabled: bool,
+    /// `None` follows the indicator's own colour.
+    pub color: Option<ColorChoice>,
+    /// Shade the area between this band's edges.
+    pub fill: bool,
+    pub stroke: Stroke,
+}
+
+/// What a VWAP ships with: three bands at the usual multiples, none drawn.
+///
+/// Their appearance differs by position, which is what the convention looks
+/// like: the inner band is a shaded area with no outline — a width of zero,
+/// rather than an outline painted in the background colour — the middle one is
+/// dashed, and the outer one is a plain line.
+pub fn default_bands() -> Vec<Band> {
+    vec![
+        Band {
+            deviations: 1.0,
+            enabled: false,
+            color: None,
+            fill: true,
+            stroke: Stroke::new(0.0, LineStyle::Solid),
+        },
+        Band {
+            deviations: 1.5,
+            enabled: false,
+            color: None,
+            fill: false,
+            stroke: Stroke::new(1.0, LineStyle::Dashed),
+        },
+        Band {
+            deviations: 2.0,
+            enabled: false,
+            color: None,
+            fill: false,
+            stroke: Stroke::new(1.0, LineStyle::Solid),
+        },
+    ]
+}
+
+/// One band, computed.
+#[derive(Clone, PartialEq, Debug)]
+pub struct BandSeries {
+    pub deviations: f64,
+    pub enabled: bool,
+    pub color: Option<ColorChoice>,
+    pub fill: bool,
+    pub stroke: Stroke,
+    pub upper: Vec<Option<f64>>,
+    pub lower: Vec<Option<f64>>,
+}
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Bands {
     pub vwap: Vec<Option<f64>>,
-    /// One series per deviation, innermost first.
-    pub upper: Vec<Vec<Option<f64>>>,
-    pub lower: Vec<Vec<Option<f64>>>,
-    pub deviations: Vec<f64>,
+    /// Innermost first. Disabled bands are still here, so a band's styling
+    /// follows its position rather than shifting when a neighbour is hidden.
+    pub bands: Vec<BandSeries>,
 }
 
-/// How one band is drawn.
+/// How much of the colour a shaded band gets.
 ///
-/// Only the first band is shaded, as a single region from its lower edge to
-/// its upper one — the area price spends most of its time in. The outer bands
-/// are lines alone: shading those as well stacks into a wash that says less
-/// than the lines do.
-///
-/// The first band's own edges are drawn in the chart background rather than in
-/// the band colour, so the shaded area ends cleanly instead of being boxed in
-/// by two lines competing with the ones further out.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct BandStyle {
-    pub line_alpha: f64,
-    /// Shading between this band's edges. Zero for every band but the first.
-    pub fill_alpha: f64,
-    pub dashed: bool,
-    /// Draw the edge in the chart's background colour rather than the band's.
-    pub edge_is_background: bool,
-}
-
-pub fn band_style(index: usize) -> BandStyle {
-    match index {
-        // The shaded band. Its edges disappear into the chart.
-        0 => BandStyle {
-            line_alpha: 1.0,
-            fill_alpha: 0.16,
-            dashed: false,
-            edge_is_background: true,
-        },
-        // The middle band is dashed, so it reads as a marker rather than a
-        // boundary.
-        1 => BandStyle {
-            line_alpha: 0.75,
-            fill_alpha: 0.0,
-            dashed: true,
-            edge_is_background: false,
-        },
-        // Everything further out is a plain line.
-        _ => BandStyle {
-            line_alpha: 0.75,
-            fill_alpha: 0.0,
-            dashed: false,
-            edge_is_background: false,
-        },
-    }
-}
+/// One number rather than a per-band setting: the shading is a backdrop, and
+/// letting it be turned up is letting it compete with the bars.
+pub const FILL_ALPHA: f64 = 0.16;
 
 /// Typical price — the midpoint the weighting is applied to.
 fn typical(bar: &Bar) -> f64 {
     (bar.high + bar.low + bar.close) / 3.0
 }
 
-pub fn compute(
-    bars: &[Bar],
-    reset: Reset,
-    session_origin: i64,
-    deviations: &[f64],
-) -> Bands {
+pub fn compute(bars: &[Bar], reset: Reset, session_origin: i64, bands: &[Band]) -> Bands {
     let n = bars.len();
     let mut out = Bands {
         vwap: vec![None; n],
-        upper: vec![vec![None; n]; deviations.len()],
-        lower: vec![vec![None; n]; deviations.len()],
-        deviations: deviations.to_vec(),
+        bands: bands
+            .iter()
+            .map(|band| BandSeries {
+                deviations: band.deviations,
+                enabled: band.enabled,
+                color: band.color.clone(),
+                fill: band.fill,
+                stroke: band.stroke,
+                upper: vec![None; n],
+                lower: vec![None; n],
+            })
+            .collect(),
     };
     if n == 0 {
         return out;
@@ -118,9 +147,11 @@ pub fn compute(
         // Floating point can push this a hair below zero on a flat period.
         let variance = (sum_wp2 / sum_w - vwap * vwap).max(0.0);
         let deviation = variance.sqrt();
-        for (b, multiple) in deviations.iter().enumerate() {
-            out.upper[b][i] = Some(vwap + deviation * multiple);
-            out.lower[b][i] = Some(vwap - deviation * multiple);
+        for band in out.bands.iter_mut() {
+            // Computed even when disabled: turning one on should not have to
+            // wait for a refetch, and the arithmetic is already done.
+            band.upper[i] = Some(vwap + deviation * band.deviations);
+            band.lower[i] = Some(vwap - deviation * band.deviations);
         }
     }
     out
@@ -134,16 +165,30 @@ mod tests {
         Bar { ts, open: price, high: price, low: price, close: price, volume }
     }
 
+    /// Bands at the given multiples, all drawn, for tests that check values.
+    fn bands(multiples: &[f64]) -> Vec<Band> {
+        multiples
+            .iter()
+            .map(|m| Band {
+                deviations: *m,
+                enabled: true,
+                color: None,
+                fill: false,
+                stroke: Stroke::default(),
+            })
+            .collect()
+    }
+
     const DAY: i64 = 86_400;
 
     #[test]
     fn vwap_of_one_price_is_that_price() {
         let bars = vec![bar(0, 10.0, 5.0), bar(60, 10.0, 7.0)];
-        let out = compute(&bars, Reset::Session, 0, &[1.0]);
+        let out = compute(&bars, Reset::Session, 0, &bands(&[1.0]));
         assert_eq!(out.vwap, vec![Some(10.0), Some(10.0)]);
         // No dispersion, so the bands sit on the line.
-        assert_eq!(out.upper[0][1], Some(10.0));
-        assert_eq!(out.lower[0][1], Some(10.0));
+        assert_eq!(out.bands[0].upper[1], Some(10.0));
+        assert_eq!(out.bands[0].lower[1], Some(10.0));
     }
 
     #[test]
@@ -183,14 +228,14 @@ mod tests {
     #[test]
     fn bands_widen_with_dispersion() {
         let bars = vec![bar(0, 10.0, 1.0), bar(60, 20.0, 1.0), bar(120, 30.0, 1.0)];
-        let out = compute(&bars, Reset::Session, 0, &[1.0, 2.0]);
+        let out = compute(&bars, Reset::Session, 0, &bands(&[1.0, 2.0]));
         let vwap = out.vwap[2].unwrap();
-        let one = out.upper[0][2].unwrap();
-        let two = out.upper[1][2].unwrap();
+        let one = out.bands[0].upper[2].unwrap();
+        let two = out.bands[1].upper[2].unwrap();
         assert!(one > vwap, "a band sits above the line");
         assert!((two - vwap) > (one - vwap), "two deviations is wider than one");
         // And symmetric.
-        assert!(((vwap - out.lower[0][2].unwrap()) - (one - vwap)).abs() < 1e-9);
+        assert!(((vwap - out.bands[0].lower[2].unwrap()) - (one - vwap)).abs() < 1e-9);
     }
 
     #[test]
@@ -206,46 +251,75 @@ mod tests {
         // Large prices with no movement are where the naive variance formula
         // goes slightly negative and the square root produces NaN.
         let bars: Vec<Bar> = (0..50).map(|i| bar(i * 60, 48_000.125, 3.0)).collect();
-        let out = compute(&bars, Reset::Session, 0, &[1.0]);
-        for value in out.upper[0].iter().flatten() {
+        let out = compute(&bars, Reset::Session, 0, &bands(&[1.0]));
+        for value in out.bands[0].upper.iter().flatten() {
             assert!(value.is_finite(), "band went non-finite: {value}");
         }
     }
 
     #[test]
     fn empty_input_produces_empty_output() {
-        let out = compute(&[], Reset::Session, 0, &[1.0]);
+        let out = compute(&[], Reset::Session, 0, &bands(&[1.0]));
         assert!(out.vwap.is_empty());
-        assert_eq!(out.upper.len(), 1);
-        assert!(out.upper[0].is_empty());
+        assert_eq!(out.bands.len(), 1);
+        assert!(out.bands[0].upper.is_empty());
     }
 
     #[test]
-    fn only_the_first_band_is_shaded() {
-        assert!(band_style(0).fill_alpha > 0.0);
-        for index in 1..6 {
-            assert_eq!(band_style(index).fill_alpha, 0.0, "band {index} should be a line only");
-        }
+    fn a_fresh_vwap_draws_no_bands() {
+        let defaults = default_bands();
+        assert_eq!(defaults.len(), 3);
+        assert_eq!(
+            defaults.iter().map(|b| b.deviations).collect::<Vec<_>>(),
+            vec![1.0, 1.5, 2.0]
+        );
+        assert!(defaults.iter().all(|b| !b.enabled), "bands start off");
+        assert!(defaults.iter().all(|b| b.color.is_none()), "and follow the line's colour");
     }
 
     #[test]
-    fn the_shaded_bands_edges_disappear_into_the_chart() {
-        assert!(band_style(0).edge_is_background);
-        assert!(!band_style(1).edge_is_background);
-        assert!(!band_style(2).edge_is_background);
+    fn disabled_bands_are_still_computed_and_still_hold_their_place() {
+        let bars = vec![bar(0, 10.0, 1.0), bar(60, 20.0, 1.0), bar(120, 30.0, 1.0)];
+        let mut set = bands(&[1.0, 1.5, 2.0]);
+        set[1].enabled = false;
+
+        let out = compute(&bars, Reset::Session, 0, &set);
+        assert_eq!(out.bands.len(), 3, "a hidden band keeps its slot");
+        assert!(!out.bands[1].enabled);
+        // Computed anyway, so switching it on needs no refetch.
+        assert!(out.bands[1].upper[2].is_some());
+        assert_eq!(out.bands[2].deviations, 2.0, "the outer band did not shift inward");
     }
 
     #[test]
-    fn the_middle_band_is_dashed_and_the_outer_one_is_not() {
-        assert!(!band_style(0).dashed, "the shaded band has no dashes to show");
-        assert!(band_style(1).dashed);
-        assert!(!band_style(2).dashed);
+    fn the_default_bands_follow_the_convention() {
+        let bands = default_bands();
+        // Inner: a shaded area with no outline at all, rather than one painted
+        // in the background colour.
+        assert!(bands[0].fill);
+        assert!(bands[0].stroke.is_hidden());
+        // Middle: dashed, so it reads as a marker rather than a boundary.
+        assert!(!bands[1].fill);
+        assert_eq!(bands[1].stroke.style, LineStyle::Dashed);
+        // Outer: a plain line.
+        assert!(!bands[2].fill);
+        assert_eq!(bands[2].stroke.style, LineStyle::Solid);
+        // And only one of them is shaded.
+        assert_eq!(bands.iter().filter(|b| b.fill).count(), 1);
     }
 
     #[test]
-    fn every_band_is_drawn_at_all() {
-        for index in 0..6 {
-            assert!(band_style(index).line_alpha > 0.0, "band {index}");
-        }
+    fn dash_patterns_scale_with_the_line() {
+        assert!(LineStyle::Solid.dashes(1.0).is_empty());
+        let thin = LineStyle::Dashed.dashes(1.0);
+        let thick = LineStyle::Dashed.dashes(3.0);
+        assert!(thick[0] > thin[0], "a thick dashed line needs longer dashes");
+        assert!(!LineStyle::Dotted.dashes(1.0).is_empty());
+    }
+
+    #[test]
+    fn a_zero_width_line_is_not_drawn() {
+        assert!(Stroke::new(0.0, LineStyle::Solid).is_hidden());
+        assert!(!Stroke::default().is_hidden());
     }
 }

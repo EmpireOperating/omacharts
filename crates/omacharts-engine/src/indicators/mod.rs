@@ -22,6 +22,65 @@ pub use periods::Reset;
 pub use profile::{Profile, ProfileRow};
 pub use vwap::Bands;
 
+/// How a line is drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LineStyle {
+    #[default]
+    Solid,
+    Dashed,
+    Dotted,
+}
+
+impl LineStyle {
+    pub const ALL: [LineStyle; 3] = [LineStyle::Solid, LineStyle::Dashed, LineStyle::Dotted];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LineStyle::Solid => "Solid",
+            LineStyle::Dashed => "Dashed",
+            LineStyle::Dotted => "Dotted",
+        }
+    }
+
+    /// The dash pattern, scaled to the line's width so a thick dashed line
+    /// does not come out as a row of squares.
+    pub fn dashes(self, width: f64) -> Vec<f64> {
+        let unit = width.max(1.0);
+        match self {
+            LineStyle::Solid => Vec::new(),
+            LineStyle::Dashed => vec![unit * 3.0, unit * 3.0],
+            LineStyle::Dotted => vec![unit, unit * 2.0],
+        }
+    }
+}
+
+/// A line's weight and pattern.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+pub struct Stroke {
+    /// Zero means the line is not drawn at all, which is how a shaded band
+    /// gets a clean edge without borrowing the background colour.
+    pub width: f64,
+    pub style: LineStyle,
+}
+
+impl Default for Stroke {
+    fn default() -> Stroke {
+        Stroke { width: 1.5, style: LineStyle::Solid }
+    }
+}
+
+impl Stroke {
+    pub const fn new(width: f64, style: LineStyle) -> Stroke {
+        Stroke { width, style }
+    }
+
+    /// Nothing to draw.
+    pub fn is_hidden(&self) -> bool {
+        self.width <= 0.0
+    }
+}
+
 /// The indicators we know how to compute.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,10 +137,7 @@ impl Kind {
         match self {
             Kind::Sma => Params::MovingAverage { period: 50 },
             Kind::Ema => Params::MovingAverage { period: 21 },
-            Kind::Vwap => Params::Vwap {
-                reset: Reset::Session,
-                deviations: vec![1.0, 1.5, 2.0],
-            },
+            Kind::Vwap => Params::Vwap { reset: Reset::Session, bands: vwap::default_bands() },
             Kind::VolumeProfile => Params::VolumeProfile {
                 reset: Reset::Session,
                 rows: 48,
@@ -99,8 +155,8 @@ pub enum Params {
     },
     Vwap {
         reset: Reset,
-        /// Standard deviations the bands sit at.
-        deviations: Vec<f64>,
+        /// Three bands, off until asked for.
+        bands: Vec<vwap::Band>,
     },
     VolumeProfile {
         reset: Reset,
@@ -120,12 +176,21 @@ pub struct Indicator {
     pub params: Params,
     /// Unset means "whatever the palette offers for my slot".
     pub color: Option<ColorChoice>,
+    #[serde(default)]
+    pub stroke: Stroke,
     pub visible: bool,
 }
 
 impl Indicator {
     pub fn new(id: u32, kind: Kind) -> Indicator {
-        Indicator { id, kind, params: kind.default_params(), color: None, visible: true }
+        Indicator {
+            id,
+            kind,
+            params: kind.default_params(),
+            color: None,
+            stroke: Stroke::default(),
+            visible: true,
+        }
     }
 
     /// How the summary row labels it: "SMA 50", "VWAP · Session".
@@ -176,11 +241,11 @@ pub fn compute(
     match (&indicator.kind, &indicator.params) {
         (Kind::Sma, Params::MovingAverage { period }) => Output::Line(sma(bars, *period)),
         (Kind::Ema, Params::MovingAverage { period }) => Output::Line(ema(bars, *period)),
-        (Kind::Vwap, Params::Vwap { reset, deviations }) => Output::Bands(vwap::compute(
+        (Kind::Vwap, Params::Vwap { reset, bands }) => Output::Bands(vwap::compute(
             bars,
             reset.effective_for(timeframe),
             session_origin,
-            deviations,
+            bands,
         )),
         (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area }) => {
             Output::Profiles(profile::compute(

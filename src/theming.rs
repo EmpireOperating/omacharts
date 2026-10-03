@@ -259,6 +259,16 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
 .legend-gear:hover { opacity: 1; }
 
+/* A way back to a default, without shouting about it. */
+.subtle-link {
+  font-size: 0.85em;
+  opacity: 0.6;
+  padding: 2px 6px;
+  min-height: 0;
+}
+.subtle-link:hover { opacity: 1; }
+.subtle-link:disabled { opacity: 0.25; }
+
 /* Keys read as keys. */
 .keycap {
   font-size: 0.85em;
