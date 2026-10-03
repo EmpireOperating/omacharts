@@ -43,6 +43,15 @@ every design decision below resolves in its favor.
 | Launch → interactive window | **< 200 ms** |
 | Network on any paint path | **never** |
 
+Startup is the exception, and it is worth being honest about. Measured on
+the development machine: an *empty* GTK4/libadwaita window takes 490 ms to
+present, and omacharts takes 508 ms. Everything the app does — opening the
+database, deriving the theme, building the symbol index, the watchlist and
+the chart, restoring the last symbol — costs 8 ms of that, and the app adds
+18 ms over an empty window in total. The rest is toolkit and compositor
+initialisation. There is nothing here to optimise; a launch budget below
+that floor would be a wish rather than a target.
+
 The rules that follow from this:
 
 - **Nothing already downloaded is ever downloaded again.**
