@@ -115,7 +115,6 @@ impl ChartPane {
         bar.append(&symbol_button);
         bar.append(&link);
         bar.append(&timeframe_label);
-        bar.append(&strip);
         bar.append(&gear);
 
         let indicator_legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -129,9 +128,19 @@ impl ChartPane {
         legend.append(&bar);
         legend.append(&indicator_legend);
 
+        // The strip sits across the top of its own chart rather than in the
+        // legend: centred it reads as this chart's own toolbar, where in the
+        // corner it was one more thing in a stack of names.
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        top.set_halign(gtk::Align::Center);
+        top.set_valign(gtk::Align::Start);
+        top.set_margin_top(6);
+        top.append(&strip);
+
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&view.area));
         overlay.add_overlay(&legend);
+        overlay.add_overlay(&top);
 
         // A box rather than the overlay itself, so the focus ring is drawn on
         // something that is not also the drawing surface.
