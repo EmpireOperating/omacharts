@@ -1289,6 +1289,23 @@ impl Window {
                 label.add_css_class("legend-indicator-hidden");
             }
 
+            // Double-clicking the name opens its settings, the same as the
+            // gear beside it. The name is the bigger target and the one you
+            // are already looking at.
+            let open_settings = gtk::GestureClick::new();
+            let this = self.clone();
+            open_settings.connect_pressed(move |_, presses, _, _| {
+                if presses < 2 {
+                    return;
+                }
+                crate::ui::chart_settings::ChartSettings::present_indicator(
+                    &this,
+                    this.store.clone(),
+                    id,
+                );
+            });
+            label.add_controller(open_settings);
+
             let toggle = gtk::Button::from_icon_name(if indicator.visible {
                 "view-reveal-symbolic"
             } else {
