@@ -678,6 +678,11 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let to_y = |price: f64| plot_y + price_h * (high - price) / (high - low);
     let bar_w = plot_w / visible as f64;
 
+    // One answer for how precisely prices are written, used by the gridlines,
+    // the last-price chip and the crosshair alike — a chart saying 1.1257 on
+    // one label and 1.13 on another is describing two different prices.
+    let decimals = decimals_for(nice_step(high - low, (price_h / 52.0).max(2.0) as usize));
+
     draw_price_grid(cr, state, plot_x, plot_w, plot_y, price_h, low, high, &to_y);
     draw_time_axis(cr, state, bars, plot_x, plot_w, height, bar_w, first);
     // Shaded things go under the candles; lines go over. A band drawn on top
@@ -690,7 +695,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         draw_volume(cr, state, bars, plot_x, bar_w, plot_y + price_h + 6.0, volume_h, max_volume);
     }
 
-    draw_last_price(cr, state, plot_x, plot_w, width, &to_y);
+    draw_last_price(cr, state, plot_x, plot_w, width, decimals, &to_y);
 
     if let Some((px, py)) = state.pointer {
         draw_crosshair(
@@ -790,12 +795,15 @@ fn draw_time_axis(
     // jitter as the view scrolls.
     let target = (plot_w / 90.0).max(2.0) as usize;
     let stride = (bars.len() / target).max(1);
-    // How much time is on screen decides the format. A decade of daily bars
-    // labelled "01 Jun" tells you nothing.
+    // How far apart two labels land decides the format: a decade of daily bars
+    // labelled "01 Jun" tells you nothing, and nine months of them all
+    // labelled "Mar 2026" tells you less.
     let span = match (bars.first(), bars.last()) {
         (Some(first), Some(last)) => last.ts - first.ts,
         _ => 0,
     };
+    let labels = (bars.len().div_ceil(stride)).max(1) as i64;
+    let tick_seconds = span / labels;
     for (i, bar) in bars.iter().enumerate() {
         if i % stride != 0 {
             continue;
@@ -809,7 +817,7 @@ fn draw_time_axis(
         cr.line_to(x.round() + 0.5, y);
         let _ = cr.stroke();
 
-        let label = format_axis_time(bar.ts, span, state.timeframe.is_intraday());
+        let label = format_axis_time(bar.ts, tick_seconds, state.timeframe.is_intraday());
         colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
         if let Ok(extents) = cr.text_extents(&label) {
             cr.move_to(x - extents.width() / 2.0, height - 7.0);
@@ -960,12 +968,14 @@ fn draw_volume(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_last_price(
     cr: &cairo::Context,
     state: &State,
     plot_x: f64,
     plot_w: f64,
     width: f64,
+    decimals: usize,
     to_y: &impl Fn(f64) -> f64,
 ) {
     let Some(last) = state.bars.last() else { return };
@@ -985,7 +995,15 @@ fn draw_last_price(
     let _ = cr.stroke();
     cr.restore().ok();
 
-    label_on_axis(cr, state, &format!("{:.2}", last.close), plot_x + plot_w, y, width, colour);
+    label_on_axis(
+        cr,
+        state,
+        &format!("{:.*}", decimals, last.close),
+        plot_x + plot_w,
+        y,
+        width,
+        colour,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1362,27 +1380,28 @@ pub fn decimals_for(step: f64) -> usize {
     places.clamp(0.0, 6.0) as usize
 }
 
-/// Label an axis tick at a detail the visible span justifies.
+/// Label an axis tick at the detail the gap between ticks justifies.
 ///
-/// `intraday` matters independently of the span: a week of 15-minute bars
-/// covers several days, but labelling the ticks by date alone repeats the same
-/// day over and over, since several ticks fall inside each one.
-fn format_axis_time(ts: i64, span_seconds: i64, intraday: bool) -> String {
+/// The gap, not the whole span: twenty ticks across nine months are about a
+/// fortnight apart, and labelling each of them "Mar 2026" prints the same
+/// thing three times running. What decides the format is how far apart two
+/// neighbouring labels are, because that is what has to tell them apart.
+fn format_axis_time(ts: i64, tick_seconds: i64, intraday: bool) -> String {
     use chrono::{Local, TimeZone};
     let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
         return String::new();
     };
     const DAY: i64 = 86_400;
     if intraday {
-        return match span_seconds {
-            s if s > 10 * DAY => dt.format("%d %b %H:%M").to_string(),
-            s if s > DAY => dt.format("%a %H:%M").to_string(),
+        return match tick_seconds {
+            t if t >= DAY => dt.format("%d %b %H:%M").to_string(),
+            t if t >= 4 * 3_600 => dt.format("%a %H:%M").to_string(),
             _ => dt.format("%H:%M").to_string(),
         };
     }
-    match span_seconds {
-        s if s > 1460 * DAY => dt.format("%Y").to_string(),
-        s if s > 160 * DAY => dt.format("%b %Y").to_string(),
+    match tick_seconds {
+        t if t >= 300 * DAY => dt.format("%Y").to_string(),
+        t if t >= 25 * DAY => dt.format("%b %Y").to_string(),
         _ => dt.format("%d %b").to_string(),
     }
 }
@@ -1432,17 +1451,17 @@ mod tests {
         // A fixed instant so the assertions do not drift with the clock.
         let ts = 1_700_000_000;
 
-        // Decades: years only. This is the case that read "01 Jun" for every
-        // tick before the span was taken into account.
-        let decade = format_axis_time(ts, 4000 * DAY, false);
+        // Years apart: years only. This is the case that read "01 Jun" for
+        // every tick before the spacing was taken into account.
+        let decade = format_axis_time(ts, 400 * DAY, false);
         assert_eq!(decade.len(), 4, "{decade}");
         assert!(decade.chars().all(|c| c.is_ascii_digit()), "{decade}");
 
         // A year or two: month and year.
-        assert!(format_axis_time(ts, 400 * DAY, false).contains("20"));
-        // A few weeks of daily bars: day and month, no year.
-        assert!(!format_axis_time(ts, 30 * DAY, false).contains("20"));
-        // Intraday always carries a clock, however long the span.
+        assert!(format_axis_time(ts, 30 * DAY, false).contains("20"), "months get a year");
+        // A few days apart: day and month, no year.
+        assert!(!format_axis_time(ts, 5 * DAY, false).contains("20"));
+        // Intraday always carries a clock, however far apart the ticks.
         assert!(format_axis_time(ts, 3600, true).contains(':'));
         assert!(format_axis_time(ts, 30 * DAY, true).contains(':'));
     }
@@ -1452,9 +1471,24 @@ mod tests {
         // A week of 15-minute bars: several ticks land inside each day, so a
         // date-only label printed the same thing over and over.
         const DAY: i64 = 86_400;
-        let span = 8 * DAY;
+        let tick = 6 * 3600;
         let labels: Vec<String> = (0..6)
-            .map(|i| format_axis_time(1_700_000_000 + i * 6 * 3600, span, true))
+            .map(|i| format_axis_time(1_700_000_000 + i * tick, tick, true))
+            .collect();
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "repeated labels: {labels:?}");
+    }
+
+    #[test]
+    fn months_of_daily_bars_do_not_repeat_the_same_month() {
+        // Nine months of daily bars labelled every fortnight: the case that
+        // printed "Mar 2026" three times in a row.
+        const DAY: i64 = 86_400;
+        let tick = 14 * DAY;
+        let labels: Vec<String> = (0..18)
+            .map(|i| format_axis_time(1_767_225_600 + i * tick, tick, false))
             .collect();
         let mut unique = labels.clone();
         unique.sort();
@@ -1465,9 +1499,9 @@ mod tests {
     #[test]
     fn two_ticks_a_decade_apart_get_different_labels() {
         const DAY: i64 = 86_400;
-        let span = 4000 * DAY;
-        let a = format_axis_time(1_200_000_000, span, false);
-        let b = format_axis_time(1_700_000_000, span, false);
+        let tick = 400 * DAY;
+        let a = format_axis_time(1_200_000_000, tick, false);
+        let b = format_axis_time(1_700_000_000, tick, false);
         assert_ne!(a, b);
     }
 
