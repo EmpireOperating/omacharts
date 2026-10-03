@@ -33,6 +33,23 @@ use gtk::gio;
 /// often enough to feel immediate.
 const THEME_POLL_SECONDS: u32 = 2;
 
+/// Read the stored resolution strip, falling back to the presets.
+fn parse_timeframes(stored: Option<&str>) -> Vec<Timeframe> {
+    let mut listed: Vec<Timeframe> = stored
+        .map(|s| s.split(',').filter_map(|k| Timeframe::parse(k.trim())).collect())
+        .unwrap_or_default();
+    listed.sort_by_key(|t| t.seconds());
+    listed.dedup();
+    if listed.is_empty() {
+        return Timeframe::PRESETS.to_vec();
+    }
+    listed
+}
+
+fn format_timeframes(listed: &[Timeframe]) -> String {
+    listed.iter().map(|t| t.key()).collect::<Vec<_>>().join(",")
+}
+
 /// What Ctrl+B should do next.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WatchlistAction {
@@ -54,6 +71,30 @@ fn watchlist_action(open: bool, focused: bool) -> WatchlistAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_resolution_strip_is_ordered_by_length() {
+        let listed = parse_timeframes(Some("1D,3m,4h,15"));
+        assert_eq!(
+            listed.iter().map(|t| t.key()).collect::<Vec<_>>(),
+            vec!["3m", "15m", "4h", "1D"]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_strip_falls_back_to_the_presets() {
+        assert_eq!(parse_timeframes(None), Timeframe::PRESETS.to_vec());
+        assert_eq!(parse_timeframes(Some("")), Timeframe::PRESETS.to_vec());
+        assert_eq!(parse_timeframes(Some("banana,,")), Timeframe::PRESETS.to_vec());
+    }
+
+    #[test]
+    fn the_strip_round_trips_and_does_not_repeat_itself() {
+        let listed = parse_timeframes(Some("3m,3m,60,1h"));
+        // "60" and "1h" are the same resolution.
+        assert_eq!(listed.iter().map(|t| t.key()).collect::<Vec<_>>(), vec!["3m", "1h"]);
+        assert_eq!(parse_timeframes(Some(&format_timeframes(&listed))), listed);
+    }
 
     #[test]
     fn one_key_walks_the_watchlist_open_focused_closed() {
@@ -130,6 +171,7 @@ const LAST_SUFFIX: &str = "last_suffix";
 const LAST_TIMEFRAME: &str = "last_timeframe";
 const SHOW_WATCHLIST: &str = "show_watchlist";
 pub const SETTING_BAR_STYLE: &str = "bar_style";
+const SETTING_TIMEFRAMES: &str = "timeframes";
 
 pub struct Window {
     pub window: adw::ApplicationWindow,
@@ -162,8 +204,10 @@ pub struct Window {
     bar_style: Rc<RefCell<BarStyle>>,
     /// The split, so the keyboard can show and hide the rail.
     split: adw::OverlaySplitView,
-    /// The preset strip, so a typed resolution can update it.
-    timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
+    /// The resolution strip and what is on it.
+    timeframe_strip: gtk::Box,
+    timeframe_buttons: RefCell<Vec<(Timeframe, gtk::ToggleButton)>>,
+    timeframes: RefCell<Vec<Timeframe>>,
 }
 
 impl Window {
@@ -236,7 +280,16 @@ impl Window {
                     .and_then(|k| Session::from_key(&k))
                     .unwrap_or_default(),
             )),
-            timeframe_buttons: RefCell::new(None),
+            timeframe_strip: {
+                let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                strip.add_css_class("linked");
+                strip.add_css_class("timeframe-strip");
+                strip
+            },
+            timeframe_buttons: RefCell::new(Vec::new()),
+            timeframes: RefCell::new(parse_timeframes(
+                store.setting(SETTING_TIMEFRAMES).as_deref(),
+            )),
         });
 
         let watchlist = this.build_watchlist();
@@ -299,7 +352,15 @@ impl Window {
         let this = self.clone();
         self.symbol_button.connect_clicked(move |_| this.open_search());
         header.pack_start(&self.symbol_button);
-        header.set_title_widget(Some(&self.build_timeframes()));
+        self.rebuild_timeframes();
+        header.set_title_widget(Some(&self.timeframe_strip));
+
+        // Right-clicking the strip edits what is on it.
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let this = self.clone();
+        menu.connect_pressed(move |_, _, _, _| this.edit_timeframes());
+        self.timeframe_strip.add_controller(menu);
 
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("win.preferences"));
@@ -336,21 +397,24 @@ impl Window {
         header
     }
 
-    fn build_timeframes(self: &Rc<Self>) -> gtk::Box {
-        let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        strip.add_css_class("linked");
-        strip.add_css_class("timeframe-strip");
-
+    /// Fill the resolution strip from the list.
+    fn rebuild_timeframes(self: &Rc<Self>) {
+        while let Some(child) = self.timeframe_strip.first_child() {
+            self.timeframe_strip.remove(&child);
+        }
+        let current = *self.timeframe.borrow();
         let mut first: Option<gtk::ToggleButton> = None;
         let mut buttons = Vec::new();
-        for timeframe in Timeframe::PRESETS {
+
+        for timeframe in self.timeframes.borrow().iter().copied() {
             let button = gtk::ToggleButton::with_label(&timeframe.label());
             button.add_css_class("flat");
+            button.set_tooltip_text(Some(&timeframe.description()));
             match &first {
                 Some(anchor) => button.set_group(Some(anchor)),
                 None => first = Some(button.clone()),
             }
-            button.set_active(timeframe == *self.timeframe.borrow());
+            button.set_active(timeframe == current);
 
             let this = self.clone();
             button.connect_toggled(move |button| {
@@ -358,11 +422,113 @@ impl Window {
                     this.set_timeframe(timeframe);
                 }
             });
-            strip.append(&button);
+            self.timeframe_strip.append(&button);
             buttons.push((timeframe, button));
         }
-        *self.timeframe_buttons.borrow_mut() = Some(buttons);
-        strip
+        *self.timeframe_buttons.borrow_mut() = buttons;
+    }
+
+    /// Put a resolution on the strip, in the place its length earns it.
+    fn remember_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
+        {
+            let mut timeframes = self.timeframes.borrow_mut();
+            if timeframes.contains(&timeframe) {
+                return;
+            }
+            timeframes.push(timeframe);
+            timeframes.sort_by_key(|t| t.seconds());
+        }
+        self.store
+            .set_setting(SETTING_TIMEFRAMES, &format_timeframes(&self.timeframes.borrow()));
+        self.rebuild_timeframes();
+    }
+
+    /// The modal for editing the strip.
+    fn edit_timeframes(self: &Rc<Self>) {
+        let page = adw::PreferencesPage::new();
+        let group = adw::PreferencesGroup::new();
+        group.set_title("Resolutions");
+        group.set_description(Some(
+            "What the strip offers. Typing a resolution on the chart adds it here too.",
+        ));
+
+        let rebuild: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("3m, 45m, 2h, 1D"));
+        entry.set_valign(gtk::Align::Center);
+        let add_row = adw::ActionRow::new();
+        add_row.set_title("Add");
+        add_row.add_suffix(&entry);
+        group.add(&add_row);
+
+        let rows: Rc<RefCell<Vec<adw::ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+        let fill = {
+            let this = self.clone();
+            let group = group.clone();
+            let rows = rows.clone();
+            let rebuild = rebuild.clone();
+            move || {
+                for row in rows.borrow_mut().drain(..) {
+                    group.remove(&row);
+                }
+                let listed: Vec<Timeframe> = this.timeframes.borrow().clone();
+                for timeframe in listed {
+                    let row = adw::ActionRow::new();
+                    row.set_title(&timeframe.label());
+                    row.set_subtitle(&timeframe.description());
+
+                    let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+                    remove.add_css_class("flat");
+                    remove.set_valign(gtk::Align::Center);
+                    // The last one cannot go: a strip with nothing on it is a
+                    // chart with no way back to a resolution.
+                    remove.set_sensitive(this.timeframes.borrow().len() > 1);
+
+                    let this = this.clone();
+                    let rebuild = rebuild.clone();
+                    remove.connect_clicked(move |_| {
+                        this.timeframes.borrow_mut().retain(|t| *t != timeframe);
+                        this.store.set_setting(
+                            SETTING_TIMEFRAMES,
+                            &format_timeframes(&this.timeframes.borrow()),
+                        );
+                        this.rebuild_timeframes();
+                        if let Some(rebuild) = rebuild.borrow().as_ref() {
+                            rebuild();
+                        }
+                    });
+                    row.add_suffix(&remove);
+                    group.add(&row);
+                    rows.borrow_mut().push(row);
+                }
+            }
+        };
+        fill();
+        *rebuild.borrow_mut() = Some(Box::new(fill));
+
+        let this = self.clone();
+        let rebuild_on_add = rebuild.clone();
+        entry.connect_activate(move |entry| {
+            let Some(timeframe) = Timeframe::parse(&entry.text()) else { return };
+            this.remember_timeframe(timeframe);
+            entry.set_text("");
+            if let Some(rebuild) = rebuild_on_add.borrow().as_ref() {
+                rebuild();
+            }
+        });
+
+        page.add(&group);
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&adw::HeaderBar::new());
+        toolbar.set_content(Some(&page));
+
+        let dialog = adw::Dialog::new();
+        dialog.set_title("Resolutions");
+        dialog.set_content_width(420);
+        dialog.set_content_height(520);
+        dialog.set_child(Some(&toolbar));
+        dialog.present(Some(&self.window));
     }
 
     fn build_watchlist(self: &Rc<Self>) -> Rc<Watchlist> {
@@ -763,11 +929,12 @@ impl Window {
     /// Switch resolution from somewhere other than the strip, keeping the
     /// strip's buttons honest about what is being shown.
     fn apply_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
+        // A resolution you typed belongs on the strip: you asked for it once,
+        // you will ask for it again.
+        self.remember_timeframe(timeframe);
         self.set_timeframe(timeframe);
-        if let Some(buttons) = self.timeframe_buttons.borrow().as_ref() {
-            for (preset, button) in buttons {
-                button.set_active(*preset == timeframe);
-            }
+        for (listed, button) in self.timeframe_buttons.borrow().iter() {
+            button.set_active(*listed == timeframe);
         }
     }
 
