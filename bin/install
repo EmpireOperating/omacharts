@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Put omacharts in the application menu, pointed at the working tree.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+id="com.jorgemanrubia.Omacharts"
+
+apps="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+icons="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor"
+mkdir -p "$apps"
+
+for size in 16 24 32 48 64 128 256 512; do
+  dir="$icons/${size}x${size}/apps"
+  mkdir -p "$dir"
+  install -m644 "$root/assets/icons/${size}x${size}/$id.png" "$dir/$id.png"
+done
+mkdir -p "$icons/scalable/apps"
+install -m644 "$root/assets/icons/$id.svg" "$icons/scalable/apps/$id.svg"
+
+sed "s|^Exec=.*|Exec=$root/bin/omacharts|" \
+  "$root/packaging/$id.desktop" > "$apps/$id.desktop"
+chmod 644 "$apps/$id.desktop"
+
+gtk4-update-icon-cache -qtf "$icons" 2>/dev/null || true
+update-desktop-database -q "$apps" 2>/dev/null || true
+
+echo "Installed. Launches $root/bin/omacharts, which rebuilds before running."

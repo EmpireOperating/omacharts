@@ -875,7 +875,13 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-    popover.connect_closed(|popover| popover.unparent());
+    // Clicking an item closes the popover and *then* activates its action, so
+    // unparenting on close would pull the action context out from under the
+    // click. Let the activation happen first.
+    popover.connect_closed(|popover| {
+        let popover = popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    });
     popover.popup();
 }
 

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=omacharts
+Comment=Market charts
+Exec=omacharts
+Icon=com.jorgemanrubia.Omacharts
+Terminal=false
+Categories=Office;Finance;
+StartupNotify=true
+StartupWMClass=com.jorgemanrubia.Omacharts

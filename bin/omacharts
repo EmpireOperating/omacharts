@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Launch omacharts from the working tree.
+#
+# Installed while the app is still being steered daily, so it rebuilds before
+# running: cargo is a no-op in a tenth of a second when nothing changed, and
+# the alternative is wondering whether the window in front of you is the code
+# you just wrote.
+set -euo pipefail
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$root"
+
+if ! cargo build --release --quiet 2>/tmp/omacharts-build.log; then
+  # Fall back to whatever built last rather than refusing to open.
+  notify-send -a omacharts "omacharts: build failed" \
+    "Launching the last good build. See /tmp/omacharts-build.log" 2>/dev/null || true
+fi
+
+exec ./target/release/omacharts "$@"
