@@ -8,6 +8,7 @@
 pub mod bars;
 pub mod indicators;
 pub mod omarchy;
+pub mod palette;
 pub mod provider;
 pub mod session;
 pub mod providers;

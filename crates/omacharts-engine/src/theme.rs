@@ -641,8 +641,11 @@ pub fn mix(a: &str, b: &str, t: f64) -> String {
 
 /// How far apart two colours are, 0 to 1.
 ///
-/// Euclidean in RGB. Crude next to a perceptual space, but enough to catch the
-/// thing that actually matters: two colours nobody could tell apart.
+/// Euclidean in RGB. Crude next to [`delta_e`], and kept only for the
+/// furniture: nudging a grid line or a panel just off the background is a
+/// question of "is this a different pixel value at all", where the tuned
+/// thresholds in RGB do the job. Anything that asks whether two colours
+/// *look* alike belongs on [`delta_e`].
 pub fn distance(a: &str, b: &str) -> f64 {
     let (Some(a), Some(b)) = (rgb(a), rgb(b)) else { return 0.0 };
     let d = |x: u8, y: u8| (x as f64 - y as f64) / 255.0;
@@ -685,51 +688,146 @@ pub fn ensure_distinct(colour: &str, from: &str, minimum: f64, toward: &str) -> 
     blended
 }
 
-/// Rotate a colour's hue, keeping its lightness and saturation.
+// ---------------------------------------------------------------------------
+// Perceptual colour
+// ---------------------------------------------------------------------------
+
+/// A colour as lightness, chroma and hue in OKLCh.
 ///
-/// For separating two swatches a theme happens to have made nearly identical,
-/// without inventing a colour that looks nothing like the rest of the palette.
-pub fn rotate_hue(hex: &str, degrees: f64) -> String {
-    let Some((r, g, b)) = rgb(hex) else { return hex.to_string() };
-    let (h, s, l) = to_hsl(r, g, b);
-    let (r, g, b) = from_hsl((h + degrees).rem_euclid(360.0), s, l);
-    format!("#{r:02x}{g:02x}{b:02x}")
+/// This is the space the palette is reasoned about in, because it is the one
+/// where the numbers mean what the eye sees. Moving a colour's `h` keeps it
+/// exactly as bright and as vivid; two colours the same distance apart here
+/// look the same distance apart, whether they are two blues or a yellow and a
+/// grey. RGB and HSL both lie about that: in HSL a pure yellow and a pure
+/// blue have the same "lightness", and one glows while the other is nearly
+/// black.
+///
+/// `l` runs 0 to 1, `c` from 0 (grey) to roughly 0.37 at the most vivid the
+/// screen can show, `h` in degrees.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Oklch {
+    pub l: f64,
+    pub c: f64,
+    pub h: f64,
 }
 
-fn to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
-    let (r, g, b) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) / 2.0;
-    let delta = max - min;
-    if delta.abs() < f64::EPSILON {
-        return (0.0, 0.0, l);
+impl Oklch {
+    pub fn of(hex: &str) -> Option<Oklch> {
+        let (l, a, b) = oklab(hex)?;
+        let c = (a * a + b * b).sqrt();
+        // Below this the hue is numerical noise, and a grey rotated by any
+        // angle must stay the same grey.
+        let h = if c < 0.0005 { 0.0 } else { b.atan2(a).to_degrees().rem_euclid(360.0) };
+        Some(Oklch { l, c, h })
     }
-    let s = delta / (1.0 - (2.0 * l - 1.0).abs()).max(f64::EPSILON);
-    let h = if (max - r).abs() < f64::EPSILON {
-        60.0 * (((g - b) / delta) % 6.0)
-    } else if (max - g).abs() < f64::EPSILON {
-        60.0 * ((b - r) / delta + 2.0)
-    } else {
-        60.0 * ((r - g) / delta + 4.0)
-    };
-    (h.rem_euclid(360.0), s.clamp(0.0, 1.0), l)
+
+    pub fn with_lightness(self, l: f64) -> Oklch {
+        Oklch { l: l.clamp(0.0, 1.0), ..self }
+    }
+
+    pub fn with_hue(self, h: f64) -> Oklch {
+        Oklch { h: h.rem_euclid(360.0), ..self }
+    }
+
+    /// Back to a hex colour the screen can show.
+    ///
+    /// Not every lightness and hue can be had at every chroma: there is no
+    /// very light saturated blue, and no very dark saturated yellow. When the
+    /// asked-for colour falls outside what sRGB can display, the chroma is
+    /// pulled in until it fits, which keeps the lightness and hue, the two
+    /// things the caller actually chose, and only makes it a little quieter.
+    pub fn hex(self) -> String {
+        let mut c = self.c;
+        for _ in 0..24 {
+            if let Some(hex) = from_oklab(self.l, c * self.h.to_radians().cos(), c * self.h.to_radians().sin()) {
+                return hex;
+            }
+            c *= 0.9;
+        }
+        from_oklab(self.l, 0.0, 0.0).unwrap_or_else(|| "#808080".to_string())
+    }
 }
 
-fn from_hsl(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
-    let m = l - c / 2.0;
-    let (r, g, b) = match h as u32 {
-        0..=59 => (c, x, 0.0),
-        60..=119 => (x, c, 0.0),
-        120..=179 => (0.0, c, x),
-        180..=239 => (0.0, x, c),
-        240..=299 => (x, 0.0, c),
-        _ => (c, 0.0, x),
+/// The angle from hue `a` to hue `b`, going the short way round. 0 to 180.
+pub fn hue_gap(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(360.0);
+    d.min(360.0 - d)
+}
+
+/// How different two colours look, 0 to about 1.
+///
+/// Euclidean distance in OKLab, so a step of the same size looks the same
+/// size wherever on the wheel it happens. Black to white is exactly 1; two
+/// colours the eye can only just separate are about 0.02 apart, and the
+/// distance between a dark blue and a dark purple that read as "the same line"
+/// on a chart is around 0.06. Those are the numbers the palette's thresholds
+/// are written in.
+pub fn delta_e(a: &str, b: &str) -> f64 {
+    let (Some(a), Some(b)) = (oklab(a), oklab(b)) else { return 0.0 };
+    ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2) + (a.2 - b.2).powi(2)).sqrt()
+}
+
+/// WCAG contrast ratio between two colours, 1 to 21.
+///
+/// The one number accessibility guidance actually sets floors for: 3:1 is the
+/// minimum for graphics that carry meaning, which is exactly what a thin
+/// indicator line is. OKLab says how *different* two colours look; this says
+/// whether a line can be *seen* on its ground, which is a question about
+/// light, not about hue.
+pub fn contrast_ratio(a: &str, b: &str) -> f64 {
+    let (Some(a), Some(b)) = (relative_luminance(a), relative_luminance(b)) else { return 1.0 };
+    let (hi, lo) = if a > b { (a, b) } else { (b, a) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// Luminance as physics counts it: linear light, not gamma-encoded bytes.
+fn relative_luminance(hex: &str) -> Option<f64> {
+    let (r, g, b) = linear_rgb(hex)?;
+    Some(0.2126 * r + 0.7152 * g + 0.0722 * b)
+}
+
+fn linear_rgb(hex: &str) -> Option<(f64, f64, f64)> {
+    let (r, g, b) = rgb(hex)?;
+    let lin = |v: u8| {
+        let c = v as f64 / 255.0;
+        if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
     };
-    let to_byte = |v: f64| (((v + m) * 255.0).round().clamp(0.0, 255.0)) as u8;
-    (to_byte(r), to_byte(g), to_byte(b))
+    Some((lin(r), lin(g), lin(b)))
+}
+
+/// sRGB to OKLab, by Björn Ottosson's published matrices.
+pub fn oklab(hex: &str) -> Option<(f64, f64, f64)> {
+    let (r, g, b) = linear_rgb(hex)?;
+    let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+    let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+    let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+    Some((
+        0.210_454_255_3 * l + 0.793_617_785 * m - 0.004_072_046_8 * s,
+        1.977_998_495_1 * l - 2.428_592_205 * m + 0.450_593_709_9 * s,
+        0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766 * s,
+    ))
+}
+
+/// OKLab back to sRGB. `None` when the colour cannot be displayed, so the
+/// caller can decide what to give up.
+fn from_oklab(big_l: f64, a: f64, b: f64) -> Option<String> {
+    let l = (big_l + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+    let m = (big_l - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+    let s = (big_l - 0.089_484_177_5 * a - 1.291_485_548 * b).powi(3);
+    let r = 4.076_741_662_1 * l - 3.307_711_591_3 * m + 0.230_969_929_2 * s;
+    let g = -1.268_438_004_6 * l + 2.609_757_401_1 * m - 0.341_319_396_5 * s;
+    let b = -0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701 * s;
+    // A hair outside the gamut is rounding, not a colour that cannot exist.
+    let slack = 0.0005;
+    if [r, g, b].iter().any(|v| *v < -slack || *v > 1.0 + slack) {
+        return None;
+    }
+    let enc = |c: f64| {
+        let c = c.clamp(0.0, 1.0);
+        let v = if c <= 0.003_130_8 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+        (v * 255.0).round() as u8
+    };
+    Some(format!("#{:02x}{:02x}{:02x}", enc(r), enc(g), enc(b)))
 }
 
 /// `#rgb`, `#rrggbb` or `#rrggbbaa` to bytes. Alpha is dropped.
@@ -1067,26 +1165,65 @@ mod tests {
     }
 
     #[test]
-    fn hue_rotation_keeps_the_colour_but_moves_it() {
-        let rotated = rotate_hue("#4fe88f", 150.0);
-        assert!(distance(&rotated, "#4fe88f") > 0.1, "{rotated} is too close to the original");
-        // Still a real colour of comparable lightness.
-        let (a, b) = (rgb("#4fe88f").unwrap(), rgb(&rotated).unwrap());
-        let lightness = |c: (u8, u8, u8)| c.0 as f64 + c.1 as f64 + c.2 as f64;
-        assert!((lightness(a) - lightness(b)).abs() / 765.0 < 0.3);
+    fn a_colour_survives_the_trip_through_oklch() {
+        for hex in ["#7fbbb3", "#0d1117", "#f9e2af", "#ffffff", "#000000"] {
+            let back = Oklch::of(hex).unwrap().hex();
+            assert!(delta_e(hex, &back) < 0.005, "{hex} came back as {back}");
+        }
     }
 
     #[test]
-    fn rotating_a_full_turn_comes_back() {
-        let original = "#7fbbb3";
-        assert!(distance(&rotate_hue(original, 360.0), original) < 0.02);
+    fn turning_the_hue_keeps_the_lightness_and_chroma() {
+        // Rotating in OKLCh is the whole reason for having it: a green turned
+        // to blue must stay exactly as bright and as vivid, which HSL cannot
+        // promise.
+        let green = Oklch::of("#4fe88f").unwrap();
+        let turned = Oklch::of(&green.with_hue(green.h + 150.0).hex()).unwrap();
+        assert!((green.l - turned.l).abs() < 0.02, "{} vs {}", green.l, turned.l);
+        assert!(delta_e("#4fe88f", &turned.hex()) > 0.1);
     }
 
     #[test]
-    fn grey_survives_rotation() {
-        // No hue to rotate; it must not become a colour.
-        let rotated = rotate_hue("#808080", 120.0);
-        assert!(distance(&rotated, "#808080") < 0.02, "{rotated}");
+    fn grey_has_no_hue_to_turn() {
+        let grey = Oklch::of("#808080").unwrap();
+        assert_eq!(grey.h, 0.0);
+        assert!(delta_e("#808080", &grey.with_hue(120.0).hex()) < 0.01);
+    }
+
+    #[test]
+    fn an_impossible_colour_gives_up_chroma_not_lightness() {
+        // There is no vivid blue at lightness 0.95. Asking for one must yield
+        // a pale blue of that lightness, not a darker vivid one.
+        let asked = Oklch { l: 0.95, c: 0.2, h: 262.0 };
+        let got = Oklch::of(&asked.hex()).unwrap();
+        assert!((got.l - 0.95).abs() < 0.02, "{}", got.l);
+        assert!(got.c < 0.2);
+    }
+
+    #[test]
+    fn delta_e_runs_from_nothing_to_black_and_white() {
+        assert!(delta_e("#123456", "#123456").abs() < 1e-9);
+        assert!((delta_e("#000000", "#ffffff") - 1.0).abs() < 0.01);
+        // Two blues a terminal theme would call different are nearly nothing
+        // apart; a blue and an amber are far.
+        assert!(delta_e("#7aa2f7", "#7da6ff") < 0.03);
+        assert!(delta_e("#7aa2f7", "#e0af68") > 0.2);
+    }
+
+    #[test]
+    fn contrast_ratio_is_wcags() {
+        assert!((contrast_ratio("#000000", "#ffffff") - 21.0).abs() < 0.01);
+        assert!((contrast_ratio("#ffffff", "#000000") - 21.0).abs() < 0.01);
+        assert!((contrast_ratio("#777777", "#777777") - 1.0).abs() < 1e-9);
+        // The textbook pair: 4.5:1 is where #767676 on white lands.
+        assert!((contrast_ratio("#767676", "#ffffff") - 4.54).abs() < 0.02);
+    }
+
+    #[test]
+    fn hue_gaps_go_the_short_way_round() {
+        assert_eq!(hue_gap(10.0, 350.0), 20.0);
+        assert_eq!(hue_gap(0.0, 180.0), 180.0);
+        assert_eq!(hue_gap(90.0, 90.0), 0.0);
     }
 
     #[test]

@@ -13,8 +13,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use omacharts_engine::theme::{theme_bars, Direction, SWATCH_SEQUENCE};
-use omacharts_engine::{omarchy, Theme};
+use omacharts_engine::theme::{
+    contrast_ratio, delta_e, hue_gap, theme_bars, Direction, Oklch, SWATCH_SEQUENCE,
+};
+use omacharts_engine::{omarchy, palette, Theme};
 
 fn fixtures() -> Vec<(String, Theme)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omarchy");
@@ -273,4 +275,150 @@ fn light_themes_are_detected_as_light() {
         );
     }
     assert!(light.len() < themes.len(), "not every theme is light");
+}
+
+// ---------------------------------------------------------------------------
+// The indicator palette, measured as the eye sees it
+// ---------------------------------------------------------------------------
+//
+// The tests above use RGB distance, which is fine for "is the grid a
+// different pixel value from the background". The palette is held to OKLab
+// distance (`delta_e`, where 0.02 is just noticeable and 1.0 is black to
+// white) and WCAG contrast, because the question there is whether two thin
+// lines *look* different, and RGB is wrong about that in exactly the cases
+// that matter: it thinks two blues are as far apart as a blue and a yellow.
+
+/// The six automatically assigned colours, in order.
+fn series(theme: &Theme) -> Vec<String> {
+    (0..SWATCH_SEQUENCE.len()).map(|n| theme.series(n)).collect()
+}
+
+/// Every pair of automatic overlays must be told apart at a glance, not only
+/// the consecutive ones. Thirteen shipped themes used to hand out the same
+/// hex for Teal and Cyan, which no consecutive-only check ever saw.
+#[test]
+fn every_pair_of_overlays_is_perceptibly_different_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let colours = series(&theme);
+        for i in 0..colours.len() {
+            for j in i + 1..colours.len() {
+                let d = delta_e(&colours[i], &colours[j]);
+                assert!(
+                    d >= 0.08,
+                    "{name}: {} {} and {} {} are {d:.3} apart",
+                    SWATCH_SEQUENCE[i], colours[i], SWATCH_SEQUENCE[j], colours[j]
+                );
+            }
+        }
+        for i in 0..colours.len() - 1 {
+            let d = delta_e(&colours[i], &colours[i + 1]);
+            assert!(d >= 0.12, "{name}: consecutive {} and {} are {d:.3} apart", colours[i], colours[i + 1]);
+        }
+    }
+}
+
+/// A 1.5px line needs WCAG's 3:1 for meaningful graphics against the chart,
+/// and must not be mistakable for the grid, the axis or the crosshair.
+#[test]
+fn every_overlay_is_legible_on_the_chart_in_every_theme() {
+    for (name, theme) in fixtures() {
+        for (n, colour) in series(&theme).iter().enumerate() {
+            let slot = SWATCH_SEQUENCE[n];
+            let ratio = contrast_ratio(colour, &theme.ui.background);
+            assert!(ratio >= 3.0, "{name}: {slot} {colour} is {ratio:.2}:1 on {}", theme.ui.background);
+            // The generator guarantees 0.06 from each piece of furniture. The
+            // grid is held higher because it is static and everywhere; every
+            // shipped theme clears this comfortably, and the one with a dark
+            // grid on white (White itself) is where this floor was set.
+            let grid = delta_e(colour, &theme.ui.grid);
+            assert!(grid >= 0.15, "{name}: {slot} {colour} is {grid:.3} from the grid");
+            let axis = delta_e(colour, &theme.ui.axis);
+            assert!(axis >= 0.06, "{name}: {slot} {colour} is {axis:.3} from the axis");
+            let crosshair = delta_e(colour, &theme.ui.crosshair);
+            assert!(crosshair >= 0.06, "{name}: {slot} {colour} is {crosshair:.3} from the crosshair");
+        }
+    }
+}
+
+/// An overlay in the candles' colours reads as price action.
+#[test]
+fn no_overlay_wears_a_direction_colour_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let bars = theme_bars(&theme);
+        for (n, colour) in series(&theme).iter().enumerate() {
+            for direction in [Direction::Up, Direction::Down] {
+                let candle = bars.outline(direction);
+                let d = delta_e(colour, candle);
+                assert!(
+                    d >= 0.08,
+                    "{name}: {} {colour} is {d:.3} from the {direction:?} candle {candle}",
+                    SWATCH_SEQUENCE[n]
+                );
+            }
+        }
+    }
+}
+
+/// The six colours must look like one palette: lightness and chroma in a
+/// band, hue doing the work. A set that passes every contrast test can still
+/// be a box of crayons, and this is the test for that.
+#[test]
+fn the_overlays_are_one_family_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let colours: Vec<Oklch> = series(&theme).iter().map(|h| Oklch::of(h).unwrap()).collect();
+        let (l_lo, l_hi) = colours.iter().fold((1.0f64, 0.0f64), |(lo, hi), c| (lo.min(c.l), hi.max(c.l)));
+        let (c_lo, c_hi) = colours.iter().fold((1.0f64, 0.0f64), |(lo, hi), c| (lo.min(c.c), hi.max(c.c)));
+        assert!(l_hi - l_lo <= 0.25, "{name}: lightness runs {l_lo:.2} to {l_hi:.2}");
+        assert!(c_lo >= 0.06, "{name}: a line is nearly grey ({c_lo:.3})");
+        assert!(c_hi <= 0.21, "{name}: a line is garish ({c_hi:.3})");
+        assert!(c_hi / c_lo <= 2.5, "{name}: chroma runs {c_lo:.3} to {c_hi:.3}");
+    }
+}
+
+/// A colour stored by name has to mean the same thing under every theme, or
+/// an indicator saved as Amber on Nord comes back blue on Lupine.
+#[test]
+fn every_named_overlay_keeps_its_promised_hue_in_every_theme() {
+    for (name, theme) in fixtures() {
+        for slot in SWATCH_SEQUENCE {
+            let hex = &theme.swatch(slot).unwrap().hex;
+            let hue = Oklch::of(hex).unwrap().h;
+            let promised = palette::promised_hue(slot).unwrap();
+            let gap = hue_gap(hue, promised);
+            assert!(gap <= 32.0, "{name}: {slot} {hex} has hue {hue:.0}, promised {promised:.0}");
+        }
+    }
+}
+
+/// Where the theme has the colour a name means, that colour is used, not a
+/// synthetic one: a Nord user should see Nord's blue.
+#[test]
+fn a_theme_that_offers_a_colour_keeps_it() {
+    let (_, nord) = fixtures().into_iter().find(|(n, _)| n == "nord").unwrap();
+    let blue = Oklch::of(&nord.swatch("Blue").unwrap().hex).unwrap();
+    let theirs = Oklch::of("#81a1c1").unwrap();
+    assert!(hue_gap(blue.h, theirs.h) < 1.0, "Blue is {blue:?}, Nord's is {theirs:?}");
+    // Everforest's "cyan" is a mint nearer green than teal, so Teal is not
+    // allowed it; Everforest's "blue" is a teal, and that is what Teal gets.
+    let (_, everforest) = fixtures().into_iter().find(|(n, _)| n == "everforest").unwrap();
+    let teal = Oklch::of(&everforest.swatch("Teal").unwrap().hex).unwrap();
+    assert!(hue_gap(teal.h, Oklch::of("#7fbbb3").unwrap().h) < 1.0, "Teal is {teal:?}");
+}
+
+/// The palette follows the desktop: two themes must not produce the same
+/// lines, or the Omarchy theme is a fixed palette in disguise.
+#[test]
+fn the_palette_changes_with_the_theme() {
+    let themes = fixtures();
+    for i in 0..themes.len() {
+        for j in i + 1..themes.len() {
+            let (a, b) = (series(&themes[i].1), series(&themes[j].1));
+            assert!(
+                a.iter().zip(&b).any(|(x, y)| delta_e(x, y) > 0.05),
+                "{} and {} derived the same palette: {a:?}",
+                themes[i].0,
+                themes[j].0
+            );
+        }
+    }
 }
