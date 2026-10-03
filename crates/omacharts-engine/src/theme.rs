@@ -649,6 +649,22 @@ pub fn distance(a: &str, b: &str) -> f64 {
     ((d(a.0, b.0).powi(2) + d(a.1, b.1).powi(2) + d(a.2, b.2).powi(2)) / 3.0).sqrt()
 }
 
+/// Perceived lightness of a colour, 0 to 1.
+pub fn luminance(hex: &str) -> f64 {
+    let Some((r, g, b)) = rgb(hex) else { return 0.0 };
+    (0.2126 * r as f64 + 0.7152 * g as f64 + 0.0722 * b as f64) / 255.0
+}
+
+/// Black or white, whichever can be read on `hex`.
+///
+/// Anything that paints text on a colour taken from a theme has to ask: a
+/// theme is free to make its up and down dark, and eighteen of the twenty-two
+/// shipped ones do for at least one direction. A fixed near-black label on a
+/// dark pill is a number nobody can read.
+pub fn readable_on(hex: &str) -> &'static str {
+    if luminance(hex) > 0.55 { "#000000" } else { "#ffffff" }
+}
+
 /// Nudge `colour` away from `from` by blending it toward `toward`, until it is
 /// at least `minimum` away or we run out of room.
 ///
@@ -1027,6 +1043,18 @@ mod tests {
         assert_eq!(Direction::Up.css_class(), "change-up");
         assert_eq!(Direction::Down.css_class(), "change-down");
         assert_eq!(Direction::Flat.css_class(), "change-flat");
+    }
+
+    #[test]
+    fn text_is_chosen_against_what_it_sits_on() {
+        assert_eq!(readable_on("#ffffff"), "#000000");
+        assert_eq!(readable_on("#000000"), "#ffffff");
+        // Lupine's up and down: dark enough that near-black on them is
+        // unreadable, which is what sent this into the engine.
+        assert_eq!(readable_on("#4a2fd0"), "#ffffff");
+        assert_eq!(readable_on("#c900c4"), "#ffffff");
+        // And a pale green takes dark text.
+        assert_eq!(readable_on("#a7c080"), "#000000");
     }
 
     #[test]

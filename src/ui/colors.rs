@@ -39,13 +39,10 @@ pub fn is_transparent(hex: &str) -> bool {
     rgba(hex).3 < 0.01
 }
 
-/// Perceived lightness, 0 to 1.
-pub fn luminance(hex: &str) -> f64 {
-    let (r, g, b, _) = rgba(hex);
-    0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
 /// Black or white, whichever is readable on `hex`.
+///
+/// The engine owns this so the chart, the watchlist and the bar widget cannot
+/// disagree about which way to go.
 pub fn readable_on(hex: &str) -> &'static str {
-    if luminance(hex) > 0.55 { "#000000" } else { "#ffffff" }
+    omacharts_engine::theme::readable_on(hex)
 }

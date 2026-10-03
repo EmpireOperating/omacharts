@@ -301,8 +301,10 @@ Panel {
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(11)
                   font.bold: true
-                  color: Model.direction(modelData.change) === "flat"
-                    ? root.foreground : "#0b0d10"
+                  // Chosen against the pill, not assumed: a theme is free to
+                  // make its up and down dark, and a fixed near-black on a
+                  // dark pill is a percentage nobody can read.
+                  color: Model.readableOn(String(root.colorFor(modelData.change)))
                 }
               }
             }

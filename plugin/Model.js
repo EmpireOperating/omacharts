@@ -101,6 +101,41 @@ function formatChange(value, price) {
   return sign + Number(value).toFixed(decimals(price))
 }
 
+// Black or white, whichever can be read on `hex`.
+//
+// The pill takes its colour from the theme, and a theme is free to make its
+// up and down dark. Text painted a fixed near-black on a dark pill is a
+// percentage nobody can read — which is exactly what happened on a theme whose
+// green and red are purple and magenta.
+//
+// Mirrors the app's own readable_on: same weights, same threshold, so a pill
+// in the bar and a label in the window never disagree about which way to go.
+function readableOn(hex) {
+  var rgb = parseHex(hex)
+  if (!rgb) return "#ffffff"
+  var luminance = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+  return luminance > 0.55 ? "#000000" : "#ffffff"
+}
+
+function parseHex(hex) {
+  if (typeof hex !== "string") return null
+  var text = hex.trim().replace("#", "")
+  if (text.length === 3) {
+    text = text[0] + text[0] + text[1] + text[1] + text[2] + text[2]
+  }
+  // QML stringifies a colour as #AARRGGBB, so the colour is the last six
+  // digits, not the first.
+  if (text.length === 8) text = text.substring(2)
+  if (text.length < 6) return null
+  var value = parseInt(text.substring(0, 6), 16)
+  if (isNaN(value)) return null
+  return [
+    ((value >> 16) & 255) / 255,
+    ((value >> 8) & 255) / 255,
+    (value & 255) / 255
+  ]
+}
+
 // Up, down, or neither. The panel colours from this rather than comparing
 // numbers in three places.
 function direction(value) {

@@ -216,6 +216,46 @@ fn candles_stand_apart_from_the_furniture_in_every_theme() {
     }
 }
 
+/// Anything painting a label on a direction colour — the bar widget's pill,
+/// the chart's price chip — has to pick its text against that colour.
+#[test]
+fn a_label_on_a_direction_colour_is_readable_in_every_theme() {
+    use omacharts_engine::theme::{luminance, readable_on};
+    for (name, theme) in fixtures() {
+        let bars = theme_bars(&theme);
+        for direction in [Direction::Up, Direction::Down, Direction::Flat] {
+            let pill = bars.outline(direction);
+            let text = readable_on(pill);
+            let gap = (luminance(pill) - luminance(text)).abs();
+            assert!(
+                gap > 0.35,
+                "{name}: {text} on {pill} ({direction:?}) is {gap:.2} apart"
+            );
+        }
+    }
+}
+
+/// The watchlist's change column is direction-coloured text on a panel, not on
+/// the chart, so clearing the chart background is not enough.
+#[test]
+fn direction_coloured_text_is_readable_on_panels_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let bars = theme_bars(&theme);
+        for direction in [Direction::Up, Direction::Down] {
+            for (where_, ground) in
+                [("panels", &theme.ui.surface), ("toolbars", &theme.ui.surface_variant)]
+            {
+                let colour = bars.outline(direction);
+                let d = distance(colour, ground);
+                assert!(
+                    d > 0.1,
+                    "{name}: {direction:?} ({colour}) is lost on {where_} ({ground}) at {d:.3}"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn light_themes_are_detected_as_light() {
     let themes = fixtures();
