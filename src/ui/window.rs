@@ -1281,10 +1281,12 @@ impl Window {
     ) {
         let theme = self.theming.borrow().theme();
         let all = self.indicators.borrow().clone();
+        let colors = omacharts_engine::palette_colors(&all, &theme);
         let drawn: Vec<Drawn> = all
             .iter()
-            .map(|indicator| Drawn {
-                color: indicator.color(&theme, omacharts_engine::palette_slot(&all, indicator.id)),
+            .zip(colors)
+            .map(|(indicator, color)| Drawn {
+                color,
                 output: omacharts_engine::indicators::compute(
                     indicator,
                     bars,
@@ -1319,9 +1321,9 @@ impl Window {
 
         let timeframe = *self.timeframe.borrow();
         let all = self.indicators.borrow().clone();
-        for indicator in all.iter() {
+        let colors = omacharts_engine::palette_colors(&all, &theme);
+        for (indicator, colour) in all.iter().zip(colors) {
             let id = indicator.id;
-            let colour = indicator.color(&theme, omacharts_engine::palette_slot(&all, id));
 
             let dot = gtk::DrawingArea::new();
             dot.set_size_request(8, 8);

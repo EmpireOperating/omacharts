@@ -47,6 +47,15 @@ pub fn picker(
     button
 }
 
+/// Repaint a picker's swatch, for when the colour changed somewhere else —
+/// Reset, which hands the indicator back to the palette and so cannot know
+/// what it will come out as until the set has been asked.
+pub fn show(button: &gtk::MenuButton, hex: &str) {
+    if let Some(area) = button.child().and_downcast::<gtk::DrawingArea>() {
+        paint(&area, hex, false);
+    }
+}
+
 /// The popover's contents: the theme's swatches, then the way out to the wheel.
 #[allow(clippy::too_many_arguments)]
 fn palette_box(

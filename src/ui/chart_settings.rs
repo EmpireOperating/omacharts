@@ -281,7 +281,7 @@ fn indicator_row(
     indicator: &Indicator,
 ) -> adw::ActionRow {
     let id = indicator.id;
-    let slot = omacharts_engine::palette_slot(all, id);
+    let colour = drawn_colour(window, all, id);
     let row = adw::ActionRow::new();
     row.set_title(&indicator.label());
     row.set_subtitle(indicator.kind.name());
@@ -291,7 +291,6 @@ fn indicator_row(
     let swatch = gtk::DrawingArea::new();
     swatch.set_size_request(12, 12);
     swatch.set_valign(gtk::Align::Center);
-    let colour = indicator.color(&window.theme(), slot);
     swatch.set_draw_func(move |_, cr, width, height| {
         let radius = (width.min(height) as f64) / 2.0;
         colors::set_source(cr, &colour);
@@ -422,12 +421,12 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
     let Some(indicator) = indicators.iter().find(|i| i.id == id).cloned() else {
         return;
     };
-    let slot = omacharts_engine::palette_slot(&indicators, id);
+    let colour = drawn_colour(window, &indicators, id);
 
     let page = adw::PreferencesPage::new();
     page.add(&parameters_group(window, refresh, &indicator));
-    page.add(&appearance_group(window, refresh, slot, &indicator));
-    for group in band_groups(window, refresh, slot, &indicator) {
+    page.add(&appearance_group(window, refresh, &colour, &indicator));
+    for group in band_groups(window, refresh, &colour, &indicator) {
         page.add(&group);
     }
 
@@ -493,7 +492,7 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
 fn appearance_group(
     window: &Rc<Window>,
     refresh: &Refresh,
-    slot: usize,
+    colour: &str,
     indicator: &Indicator,
 ) -> adw::PreferencesGroup {
     let id = indicator.id;
@@ -504,7 +503,7 @@ fn appearance_group(
         window,
         refresh,
         "Colour",
-        &indicator.color(&window.theme(), slot),
+        colour,
         indicator.color.clone(),
         move |indicator, choice| indicator.color = choice,
         id,
@@ -616,10 +615,18 @@ fn colour_row(
 
     let window_for_default = window.clone();
     let refresh_for_default = refresh.clone();
+    let button_weak = button.downgrade();
     default.connect_clicked(move |default| {
         let apply = apply.clone();
         update(&window_for_default, id, move |indicator| apply(indicator, None));
         default.set_sensitive(false);
+        // Show what it reverted to. The default is not a fixed colour — it is
+        // whichever of the palette this indicator's siblings have left free —
+        // so it has to be asked for after the change, not guessed before it.
+        if let Some(button) = button_weak.upgrade() {
+            let indicators = window_for_default.indicators();
+            crate::ui::palette::show(&button, &drawn_colour(&window_for_default, &indicators, id));
+        }
         refresh_for_default.run();
     });
 
@@ -727,12 +734,12 @@ fn parameters_group(
 fn band_groups(
     window: &Rc<Window>,
     refresh: &Refresh,
-    slot: usize,
+    line_colour: &str,
     indicator: &Indicator,
 ) -> Vec<adw::PreferencesGroup> {
     let Params::Vwap { bands, .. } = &indicator.params else { return Vec::new() };
     let id = indicator.id;
-    let line_colour = indicator.color(&window.theme(), slot);
+    let line_colour = line_colour.to_string();
     let mut groups = Vec::new();
 
     for (index, band) in bands.iter().enumerate() {
@@ -994,6 +1001,20 @@ fn rows_rows(
     });
 
     vec![automatic.upcast(), spin.upcast()]
+}
+
+/// The colour this indicator is actually drawn in.
+///
+/// Asked of the whole set rather than of the indicator, because that is where
+/// the answer lives now: an automatic colour is the first one its siblings have
+/// not taken, so a second moving average is a different colour from the first.
+fn drawn_colour(window: &Rc<Window>, indicators: &[Indicator], id: u32) -> String {
+    let colours = omacharts_engine::palette_colors(indicators, &window.theme());
+    indicators
+        .iter()
+        .position(|i| i.id == id)
+        .and_then(|at| colours.get(at).cloned())
+        .unwrap_or_else(|| window.theme().ui.accent.clone())
 }
 
 /// Change one indicator in place and redraw.

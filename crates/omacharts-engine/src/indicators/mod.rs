@@ -17,7 +17,7 @@ pub mod vwap;
 use serde::{Deserialize, Serialize};
 
 use crate::bars::{Bar, Timeframe};
-use crate::theme::{ColorChoice, Theme};
+use crate::theme::{ColorChoice, Theme, SWATCH_SEQUENCE};
 
 pub use periods::Reset;
 pub use profile::{Profile, ProfileRow};
@@ -293,15 +293,47 @@ impl Indicator {
     }
 }
 
-/// Which palette slot an indicator takes.
+/// The colour each of these indicators draws in.
 ///
-/// By age rather than by position in the list. Ids are handed out in order, so
-/// ranking by id survives reordering: moving a pane down the stack should move
-/// the pane, not repaint two unrelated lines. Removing one still shifts the
-/// colours of everything newer, which is the same thing that has always
-/// happened and is the price of not storing a colour nobody chose.
-pub fn palette_slot(indicators: &[Indicator], id: u32) -> usize {
-    indicators.iter().filter(|other| other.id < id).count()
+/// Returned for the whole set at once, because avoiding a collision is a
+/// property of the set and not of any one member: a second moving average has
+/// to know what the first one took. Walking them one at a time is how you end
+/// up with two amber lines and no way to tell which is the fifty.
+///
+/// Three rules:
+///
+/// * **A colour somebody chose is never moved.** Those are taken first, so an
+///   automatic one gives way to a pinned one rather than the other way round.
+/// * **Automatic ones take the first sequence colour still free.** Past six
+///   they repeat, because the palette has six and a chart with seven overlays
+///   has worse problems than a repeated hue.
+/// * **Oldest first, by id.** So adding an indicator cannot repaint the ones
+///   already on the chart, and neither can reordering them.
+pub fn palette_colors(indicators: &[Indicator], theme: &Theme) -> Vec<String> {
+    let mut by_age: Vec<usize> = (0..indicators.len()).collect();
+    by_age.sort_by_key(|&i| indicators[i].id);
+
+    let mut taken: Vec<String> = indicators
+        .iter()
+        .filter_map(|indicator| indicator.color.as_ref())
+        .map(|choice| choice.resolve(theme))
+        .collect();
+
+    let mut out = vec![String::new(); indicators.len()];
+    for i in by_age {
+        let indicator = &indicators[i];
+        if let Some(choice) = &indicator.color {
+            out[i] = choice.resolve(theme);
+            continue;
+        }
+        let free = (0..SWATCH_SEQUENCE.len())
+            .map(|n| theme.series(n))
+            .find(|hex| !taken.contains(hex));
+        let colour = free.unwrap_or_else(|| theme.series(taken.len()));
+        taken.push(colour.clone());
+        out[i] = colour;
+    }
+    out
 }
 
 /// What computing an indicator produces.
@@ -638,6 +670,66 @@ mod tests {
         let mut indicator = Indicator::new(1, Kind::Sma);
         indicator.color = Some(ColorChoice::swatch("Rose"));
         assert_eq!(indicator.color(theme, 0), theme.swatch("Rose").unwrap().hex);
+    }
+
+    /// Five of the same indicator, which is the case the sequence exists for:
+    /// a second moving average that comes out the colour of the first is two
+    /// lines you cannot tell apart.
+    #[test]
+    fn repeating_an_indicator_takes_the_next_colour_along() {
+        let theme = &crate::theme::builtin_themes()[0];
+        let set: Vec<Indicator> = (1..=5).map(|id| Indicator::new(id, Kind::Sma)).collect();
+        let colors = palette_colors(&set, theme);
+        let mut unique = colors.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), 5, "five averages, five colours: {colors:?}");
+        assert_eq!(colors[0], theme.series(0), "the first still starts the sequence");
+    }
+
+    #[test]
+    fn a_colour_somebody_chose_is_never_handed_to_anybody_else() {
+        let theme = &crate::theme::builtin_themes()[0];
+        // The second indicator is pinned to the colour the first would have
+        // taken automatically. The first has to move, not the pinned one.
+        let mut set: Vec<Indicator> = (1..=3).map(|id| Indicator::new(id, Kind::Ema)).collect();
+        let first = theme.series(0);
+        set[1].color = Some(ColorChoice::Fixed { hex: first.clone() });
+
+        let colors = palette_colors(&set, theme);
+        assert_eq!(colors[1], first, "the pinned one keeps what it was given");
+        assert_ne!(colors[0], first, "the automatic one gives way");
+        assert_ne!(colors[2], first);
+        assert_ne!(colors[0], colors[2]);
+    }
+
+    #[test]
+    fn adding_or_reordering_does_not_repaint_what_is_already_there() {
+        let theme = &crate::theme::builtin_themes()[0];
+        let mut set: Vec<Indicator> = (1..=3).map(|id| Indicator::new(id, Kind::Sma)).collect();
+        let before = palette_colors(&set, theme);
+
+        set.push(Indicator::new(4, Kind::Vwap));
+        let after_adding = palette_colors(&set, theme);
+        assert_eq!(&after_adding[..3], &before[..], "the three already drawn keep their colours");
+
+        // Same indicators, listed the other way round: colours follow the
+        // indicator, not the row it happens to sit in.
+        set.reverse();
+        let reordered = palette_colors(&set, theme);
+        for (indicator, colour) in set.iter().zip(&reordered) {
+            let was = &after_adding[(indicator.id - 1) as usize];
+            assert_eq!(colour, was, "indicator {} changed colour on reorder", indicator.id);
+        }
+    }
+
+    #[test]
+    fn past_the_palette_colours_repeat_rather_than_running_out() {
+        let theme = &crate::theme::builtin_themes()[0];
+        let set: Vec<Indicator> = (1..=9).map(|id| Indicator::new(id, Kind::Sma)).collect();
+        let colors = palette_colors(&set, theme);
+        assert_eq!(colors.len(), 9);
+        assert!(colors.iter().all(|c| !c.is_empty()), "every one gets a colour");
     }
 
     #[test]

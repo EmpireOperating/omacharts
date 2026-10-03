@@ -254,10 +254,18 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
-/* Nested submenus leave the menu exactly as tall as its contents, which turned
-   out to be a shade too exact: the last item sat on the rounded corner with
-   nothing under it. */
-popover.menu contents { padding-top: 4px; padding-bottom: 4px; }
+/* GtkPopoverMenu keeps its items in a scroller, and the popover measures the
+   scroller rather than the padded box around it. So a menu that fits perfectly
+   is still a dozen pixels short of its own contents: it scrolls, and the last
+   item sits on the rounded corner with nothing under it.
+
+   Zeroing that padding takes the slack away, and the breathing room goes on
+   the items as margins instead, which every level does count: measured through
+   the tree, requested and allocated heights now match exactly, so there is
+   nothing left to scroll. */
+popover.menu contents { padding-top: 0; padding-bottom: 0; }
+popover.menu modelbutton:first-child { margin-top: 6px; }
+popover.menu modelbutton:last-child { margin-bottom: 6px; }
 
 /* The legend sits over the drawing, and the drawing is the point. Everything
    here stays faint until the pointer is near it. */

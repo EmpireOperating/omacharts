@@ -18,7 +18,7 @@ pub mod theme;
 pub use bars::{
     price_decimals, repair_continuous_opens, resample, Bar, BarStyle, Timeframe,
 };
-pub use indicators::{palette_slot, Indicator, Kind as IndicatorKind, Output, Params, Reset};
+pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use provider::{Capability, Provider, ProviderError};
 pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
