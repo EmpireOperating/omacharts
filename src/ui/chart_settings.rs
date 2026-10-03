@@ -290,26 +290,34 @@ fn appearance_group(
     indicator: &Indicator,
 ) -> adw::PreferencesGroup {
     let id = indicator.id;
+    let following = indicator.color.is_none();
     let group = adw::PreferencesGroup::new();
     group.set_title("Appearance");
 
-    let row = adw::ActionRow::new();
-    row.set_title("Colour");
-    // The distinction is whether this colour keeps up with the theme. An
-    // indicator with no colour of its own takes the next one from the theme's
-    // palette, which is what makes a set of them distinguishable without
-    // anyone choosing anything — and what makes them all change together when
-    // the desktop theme does.
-    row.set_subtitle(if indicator.color.is_none() {
-        "Automatic — takes the next colour from the theme, and follows it"
-    } else {
-        "Fixed — stays this colour whatever the theme does"
-    });
+    // Two states, said plainly. A colour either keeps up with the theme or it
+    // does not, and showing that as a switch beats a button whose label has to
+    // describe a state it is sitting next to.
+    let follow_row = adw::ActionRow::new();
+    follow_row.set_title("Follow the theme");
+    follow_row.set_subtitle(
+        "Takes the next colour from the theme palette, and changes with it",
+    );
+    let follow = gtk::Switch::new();
+    follow.set_active(following);
+    follow.set_valign(gtk::Align::Center);
+    follow_row.add_suffix(&follow);
+    group.add(&follow_row);
+
+    let colour_row = adw::ActionRow::new();
+    colour_row.set_title("Colour");
+    colour_row.set_sensitive(!following);
 
     let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-    button.set_rgba(&colors::parse(&indicator.color(&window.theme(), slot)));
+    let current = indicator.color(&window.theme(), slot);
+    button.set_rgba(&colors::parse(&current));
     button.set_valign(gtk::Align::Center);
     button.add_css_class("swatch-button");
+
     let window_for_colour = window.clone();
     let dialog_for_colour = dialog.clone();
     let list_for_colour = list.clone();
@@ -320,22 +328,32 @@ fn appearance_group(
         });
         rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
     });
-    row.add_suffix(&button);
+    colour_row.add_suffix(&button);
+    group.add(&colour_row);
 
-    let reset = gtk::Button::with_label("Automatic");
-    reset.add_css_class("flat");
-    reset.set_valign(gtk::Align::Center);
-    reset.set_tooltip_text(Some("Go back to taking the colour from the theme"));
-    reset.set_sensitive(indicator.color.is_some());
-    let window_for_reset = window.clone();
-    let dialog_for_reset = dialog.clone();
-    let list_for_reset = list.clone();
-    reset.connect_clicked(move |_| {
-        update(&window_for_reset, id, |i| i.color = None);
-        rebuild_indicators(&window_for_reset, &dialog_for_reset, &list_for_reset);
+    // Turning the switch off keeps whatever colour is on screen, so nothing
+    // jumps the moment you take control of it.
+    let window_for_follow = window.clone();
+    let dialog_for_follow = dialog.clone();
+    let list_for_follow = list.clone();
+    let colour_row_weak = colour_row.downgrade();
+    let button_weak = button.downgrade();
+    follow.connect_state_set(move |_, on| {
+        if let Some(row) = colour_row_weak.upgrade() {
+            row.set_sensitive(!on);
+        }
+        let pinned = button_weak.upgrade().map(|b| colors::to_hex(&b.rgba()));
+        update(&window_for_follow, id, |i| {
+            i.color = if on {
+                None
+            } else {
+                pinned.clone().map(|hex| ColorChoice::Fixed { hex })
+            };
+        });
+        rebuild_indicators(&window_for_follow, &dialog_for_follow, &list_for_follow);
+        glib::Propagation::Proceed
     });
-    row.add_suffix(&reset);
-    group.add(&row);
+
     group
 }
 
