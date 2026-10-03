@@ -29,6 +29,13 @@ const PAD: f64 = 10.0;
 const MIN_VISIBLE: usize = 12;
 const MAX_VISIBLE: usize = 3000;
 
+/// How far the price scale may be stretched either way.
+const MIN_PRICE_ZOOM: f64 = 0.05;
+const MAX_PRICE_ZOOM: f64 = 40.0;
+
+/// Pixels of drag for one doubling of either scale.
+const DRAG_PER_DOUBLING: f64 = 180.0;
+
 /// What the crosshair is over, handed to the window for the readout.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Hover {
@@ -50,12 +57,111 @@ struct State {
     /// Pinned to the right edge, so new bars keep the view at "now" until the
     /// user pans away.
     anchored: bool,
-    drag_origin: Option<(usize, f64)>,
+    drag: Option<Drag>,
     stale: bool,
     loading: bool,
+    /// Multiplier on the auto-fitted price range. 1.0 shows exactly what the
+    /// visible bars need; above that is zoomed in.
+    price_zoom: f64,
+    /// Vertical shift, as a fraction of the auto-fitted range.
+    price_offset: f64,
+    /// While true the price scale follows the data and the two values above
+    /// are held at their neutral settings.
+    price_auto: bool,
+}
+
+/// What a drag is doing, decided by where it started.
+///
+/// This is the whole of the direct-manipulation model: the chart body pans,
+/// the price axis scales price, the time axis scales time. Same as every other
+/// charting tool, because muscle memory is the feature.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Drag {
+    Pan { first: usize, offset: f64 },
+    PriceScale { zoom: f64 },
+    TimeScale { visible: usize },
+}
+
+/// Which part of the widget a point is over.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Region {
+    Plot,
+    PriceAxis,
+    TimeAxis,
+}
+
+fn region_at(x: f64, y: f64, width: f64, height: f64) -> Region {
+    if x >= width - PRICE_AXIS_W {
+        Region::PriceAxis
+    } else if y >= height - TIME_AXIS_H {
+        Region::TimeAxis
+    } else {
+        Region::Plot
+    }
 }
 
 impl State {
+    /// The price range to draw, after the user's scaling.
+    ///
+    /// The auto fit is always the starting point, so taking manual control
+    /// never makes the chart jump — it stretches around what was already on
+    /// screen.
+    fn price_window(&self, low: f64, high: f64) -> (f64, f64) {
+        if self.price_auto {
+            return (low, high);
+        }
+        let range = (high - low).max(f64::EPSILON);
+        let middle = (low + high) / 2.0 + range * self.price_offset;
+        let half = range / 2.0 / self.price_zoom.clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
+        (middle - half, middle + half)
+    }
+
+    /// Shift the view by a number of bars. Positive moves forward in time.
+    fn pan_by(&mut self, bars: f64) {
+        let (first, visible) = self.slice();
+        if self.bars.len() <= visible {
+            return;
+        }
+        let max_first = self.bars.len() - visible;
+        let next = (first as i64 + bars.round() as i64).clamp(0, max_first as i64) as usize;
+        self.first = next;
+        self.anchored = next >= max_first;
+    }
+
+    /// Zoom the time axis about `anchor`, a fraction across the plot.
+    fn zoom_time(&mut self, factor: f64, anchor: f64) {
+        let (first, visible) = self.slice();
+        let next = ((visible as f64 * factor).round() as usize)
+            .clamp(MIN_VISIBLE, MAX_VISIBLE)
+            .min(self.bars.len().max(MIN_VISIBLE));
+        // Anchored to the right edge, zooming reveals history and the last bar
+        // stays put — which is what you want when looking at the live edge.
+        if !self.anchored {
+            let focus = first as f64 + anchor * visible as f64;
+            self.first = (focus - anchor * next as f64).max(0.0) as usize;
+        }
+        self.visible = next;
+    }
+
+    /// Stretch or compress the price scale, taking it off automatic.
+    fn scale_price(&mut self, factor: f64) {
+        if self.price_auto {
+            self.price_auto = false;
+            self.price_zoom = 1.0;
+            self.price_offset = 0.0;
+        }
+        self.price_zoom = (self.price_zoom * factor).clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
+    }
+
+    /// Back to fitting the data, at the live edge.
+    fn reset_view(&mut self) {
+        self.price_auto = true;
+        self.price_zoom = 1.0;
+        self.price_offset = 0.0;
+        self.visible = 160;
+        self.anchored = true;
+    }
+
     /// The visible slice, clamped to what we actually have.
     fn slice(&self) -> (usize, usize) {
         if self.bars.is_empty() {
@@ -78,7 +184,7 @@ pub struct ChartView {
 }
 
 impl ChartView {
-    pub fn new(theme: Theme, scheme: BarScheme) -> ChartView {
+    pub fn new(theme: Theme, scheme: BarScheme) -> Rc<ChartView> {
         let area = gtk::DrawingArea::new();
         area.set_hexpand(true);
         area.set_vexpand(true);
@@ -94,17 +200,21 @@ impl ChartView {
             visible: 160,
             pointer: None,
             anchored: true,
-            drag_origin: None,
+            drag: None,
             stale: false,
             loading: false,
+            price_zoom: 1.0,
+            price_offset: 0.0,
+            price_auto: true,
         }));
         let on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>> = Rc::new(RefCell::new(None));
 
-        let view = ChartView { area, state, on_hover };
+        let view = Rc::new(ChartView { area, state, on_hover });
         view.wire_drawing();
         view.wire_pointer();
         view.wire_zoom();
         view.wire_drag();
+        view.wire_axis_menu();
         view
     }
 
@@ -172,31 +282,12 @@ impl ChartView {
     }
 
     pub fn zoom(&self, factor: f64) {
-        let mut state = self.state.borrow_mut();
-        let (first, visible) = state.slice();
-        let next = ((visible as f64 * factor).round() as usize).clamp(MIN_VISIBLE, MAX_VISIBLE);
-        // Zooming while anchored keeps the right edge pinned, which is what
-        // "show me more history" means.
-        if !state.anchored {
-            let centre = first + visible / 2;
-            state.first = centre.saturating_sub(next / 2);
-        }
-        state.visible = next;
-        drop(state);
+        self.state.borrow_mut().zoom_time(factor, 0.5);
         self.area.queue_draw();
     }
 
     pub fn pan_bars(&self, delta: i64) {
-        let mut state = self.state.borrow_mut();
-        let (first, visible) = state.slice();
-        if state.bars.len() <= visible {
-            return;
-        }
-        let max_first = state.bars.len() - visible;
-        let next = (first as i64 + delta).clamp(0, max_first as i64) as usize;
-        state.first = next;
-        state.anchored = next >= max_first;
-        drop(state);
+        self.state.borrow_mut().pan_by(delta as f64);
         self.area.queue_draw();
     }
 
@@ -231,32 +322,55 @@ impl ChartView {
         self.area.add_controller(motion);
     }
 
+    /// The wheel, with the conventions every charting tool shares.
+    ///
+    /// Plain wheel zooms time about the cursor. Shift pans. Ctrl scales price.
+    /// Over an axis, the wheel scales that axis whatever the modifiers — the
+    /// axis is the control.
     fn wire_zoom(&self) {
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         let state = self.state.clone();
         let area = self.area.clone();
-        scroll.connect_scroll(move |_, _dx, dy| {
-            if dy == 0.0 {
+        scroll.connect_scroll(move |controller, dx, dy| {
+            if dx == 0.0 && dy == 0.0 {
                 return glib::Propagation::Proceed;
             }
-            let mut s = state.borrow_mut();
-            let (first, visible) = s.slice();
-            let factor = if dy > 0.0 { 1.15 } else { 1.0 / 1.15 };
-            let next = ((visible as f64 * factor).round() as usize)
-                .clamp(MIN_VISIBLE, MAX_VISIBLE)
-                .min(s.bars.len().max(MIN_VISIBLE));
+            let modifiers = controller.current_event_state();
+            let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+            let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
 
-            // Zoom about the pointer: the bar under the cursor stays under it.
-            if !s.anchored {
-                let plot_w = (area.width() as f64 - PRICE_AXIS_W - PAD).max(1.0);
-                let frac = s
-                    .pointer
-                    .map(|(x, _)| ((x - PAD) / plot_w).clamp(0.0, 1.0))
-                    .unwrap_or(0.5);
-                let focus = first as f64 + frac * visible as f64;
-                s.first = (focus - frac * next as f64).max(0.0) as usize;
+            let (width, height) = (area.width() as f64, area.height() as f64);
+            let mut s = state.borrow_mut();
+            let region = s
+                .pointer
+                .map(|(x, y)| region_at(x, y, width, height))
+                .unwrap_or(Region::Plot);
+
+            // A trackpad's horizontal axis always pans, whatever is held.
+            if dx != 0.0 && dy == 0.0 {
+                s.pan_by(dx * 2.0);
+                drop(s);
+                area.queue_draw();
+                return glib::Propagation::Stop;
             }
-            s.visible = next;
+
+            match (region, shift, ctrl) {
+                (Region::PriceAxis, _, _) | (Region::Plot, false, true) => {
+                    s.scale_price(2f64.powf(-dy / 4.0));
+                }
+                (Region::Plot, true, _) => {
+                    let visible = s.slice().1 as f64;
+                    s.pan_by(dy * visible / 20.0);
+                }
+                _ => {
+                    let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
+                    let anchor = s
+                        .pointer
+                        .map(|(x, _)| ((x - PAD) / plot_w).clamp(0.0, 1.0))
+                        .unwrap_or(0.5);
+                    s.zoom_time(if dy > 0.0 { 1.15 } else { 1.0 / 1.15 }, anchor);
+                }
+            }
             drop(s);
             area.queue_draw();
             glib::Propagation::Stop
@@ -268,41 +382,172 @@ impl ChartView {
         let drag = gtk::GestureDrag::new();
 
         let state = self.state.clone();
-        drag.connect_drag_begin(move |_, _, _| {
+        let area = self.area.clone();
+        drag.connect_drag_begin(move |_, x, y| {
             let mut s = state.borrow_mut();
-            let (first, _) = s.slice();
-            s.drag_origin = Some((first, 0.0));
+            let (first, visible) = s.slice();
+            s.drag = Some(
+                match region_at(x, y, area.width() as f64, area.height() as f64) {
+                    Region::PriceAxis => {
+                        // Touching the axis takes the scale off automatic, from
+                        // exactly where it was, so nothing jumps.
+                        if s.price_auto {
+                            s.price_auto = false;
+                            s.price_zoom = 1.0;
+                            s.price_offset = 0.0;
+                        }
+                        Drag::PriceScale { zoom: s.price_zoom }
+                    }
+                    Region::TimeAxis => Drag::TimeScale { visible },
+                    Region::Plot => Drag::Pan { first, offset: s.price_offset },
+                },
+            );
         });
 
         let state = self.state.clone();
         let area = self.area.clone();
-        drag.connect_drag_update(move |_, offset_x, _| {
+        drag.connect_drag_update(move |_, offset_x, offset_y| {
             let mut s = state.borrow_mut();
-            let Some((origin_first, _)) = s.drag_origin else {
-                return;
-            };
-            let (_, visible) = s.slice();
-            if s.bars.len() <= visible {
-                return;
-            }
+            let Some(drag) = s.drag else { return };
             let plot_w = (area.width() as f64 - PRICE_AXIS_W - PAD).max(1.0);
-            let bar_w = plot_w / visible as f64;
-            // Dragging right reveals older bars.
-            let shift = -(offset_x / bar_w).round() as i64;
-            let max_first = s.bars.len() - visible;
-            let next = (origin_first as i64 + shift).clamp(0, max_first as i64) as usize;
-            s.first = next;
-            s.anchored = next >= max_first;
+
+            match drag {
+                Drag::Pan { first, offset } => {
+                    let (_, visible) = s.slice();
+                    if s.bars.len() > visible {
+                        let bar_w = plot_w / visible as f64;
+                        // Dragging right reveals older bars.
+                        let shift = -(offset_x / bar_w).round() as i64;
+                        let max_first = s.bars.len() - visible;
+                        let next = (first as i64 + shift).clamp(0, max_first as i64) as usize;
+                        s.first = next;
+                        s.anchored = next >= max_first;
+                    }
+                    // Vertical panning only means something once the scale is
+                    // no longer fitting itself to the data.
+                    if !s.price_auto {
+                        let plot_h = (area.height() as f64 - TIME_AXIS_H - PAD).max(1.0);
+                        s.price_offset = offset - offset_y / plot_h / s.price_zoom;
+                    }
+                }
+                Drag::PriceScale { zoom } => {
+                    // Dragging down compresses: more price on screen.
+                    let factor = 2f64.powf(-offset_y / DRAG_PER_DOUBLING);
+                    s.price_zoom = (zoom * factor).clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
+                }
+                Drag::TimeScale { visible } => {
+                    // Dragging left compresses: more time on screen.
+                    let factor = 2f64.powf(-offset_x / DRAG_PER_DOUBLING);
+                    let next = ((visible as f64 * factor).round() as usize)
+                        .clamp(MIN_VISIBLE, MAX_VISIBLE);
+                    s.visible = next;
+                }
+            }
             drop(s);
             area.queue_draw();
         });
 
         let state = self.state.clone();
         drag.connect_drag_end(move |_, _, _| {
-            state.borrow_mut().drag_origin = None;
+            state.borrow_mut().drag = None;
         });
 
         self.area.add_controller(drag);
+
+        // Double-clicking an axis puts it back on automatic, which is the way
+        // out of any scale you have stretched into uselessness.
+        let click = gtk::GestureClick::new();
+        let state = self.state.clone();
+        let area = self.area.clone();
+        click.connect_pressed(move |_, presses, x, y| {
+            if presses < 2 {
+                return;
+            }
+            let region = region_at(x, y, area.width() as f64, area.height() as f64);
+            let mut s = state.borrow_mut();
+            match region {
+                Region::PriceAxis => {
+                    s.price_auto = true;
+                    s.price_zoom = 1.0;
+                    s.price_offset = 0.0;
+                }
+                Region::TimeAxis => {
+                    s.visible = 160;
+                    s.anchored = true;
+                }
+                // Double-clicking the chart itself does nothing, the same as
+                // everywhere else. Resetting is Alt+R or the axis menu.
+                Region::Plot => return,
+            }
+            drop(s);
+            area.queue_draw();
+        });
+        self.area.add_controller(click);
+    }
+
+    /// Put the price scale back to fitting the data.
+    pub fn reset_price_scale(&self) {
+        let mut state = self.state.borrow_mut();
+        state.price_auto = true;
+        state.price_zoom = 1.0;
+        state.price_offset = 0.0;
+        drop(state);
+        self.area.queue_draw();
+    }
+
+    /// Everything back to how the chart opens. Alt+R, and the axis menu.
+    pub fn reset_view(&self) {
+        self.state.borrow_mut().reset_view();
+        self.area.queue_draw();
+    }
+
+    /// Offer the reset where people right-click for it.
+    fn wire_axis_menu(self: &Rc<Self>) {
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let state = self.state.clone();
+        let area = self.area.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            let (width, height) = (area.width() as f64, area.height() as f64);
+            if region_at(x, y, width, height) != Region::PriceAxis {
+                return;
+            }
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let popover = gtk::Popover::new();
+            popover.set_child(Some(&items));
+            popover.set_parent(&area);
+            popover.set_has_arrow(false);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+
+            for (label, reset_all) in [("Auto scale price", false), ("Reset chart (Alt+R)", true)] {
+                let button = gtk::Button::with_label(label);
+                button.add_css_class("flat");
+                if let Some(child) = button.child().and_downcast::<gtk::Label>() {
+                    child.set_xalign(0.0);
+                }
+                let state = state.clone();
+                let area = area.clone();
+                let popover_weak = popover.downgrade();
+                button.connect_clicked(move |_| {
+                    let mut s = state.borrow_mut();
+                    if reset_all {
+                        s.reset_view();
+                    } else {
+                        s.price_auto = true;
+                        s.price_zoom = 1.0;
+                        s.price_offset = 0.0;
+                    }
+                    drop(s);
+                    area.queue_draw();
+                    if let Some(p) = popover_weak.upgrade() {
+                        p.popdown();
+                    }
+                });
+                items.append(&button);
+            }
+            popover.popup();
+        });
+        self.area.add_controller(click);
     }
 }
 
@@ -378,6 +623,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let span = high - low;
     low -= span * 0.04;
     high += span * 0.04;
+    let (low, high) = state.price_window(low, high);
 
     let to_y = |price: f64| plot_y + price_h * (high - price) / (high - low);
     let bar_w = plot_w / visible as f64;

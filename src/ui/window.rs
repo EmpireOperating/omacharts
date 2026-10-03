@@ -65,6 +65,8 @@ pub struct Window {
     series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
     timeframe: Rc<RefCell<Timeframe>>,
     symbol_button: gtk::Button,
+    /// The preset strip, so a typed resolution can update it.
+    timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
     readout: gtk::Label,
 }
 
@@ -80,7 +82,7 @@ impl Window {
             let t = theming.borrow();
             (t.theme(), t.bar_scheme())
         };
-        let chart = Rc::new(ChartView::new(theme, scheme));
+        let chart = ChartView::new(theme, scheme);
         let (sender, receiver) = async_channel::unbounded::<Response>();
         let loader = Loader::new(Yahoo::new(), sender.clone());
 
@@ -120,6 +122,7 @@ impl Window {
                     .unwrap_or(Timeframe::days(1)),
             )),
             symbol_button,
+            timeframe_buttons: RefCell::new(None),
             readout: readout.clone(),
         });
 
@@ -201,6 +204,7 @@ impl Window {
         strip.add_css_class("timeframe-strip");
 
         let mut first: Option<gtk::ToggleButton> = None;
+        let mut buttons = Vec::new();
         for timeframe in Timeframe::PRESETS {
             let button = gtk::ToggleButton::with_label(&timeframe.label());
             button.add_css_class("flat");
@@ -217,7 +221,9 @@ impl Window {
                 }
             });
             strip.append(&button);
+            buttons.push((timeframe, button));
         }
+        *self.timeframe_buttons.borrow_mut() = Some(buttons);
         strip
     }
 
@@ -334,7 +340,32 @@ impl Window {
                     this.chart.go_to_latest();
                     glib::Propagation::Stop
                 }
-                _ => glib::Propagation::Proceed,
+                _ => {
+                    if state.contains(gtk::gdk::ModifierType::ALT_MASK) {
+                        if key == Key::r || key == Key::R {
+                            this.chart.reset_view();
+                            return glib::Propagation::Stop;
+                        }
+                        return glib::Propagation::Proceed;
+                    }
+                    if ctrl {
+                        return glib::Propagation::Proceed;
+                    }
+                    // Start typing and the chart does what every charting tool
+                    // does: letters look for a symbol, digits set the
+                    // resolution. The keystroke carries into the box.
+                    match key.to_unicode() {
+                        Some(c) if c.is_ascii_alphabetic() => {
+                            this.open_search_with(&c.to_string());
+                            glib::Propagation::Stop
+                        }
+                        Some(c) if c.is_ascii_digit() => {
+                            this.prompt_resolution(&c.to_string());
+                            glib::Propagation::Stop
+                        }
+                        _ => glib::Propagation::Proceed,
+                    }
+                }
             }
         });
         self.window.add_controller(keys);
@@ -384,9 +415,54 @@ impl Window {
     }
 
     fn open_search(self: &Rc<Self>) {
+        self.open_search_with("");
+    }
+
+    fn open_search_with(self: &Rc<Self>, query: &str) {
         let this = self.clone();
-        self.search
-            .present(&self.window, "Find symbol", move |instrument| this.show(instrument));
+        self.search.present_with(&self.window, "Find symbol", query, move |instrument| {
+            this.show(instrument)
+        });
+    }
+
+    /// The resolution box: type "3", "15", "4h", "1D".
+    ///
+    /// A bare number means minutes, so the digit that opened this is already
+    /// the start of an answer.
+    fn prompt_resolution(self: &Rc<Self>, start: &str) {
+        let entry = gtk::Entry::new();
+        entry.set_text(start);
+        entry.set_position(-1);
+        entry.set_placeholder_text(Some("3, 15, 4h, 1D"));
+        entry.set_width_chars(10);
+
+        let hint = gtk::Label::new(Some("Resolution"));
+        hint.add_css_class("dim-label");
+        hint.add_css_class("caption");
+        hint.set_xalign(0.0);
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        content.append(&hint);
+        content.append(&entry);
+
+        let popover = gtk::Popover::new();
+        popover.set_child(Some(&content));
+        popover.set_parent(&self.symbol_button);
+
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        entry.connect_activate(move |entry| {
+            if let Some(timeframe) = Timeframe::parse(&entry.text()) {
+                this.apply_timeframe(timeframe);
+            }
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
+        });
+
+        popover.popup();
+        entry.grab_focus();
+        entry.set_position(-1);
     }
 
     fn open_preferences(self: &Rc<Self>) {
@@ -409,6 +485,17 @@ impl Window {
         let dialog = adw::AlertDialog::new(Some("Keyboard shortcuts"), Some(body));
         dialog.add_response("close", "Close");
         dialog.present(Some(&self.window));
+    }
+
+    /// Switch resolution from somewhere other than the strip, keeping the
+    /// strip's buttons honest about what is being shown.
+    fn apply_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
+        self.set_timeframe(timeframe);
+        if let Some(buttons) = self.timeframe_buttons.borrow().as_ref() {
+            for (preset, button) in buttons {
+                button.set_active(*preset == timeframe);
+            }
+        }
     }
 
     fn set_timeframe(self: &Rc<Self>, timeframe: Timeframe) {

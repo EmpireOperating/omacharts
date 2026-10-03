@@ -140,12 +140,29 @@ impl SymbolSearch {
         title: &str,
         on_pick: impl Fn(Instrument) + 'static,
     ) {
+        self.present_with(parent, title, "", on_pick);
+    }
+
+    /// Open it already carrying a query.
+    ///
+    /// Typing a letter on the chart opens this with that letter in the box, so
+    /// the keystroke that summoned the picker is not lost — which is what
+    /// makes "just start typing" feel like one gesture instead of two.
+    pub fn present_with(
+        &self,
+        parent: &impl IsA<gtk::Widget>,
+        title: &str,
+        query: &str,
+        on_pick: impl Fn(Instrument) + 'static,
+    ) {
         *self.handler.borrow_mut() = Some(Box::new(on_pick));
         self.dialog.set_title(title);
-        self.entry.set_text("");
-        self.populate("");
+        self.entry.set_text(query);
+        self.entry.set_position(-1);
+        self.populate(query);
         self.dialog.present(Some(parent));
         self.entry.grab_focus();
+        self.entry.set_position(-1);
     }
 }
 
