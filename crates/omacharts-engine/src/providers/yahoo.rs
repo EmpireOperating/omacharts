@@ -45,6 +45,20 @@ const CAPABILITIES: &[Capability] = &[
     Capability { timeframe: Timeframe::days(1), history_days: None, max_request_days: None },
 ];
 
+/// How far inside its own limit to ask.
+///
+/// "Within the last 60 days" turns out to mean strictly within: asking for
+/// exactly sixty days of fifteen-minute bars is refused outright — not an
+/// empty series, a 422 — which is how DIA ended up blank at 15m while every
+/// other resolution worked. The boundary is not even consistent between
+/// intervals; five-minute bars accept the same window that fifteen-minute bars
+/// reject.
+///
+/// Six hours of margin costs nothing measurable. The oldest bars in that
+/// window are overnight ones that do not exist, so the same request comes back
+/// with the same count either way.
+const WINDOW_MARGIN: i64 = 6 * 3_600;
+
 /// Smallest gap between two requests the user is waiting on.
 ///
 /// Yahoo tolerates a steady trickle and punishes bursts, and nothing here
@@ -176,7 +190,9 @@ impl Yahoo {
         // series behind our back.
         let now = chrono::Utc::now().timestamp();
         let to = now + timeframe.seconds();
-        let from = since.unwrap_or_else(|| now - Self::full_window_days(timeframe) * 86_400);
+        let from = since.unwrap_or_else(|| {
+            now - Self::full_window_days(timeframe) * 86_400 + WINDOW_MARGIN
+        });
         Ok(format!(
             "{ENDPOINT}/{encoded}?interval={interval}&period1={from}&period2={to}"
         ))
@@ -506,6 +522,30 @@ mod tests {
                 < Yahoo::full_window_days(Timeframe::days(1))
         );
         assert_eq!(Yahoo::full_window_days(Timeframe::minutes(5)), 60);
+    }
+
+    /// Yahoo reads its own limit as strictly inside, and not even the same way
+    /// for every interval: sixty days of fifteen-minute bars is a 422 while
+    /// sixty days of five-minute bars is fine. Asking for the exact window is
+    /// how DIA went blank at 15m with every other resolution working.
+    #[test]
+    fn a_full_window_stops_short_of_the_limit_it_is_allowed() {
+        for timeframe in
+            [Timeframe::minutes(5), Timeframe::minutes(15), Timeframe::minutes(30)]
+        {
+            let url = Yahoo::url("DIA", timeframe, None).unwrap();
+            let from: i64 = url
+                .split("period1=")
+                .nth(1)
+                .and_then(|rest| rest.split('&').next())
+                .and_then(|v| v.parse().ok())
+                .expect("period1");
+            let asked = chrono::Utc::now().timestamp() - from;
+            let limit = Yahoo::full_window_days(timeframe) * 86_400;
+            assert!(asked < limit, "{} asked for the whole window", timeframe.label());
+            // And not so far short that a day of history is thrown away.
+            assert!(asked > limit - 86_400, "{} gave up too much", timeframe.label());
+        }
     }
 
     #[test]
