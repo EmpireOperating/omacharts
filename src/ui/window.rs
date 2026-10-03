@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, BarStyle, Indicator, Instrument, Provider, SearchIndex, Session, Timeframe,
+    resample, BarStyle, Indicator, Instrument, Provider, Session, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
@@ -267,7 +267,7 @@ pub struct Window {
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
     store: Rc<Store>,
-    index: Rc<SearchIndex>,
+    index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
     search: Rc<SymbolSearch>,
     watchlist: RefCell<Option<Rc<Watchlist>>>,
@@ -295,7 +295,7 @@ impl Window {
     pub fn build(app: &adw::Application, store: Rc<Store>) -> Rc<Window> {
         store.seed_watchlist_if_empty(DEFAULTS);
 
-        let index = Rc::new(SearchIndex::new(omacharts_engine::symbols::seed()));
+        let index = crate::inventory::Inventory::curated();
         let theming = Rc::new(RefCell::new(Theming::load(&store)));
         theming.borrow_mut().apply();
 
@@ -389,6 +389,10 @@ impl Window {
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
+
+        // The long tail of listings arrives on a thread once the window is up:
+        // the names you are most likely to type are already in the curated half.
+        crate::inventory::load_in_background(this.index.clone(), |_| {});
 
         if !this.restore_workspace() {
             this.rebuild_indicator_legend();
@@ -612,14 +616,49 @@ impl Window {
     }
 
     /// Walk the focus to the next or previous chart in layout order.
-    pub fn step_focus(self: &Rc<Self>, delta: i32) {
-        let leaves = self.layout.borrow().leaves();
-        if leaves.len() < 2 {
-            return;
+    /// Move the focus to the nearest chart in a direction.
+    ///
+    /// By where the charts are on screen, not by where they sit in the tree.
+    /// Walking the tree means the pane to the right of this one is whichever
+    /// leaf happens to come next in a depth-first order — from the top left of
+    /// a column beside a tall chart, that is the pane *below*, and pressing
+    /// right moved down. Geometry is what the arrow key is asking about.
+    pub fn focus_towards(self: &Rc<Self>, dx: i32, dy: i32) {
+        let Some(from) = self.pane_rect(self.focused.get()) else { return };
+        let (fx, fy) = (from.0 + from.2 / 2.0, from.1 + from.3 / 2.0);
+
+        let mut best: Option<(f64, u32)> = None;
+        for pane in self.panes.borrow().iter() {
+            if pane.id == self.focused.get() {
+                continue;
+            }
+            let Some(rect) = self.pane_rect(pane.id) else { continue };
+            let (cx, cy) = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+            let (along, across) = if dx != 0 {
+                ((cx - fx) * dx as f64, (cy - fy).abs())
+            } else {
+                ((cy - fy) * dy as f64, (cx - fx).abs())
+            };
+            // Strictly in the direction asked for, and then the nearest one,
+            // with ties broken by how well the two charts line up.
+            if along <= 1.0 {
+                continue;
+            }
+            let score = along + across * 2.0;
+            if best.is_none_or(|(b, _)| score < b) {
+                best = Some((score, pane.id));
+            }
         }
-        let at = leaves.iter().position(|id| *id == self.focused.get()).unwrap_or(0) as i32;
-        let next = (at + delta).rem_euclid(leaves.len() as i32) as usize;
-        self.focus(leaves[next]);
+        if let Some((_, id)) = best {
+            self.focus(id);
+        }
+    }
+
+    /// Where a chart sits, in the coordinates of the area the charts share.
+    fn pane_rect(&self, id: u32) -> Option<(f64, f64, f64, f64)> {
+        let pane = self.panes.borrow().iter().find(|p| p.id == id).cloned()?;
+        let (x, y) = pane.root.translate_coordinates(&self.chart_host, 0.0, 0.0)?;
+        Some((x, y, pane.root.width() as f64, pane.root.height() as f64))
     }
 
     /// Mount the tree. Rebuilt whole rather than patched: a handful of panes,
@@ -1165,12 +1204,27 @@ impl Window {
                     this.toggle_watchlist();
                     return glib::Propagation::Stop;
                 }
-                Key::Left | Key::Up if alt && !ctrl => {
-                    this.step_focus(-1);
+                // Ctrl+L: follow the rail, or stop following it.
+                Key::l | Key::L if ctrl => {
+                    let pane = this.focused_pane();
+                    this.set_pane_linked(pane.id, !pane.linked.get());
+                    this.sync_chart_actions(&this.focused_pane());
                     return glib::Propagation::Stop;
                 }
-                Key::Right | Key::Down if alt && !ctrl => {
-                    this.step_focus(1);
+                Key::Left if alt && !ctrl => {
+                    this.focus_towards(-1, 0);
+                    return glib::Propagation::Stop;
+                }
+                Key::Right if alt && !ctrl => {
+                    this.focus_towards(1, 0);
+                    return glib::Propagation::Stop;
+                }
+                Key::Up if alt && !ctrl => {
+                    this.focus_towards(0, -1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Down if alt && !ctrl => {
+                    this.focus_towards(0, 1);
                     return glib::Propagation::Stop;
                 }
                 // Back to the chart, from wherever the keyboard ended up —
@@ -1559,8 +1613,8 @@ impl Window {
                     ("Ctrl+H", "Split horizontally"),
                     ("Ctrl+V", "Split vertically"),
                     ("Ctrl+X", "Close this chart"),
-                    ("Alt+← →", "Focus the next or previous chart"),
-                    ("Alt+↑ ↓", "The same, up and down"),
+                    ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
+                    ("Alt+← → ↑ ↓", "Focus the chart that way"),
                 ],
             ),
             (
@@ -2377,7 +2431,7 @@ impl Window {
     /// a display symbol cannot be split back apart: BRK.B is one symbol with a
     /// dot in it, SAN.MC is a symbol and a suffix.
     pub fn show_named(self: &Rc<Self>, symbol: &str, suffix: Option<&str>) -> bool {
-        let Some(instrument) = self.index.find(symbol, suffix).cloned() else {
+        let Some(instrument) = self.index.find(symbol, suffix) else {
             return false;
         };
         self.show(instrument);
@@ -2399,8 +2453,7 @@ impl Window {
         let instrument = self
             .index
             .find(&symbol, suffix.as_deref())
-            .or_else(|| self.index.find("GSPC", None))
-            .cloned();
+            .or_else(|| self.index.find("GSPC", None));
         if let Some(instrument) = instrument {
             self.show(instrument);
         }

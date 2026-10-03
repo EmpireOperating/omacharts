@@ -25,14 +25,14 @@ pub struct SymbolSearch {
     dialog: adw::Dialog,
     list: gtk::ListBox,
     entry: gtk::SearchEntry,
-    index: Rc<SearchIndex>,
+    index: crate::inventory::Inventory,
     /// Instruments on display, parallel to the list rows.
     shown: Rc<RefCell<Vec<Instrument>>>,
     handler: Handler,
 }
 
 impl SymbolSearch {
-    pub fn new(index: Rc<SearchIndex>) -> Rc<SymbolSearch> {
+    pub fn new(index: crate::inventory::Inventory) -> Rc<SymbolSearch> {
         let entry = gtk::SearchEntry::new();
         entry.set_placeholder_text(Some("Symbol or name"));
         entry.set_hexpand(true);
@@ -81,7 +81,7 @@ impl SymbolSearch {
         // cheap enough that debouncing would only add latency.
         let (list, index, shown) = (self.list.clone(), self.index.clone(), self.shown.clone());
         self.entry.connect_search_changed(move |entry| {
-            repopulate(&list, &index, &shown, &entry.text());
+            repopulate(&list, &index.get(), &shown, &entry.text());
         });
 
         // Enter takes the highlighted row, so an exact ticker never needs the
@@ -151,7 +151,7 @@ impl SymbolSearch {
     }
 
     fn populate(&self, query: &str) {
-        repopulate(&self.list, &self.index, &self.shown, query);
+        repopulate(&self.list, &self.index.get(), &self.shown, query);
     }
 
     /// Open the picker. `title` says what picking will do.
@@ -205,6 +205,17 @@ fn repopulate(
         list.append(&row_for(instrument));
         rows.push(instrument.clone());
     }
+
+    // Nothing matched, but the query looks like a ticker: offer it anyway.
+    //
+    // The inventory is a list of symbols somebody wrote down, and the provider
+    // knows more symbols than any list does — a company that listed this
+    // morning has prices before it has an entry. Refusing to try is the app
+    // asserting something it cannot know.
+    if let Some(guess) = rows.is_empty().then(|| unlisted(query)).flatten() {
+        list.append(&unlisted_row(&guess));
+        rows.push(guess);
+    }
     *shown.borrow_mut() = rows;
 
     // Always leave the best match highlighted, so Enter is enough.
@@ -215,6 +226,34 @@ fn repopulate(
 
 /// Ticker, name, and what kind of thing it is. Nothing else — a picker is for
 /// picking.
+/// A symbol the inventory does not have, if the query could be one.
+///
+/// Deliberately strict about shape rather than about existence: the provider
+/// decides whether it exists, and a chart that says "no data for this symbol"
+/// is a better answer than a picker that says nothing at all.
+fn unlisted(query: &str) -> Option<Instrument> {
+    let symbol = query.trim().to_uppercase();
+    let plausible = (1..=6).contains(&symbol.chars().count())
+        && symbol.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+    plausible.then(|| Instrument {
+        symbol,
+        name: "Not in the list — look it up anyway".to_string(),
+        kind: omacharts_engine::InstrumentKind::Equity,
+        suffix: None,
+        currency: None,
+        tier: 2,
+        session_origin: 0,
+        overrides: Vec::new(),
+    })
+}
+
+fn unlisted_row(instrument: &Instrument) -> gtk::ListBoxRow {
+    let row = row_for(instrument);
+    row.add_css_class("symbol-row-unlisted");
+    row
+}
+
 fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     let ticker = gtk::Label::new(Some(&instrument.display_symbol()));
     ticker.add_css_class("symbol-row-ticker");

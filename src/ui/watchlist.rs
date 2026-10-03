@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use omacharts_engine::{Instrument, SearchIndex};
+use omacharts_engine::Instrument;
 
 use crate::store::{Entry, Store, ROOT_SECTION};
 use crate::ui::search::SymbolSearch;
@@ -139,7 +139,7 @@ pub struct Watchlist {
     list: gtk::ListBox,
     header: gtk::Box,
     store: Rc<Store>,
-    index: Rc<SearchIndex>,
+    index: crate::inventory::Inventory,
     quote: QuoteLookup,
     search: Rc<SymbolSearch>,
     on_pick: Rc<dyn Fn(Instrument)>,
@@ -156,7 +156,7 @@ const SETTING_COLUMNS: &str = "watchlist_columns";
 impl Watchlist {
     pub fn new(
         store: Rc<Store>,
-        index: Rc<SearchIndex>,
+        index: crate::inventory::Inventory,
         search: Rc<SymbolSearch>,
         quote: QuoteLookup,
         on_pick: impl Fn(Instrument) + 'static,
@@ -463,7 +463,7 @@ impl Watchlist {
                 let Some(instrument) = self.index.find(&entry.symbol, entry.suffix.as_deref()) else {
                     continue;
                 };
-                let (row, cells) = self.entry_row(section.id, entry, instrument);
+                let (row, cells) = self.entry_row(section.id, entry, &instrument);
                 row.set_visible(!section.collapsed);
                 self.list.append(&row);
                 kinds.push(RowKind::Entry {

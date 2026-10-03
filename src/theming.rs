@@ -263,6 +263,11 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .timeframe-strip { padding: 2px; }
 .timeframe-strip button { min-width: 34px; padding: 2px 6px; }
 
+/* The row offering a symbol nobody listed. Quieter than a real match, because
+   it is a guess rather than an answer. */
+.symbol-row-unlisted .symbol-row-name { opacity: 0.55; font-style: italic; }
+.symbol-row-unlisted .symbol-kind { opacity: 0.4; }
+
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when

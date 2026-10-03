@@ -5,6 +5,7 @@
 
 pub mod bar_plugin;
 pub mod cli;
+pub mod inventory;
 pub mod loader;
 pub mod store;
 pub mod theming;
