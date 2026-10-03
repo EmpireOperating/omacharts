@@ -648,6 +648,21 @@ impl Window {
             }
         });
 
+        // The window's key controller would otherwise take Escape to move
+        // focus back to the chart, leaving this open behind it.
+        let popover_weak = popover.downgrade();
+        let escape = gtk::EventControllerKey::new();
+        escape.connect_key_pressed(move |_, key, _, _| {
+            if key == gtk::gdk::Key::Escape {
+                if let Some(popover) = popover_weak.upgrade() {
+                    popover.popdown();
+                }
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        entry.add_controller(escape);
+
         popover.popup();
         entry.grab_focus();
         entry.set_position(-1);

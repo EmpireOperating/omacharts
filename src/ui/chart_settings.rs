@@ -611,6 +611,15 @@ fn pick_indicator(
         open_indicator_panel(&window, &dialog, &indicator_list, id);
     });
 
+    // A GtkSearchEntry swallows Escape to clear itself, so closing hangs off
+    // what it emits rather than off the key.
+    let popover_weak = popover.downgrade();
+    entry.connect_stop_search(move |_| {
+        if let Some(popover) = popover_weak.upgrade() {
+            popover.popdown();
+        }
+    });
+
     popover.popup();
     entry.grab_focus();
 }
