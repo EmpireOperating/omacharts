@@ -1347,12 +1347,24 @@ impl Window {
                 );
             });
 
+            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove.add_css_class("flat");
+            remove.add_css_class("legend-button");
+            remove.set_tooltip_text(Some("Remove"));
+            let this = self.clone();
+            remove.connect_clicked(move |_| {
+                let kept: Vec<Indicator> =
+                    this.indicators().into_iter().filter(|i| i.id != id).collect();
+                this.set_indicators(kept);
+            });
+
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             row.add_css_class("legend-row");
             row.append(&dot);
             row.append(&label);
             row.append(&toggle);
             row.append(&settings);
+            row.append(&remove);
             self.indicator_legend.append(&row);
         }
     }
