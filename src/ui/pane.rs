@@ -92,11 +92,14 @@ impl ChartPane {
         timeframe_label.set_valign(gtk::Align::Center);
         timeframe_label.set_can_target(false);
 
-        // One icon, and the toggle's own pressed state says whether it is on.
-        // Adwaita has a chain but no broken chain, so a second icon for the
-        // off state was a missing-image placeholder.
+        // Drawn rather than named. Adwaita's "insert-link" is a chain with a
+        // downward arrow under it — it means *insert* a link, and the arrow
+        // read as a dropdown nobody could open. There is no plain chain in the
+        // theme, so here is one: two capsules and the bar that joins them,
+        // painted in whatever colour the button currently has, which is what
+        // makes it follow the theme and dim with the rest of the legend.
         let link = gtk::ToggleButton::new();
-        link.set_icon_name("insert-link-symbolic");
+        link.set_child(Some(&chain_icon()));
         link.add_css_class("flat");
         link.add_css_class("legend-link");
         link.set_valign(gtk::Align::Center);
@@ -223,6 +226,43 @@ impl ChartPane {
         self.symbol_button.set_label(&symbol);
         self.timeframe_label.set_text(&format!("·  {}", self.timeframe.get().label()));
     }
+}
+
+/// A chain: two rounded capsules side by side, joined across the middle.
+fn chain_icon() -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(16);
+    area.set_content_height(16);
+    area.set_draw_func(|area, cr, width, height| {
+        let colour = area.color();
+        cr.set_source_rgba(
+            colour.red() as f64,
+            colour.green() as f64,
+            colour.blue() as f64,
+            colour.alpha() as f64,
+        );
+        let (w, h) = (width as f64, height as f64);
+        let mid = h / 2.0;
+        let thickness = (h / 5.5).max(1.5);
+        cr.set_line_width(thickness);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+
+        // Two links, each a short stroke, with the gap between them bridged by
+        // a thinner bar — the shape you read as a chain at sixteen pixels.
+        let inset = w * 0.12;
+        let gap = w * 0.09;
+        cr.move_to(inset, mid);
+        cr.line_to(w / 2.0 - gap, mid);
+        cr.move_to(w / 2.0 + gap, mid);
+        cr.line_to(w - inset, mid);
+        let _ = cr.stroke();
+
+        cr.set_line_width(thickness * 0.62);
+        cr.move_to(w / 2.0 - gap * 1.6, mid);
+        cr.line_to(w / 2.0 + gap * 1.6, mid);
+        let _ = cr.stroke();
+    });
+    area
 }
 
 /// The legend stays out of the way, so an unlinked chart's toggle is nearly
