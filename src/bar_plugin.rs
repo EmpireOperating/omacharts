@@ -99,14 +99,34 @@ pub fn refresh(home: &Path) -> Result<(), String> {
         return Ok(());
     }
     let target = plugins_dir(home).join(PLUGIN_ID);
+    let mut changed = false;
     for (name, contents) in FILES {
         let path = target.join(name);
         if std::fs::read_to_string(&path).is_ok_and(|current| current == *contents) {
             continue;
         }
         std::fs::write(&path, contents).map_err(|e| format!("could not update {name}: {e}"))?;
+        changed = true;
+    }
+    // Writing the files is not enough: the shell compiled the old QML when it
+    // started and will go on drawing it until something tells it otherwise.
+    // rescanPlugins clears the component cache and reloads the plugins in
+    // place, which is the small version of restarting the shell — nobody
+    // should have to restart their desktop to get a bug fix in a bar widget.
+    if changed {
+        reload_plugins();
     }
     Ok(())
+}
+
+/// Ask the shell to recompile its plugins. Best effort, like `notify_changed`.
+fn reload_plugins() {
+    let _ = std::process::Command::new("omarchy-shell")
+        .args(["-q", "shell", "rescanPlugins"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Take it out of the bar and remove the folder.
