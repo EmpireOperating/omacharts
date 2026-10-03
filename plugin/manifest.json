@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
   "id": "jorgemanrubia.omacharts",
-  "name": "omacharts",
+  "name": "Omacharts",
   "version": "1.0.0",
   "author": "Jorge Manrubia",
   "license": "MIT",
-  "description": "Your omacharts watchlist in the bar.",
+  "description": "Your Omacharts watchlist in the bar.",
   "kinds": [
     "service",
     "bar-widget"
@@ -15,7 +15,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "omacharts",
+    "displayName": "Omacharts",
     "description": "Watchlist quotes from omacharts, and a way back into it.",
     "category": "Information",
     "aliases": [

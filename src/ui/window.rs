@@ -223,8 +223,9 @@ fn rename_leaf(node: &Node, from: u32, to: u32) -> Node {
     match node {
         Node::Leaf(id) if *id == from => Node::Leaf(to),
         Node::Leaf(id) => Node::Leaf(*id),
-        Node::Split { horizontal, first, second } => Node::Split {
+        Node::Split { horizontal, ratio, first, second } => Node::Split {
             horizontal: *horizontal,
+            ratio: *ratio,
             first: Box::new(rename_leaf(first, from, to)),
             second: Box::new(rename_leaf(second, from, to)),
         },
@@ -248,6 +249,8 @@ pub struct Window {
     layout: RefCell<Node>,
     focused: Cell<u32>,
     next_pane: Cell<u32>,
+    /// A save is already queued, so a drag does not queue one per pixel.
+    save_pending: Cell<bool>,
     /// The chart menu's stateful actions, so they can be re-pointed at
     /// whichever chart is focused.
     linked_action: RefCell<Option<gio::SimpleAction>>,
@@ -292,7 +295,7 @@ impl Window {
         let loader = Loader::new(Yahoo::new(), sender.clone());
 
         let window = adw::ApplicationWindow::new(app);
-        window.set_title(Some("omacharts"));
+        window.set_title(Some("Omacharts"));
         window.set_default_size(1280, 800);
 
         let split = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -306,6 +309,7 @@ impl Window {
             layout: RefCell::new(Node::leaf(1)),
             focused: Cell::new(1),
             next_pane: Cell::new(1),
+            save_pending: Cell::new(false),
             linked_action: RefCell::new(None),
             bar_style_action: RefCell::new(None),
             session_action: RefCell::new(None),
@@ -553,7 +557,7 @@ impl Window {
             .as_ref()
             .map(|i| i.display_symbol())
             .unwrap_or_default();
-        self.window.set_title(Some(&format!("{label} · omacharts")));
+        self.window.set_title(Some(&format!("{label} · Omacharts")));
         self.sync_timeframe_buttons();
         self.sync_chart_actions(&pane);
         if let (Some(watchlist), Some(instrument)) =
@@ -631,7 +635,7 @@ impl Window {
             }
         }
         let layout = self.layout.borrow().clone();
-        let widget = self.build_node(&layout);
+        let widget = self.build_node(&layout, &[]);
         self.chart_host.append(&widget);
         let focused = self.focused.get();
         for pane in self.panes.borrow().iter() {
@@ -639,21 +643,25 @@ impl Window {
         }
     }
 
-    fn build_node(self: &Rc<Self>, node: &Node) -> gtk::Widget {
+    fn build_node(self: &Rc<Self>, node: &Node, path: &[bool]) -> gtk::Widget {
         match node {
             Node::Leaf(id) => match self.pane(*id) {
                 Some(pane) => pane.root.clone().upcast(),
                 None => gtk::Box::new(gtk::Orientation::Vertical, 0).upcast(),
             },
-            Node::Split { horizontal, first, second } => {
+            Node::Split { horizontal, ratio, first, second } => {
                 let paned = gtk::Paned::new(if *horizontal {
                     gtk::Orientation::Horizontal
                 } else {
                     gtk::Orientation::Vertical
                 });
                 paned.add_css_class("chart-split");
-                paned.set_start_child(Some(&self.build_node(first)));
-                paned.set_end_child(Some(&self.build_node(second)));
+                let mut down = path.to_vec();
+                down.push(true);
+                paned.set_start_child(Some(&self.build_node(first, &down)));
+                let mut down = path.to_vec();
+                down.push(false);
+                paned.set_end_child(Some(&self.build_node(second, &down)));
                 // Both halves grow with the window, so a split stays the split
                 // you made rather than drifting as the window is resized.
                 paned.set_resize_start_child(true);
@@ -661,6 +669,52 @@ impl Window {
                 paned.set_shrink_start_child(false);
                 paned.set_shrink_end_child(false);
                 paned.set_wide_handle(true);
+
+                // Put the divider back where it was left, once the split has a
+                // size to measure it against — a position set before the first
+                // allocation is a position against zero.
+                let ratio = ratio.clamp(0.05, 0.95);
+                let placed = Rc::new(Cell::new(false));
+                let paned_for_place = paned.clone();
+                let placed_for_map = placed.clone();
+                let place = move || {
+                    if placed_for_map.get() {
+                        return;
+                    }
+                    let length = if paned_for_place.orientation() == gtk::Orientation::Horizontal {
+                        paned_for_place.width()
+                    } else {
+                        paned_for_place.height()
+                    };
+                    if length > 0 {
+                        placed_for_map.set(true);
+                        paned_for_place.set_position((length as f64 * ratio).round() as i32);
+                    }
+                };
+                let place_on_map = place.clone();
+                paned.connect_map(move |_| place_on_map());
+
+                let this = self.clone();
+                let here = path.to_vec();
+                let placed_for_move = placed.clone();
+                paned.connect_position_notify(move |paned| {
+                    // Only once it has been put back, or the first notify —
+                    // which fires while the split still has no size — would
+                    // record a ratio of nothing.
+                    if !placed_for_move.get() {
+                        place();
+                        return;
+                    }
+                    let length = if paned.orientation() == gtk::Orientation::Horizontal {
+                        paned.width()
+                    } else {
+                        paned.height()
+                    };
+                    if length > 0 {
+                        this.record_ratio(&here, paned.position() as f64 / length as f64);
+                    }
+                });
+
                 paned.upcast()
             }
         }
@@ -678,6 +732,30 @@ impl Window {
             }
         }
         self.save_workspace();
+    }
+
+    /// Remember where a divider was dragged to.
+    fn record_ratio(self: &Rc<Self>, path: &[bool], ratio: f64) {
+        let next = self.layout.borrow().with_ratio(path, ratio);
+        *self.layout.borrow_mut() = next;
+        self.save_soon();
+    }
+
+    /// Save once the dragging stops.
+    ///
+    /// A handle being dragged emits a position for every pixel it crosses, and
+    /// a database write per pixel is a database write per pixel. The delay is
+    /// longer than the gap between two of those and shorter than anyone's
+    /// patience.
+    fn save_soon(self: &Rc<Self>) {
+        if self.save_pending.replace(true) {
+            return;
+        }
+        let this = self.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+            this.save_pending.set(false);
+            this.save_workspace();
+        });
     }
 
     /// Write the arrangement down, so a window comes back as it was left.
@@ -1609,7 +1687,7 @@ impl Window {
         pane.write_readout();
         if pane.id == self.focused.get() {
             self.window
-                .set_title(Some(&format!("{} · omacharts", instrument.display_symbol())));
+                .set_title(Some(&format!("{} · Omacharts", instrument.display_symbol())));
             self.store.set_setting(LAST_SYMBOL, &instrument.symbol);
             self.store
                 .set_setting(LAST_SUFFIX, instrument.suffix.as_deref().unwrap_or(""));
@@ -2188,24 +2266,35 @@ impl Window {
             .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
             .clamp(160, 900);
 
+        // Nothing is written down until the stored width has been put back.
+        // Mapping reports a position measured against a window that has not
+        // been laid out yet, and saving that overwrote the width every launch
+        // with whatever the default happened to produce.
+        let placed = Rc::new(Cell::new(false));
+
         let split = self.split.clone();
-        let place = move || {
+        let placed_for_put = placed.clone();
+        let put_back = move || {
+            if placed_for_put.get() {
+                return;
+            }
             let total = split.width();
             if total > width + 200 {
+                placed_for_put.set(true);
                 split.set_position(total - width);
             }
         };
-        place();
-        let split = self.split.clone();
-        let again = place.clone();
-        split.connect_map(move |_| again());
+        put_back();
+        let on_map = put_back.clone();
+        self.split.connect_map(move |_| on_map());
 
         let store = self.store.clone();
-        let split = self.split.clone();
         self.split.connect_position_notify(move |paned| {
-            // Only once there is a real allocation: a position reported before
-            // the first layout would store a nonsense width.
-            if paned.width() > 0 && split.position() > 0 {
+            if !placed.get() {
+                put_back();
+                return;
+            }
+            if paned.width() > 0 && paned.position() > 0 {
                 let width = (paned.width() - paned.position()).clamp(160, 900);
                 store.set_setting(SETTING_SIDEBAR_WIDTH, &width.to_string());
             }

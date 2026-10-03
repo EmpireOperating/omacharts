@@ -246,7 +246,20 @@ fn set_link_look(link: &gtk::ToggleButton, linked: bool) {
 #[serde(rename_all = "snake_case")]
 pub enum Node {
     Leaf(u32),
-    Split { horizontal: bool, first: Box<Node>, second: Box<Node> },
+    Split {
+        horizontal: bool,
+        /// Where the divider sits, as a share of the split's length. Stored
+        /// with the shape because it is part of the arrangement: a layout that
+        /// comes back with every divider centred is not the layout you left.
+        #[serde(default = "half")]
+        ratio: f64,
+        first: Box<Node>,
+        second: Box<Node>,
+    },
+}
+
+fn half() -> f64 {
+    0.5
 }
 
 impl Node {
@@ -259,12 +272,14 @@ impl Node {
         match self {
             Node::Leaf(leaf) if *leaf == id => Node::Split {
                 horizontal,
+                ratio: 0.5,
                 first: Box::new(Node::Leaf(id)),
                 second: Box::new(Node::Leaf(added)),
             },
             Node::Leaf(leaf) => Node::Leaf(*leaf),
-            Node::Split { horizontal: h, first, second } => Node::Split {
+            Node::Split { horizontal: h, ratio, first, second } => Node::Split {
                 horizontal: *h,
+                ratio: *ratio,
                 first: Box::new(first.split(id, added, horizontal)),
                 second: Box::new(second.split(id, added, horizontal)),
             },
@@ -276,16 +291,41 @@ impl Node {
     pub fn remove(&self, id: u32) -> Option<Node> {
         match self {
             Node::Leaf(leaf) => (*leaf != id).then_some(Node::Leaf(*leaf)),
-            Node::Split { horizontal, first, second } => {
+            Node::Split { horizontal, ratio, first, second } => {
                 match (first.remove(id), second.remove(id)) {
                     (Some(a), Some(b)) => Some(Node::Split {
                         horizontal: *horizontal,
+                        ratio: *ratio,
                         first: Box::new(a),
                         second: Box::new(b),
                     }),
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (None, None) => None,
                 }
+            }
+        }
+    }
+
+    /// Move the divider of the split at `path`, where each step says which
+    /// half to descend into.
+    pub fn with_ratio(&self, path: &[bool], ratio: f64) -> Node {
+        match self {
+            Node::Leaf(id) => Node::Leaf(*id),
+            Node::Split { horizontal, ratio: current, first, second } => {
+                let (ratio, first, second) = match path.split_first() {
+                    None => (ratio.clamp(0.05, 0.95), first.clone(), second.clone()),
+                    Some((true, rest)) => (
+                        *current,
+                        Box::new(first.with_ratio(rest, ratio)),
+                        second.clone(),
+                    ),
+                    Some((false, rest)) => (
+                        *current,
+                        first.clone(),
+                        Box::new(second.with_ratio(rest, ratio)),
+                    ),
+                };
+                Node::Split { horizontal: *horizontal, ratio, first, second }
             }
         }
     }
@@ -353,7 +393,7 @@ mod tests {
             .split(2, 4, false);
         assert_eq!(layout.leaves().len(), 4);
         // And the shape is a pair of columns, each divided in two.
-        let Node::Split { horizontal, first, second } = &layout else { panic!("{layout:?}") };
+        let Node::Split { horizontal, first, second, .. } = &layout else { panic!("{layout:?}") };
         assert!(*horizontal);
         assert!(matches!(**first, Node::Split { horizontal: false, .. }));
         assert!(matches!(**second, Node::Split { horizontal: false, .. }));
@@ -369,6 +409,45 @@ mod tests {
         let Node::Split { first, second, .. } = &left else { panic!("{left:?}") };
         assert_eq!(**first, Node::Leaf(1));
         assert!(matches!(**second, Node::Split { .. }));
+    }
+
+    /// A dragged divider is part of the arrangement, and has to survive both
+    /// a restart and anything else happening to the tree.
+    #[test]
+    fn a_dragged_divider_is_remembered() {
+        let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 0.7);
+        let Node::Split { ratio, .. } = &layout else { panic!("{layout:?}") };
+        assert!((ratio - 0.7).abs() < 1e-9, "{ratio}");
+
+        // Splitting one half leaves the outer divider where it was.
+        let deeper = layout.split(2, 3, false);
+        let Node::Split { ratio, .. } = &deeper else { panic!("{deeper:?}") };
+        assert!((ratio - 0.7).abs() < 1e-9, "outer divider moved: {ratio}");
+
+        // And so does closing a pane in the other half.
+        let closed = deeper.remove(3).unwrap();
+        let Node::Split { ratio, .. } = &closed else { panic!("{closed:?}") };
+        assert!((ratio - 0.7).abs() < 1e-9, "outer divider moved on close: {ratio}");
+    }
+
+    #[test]
+    fn an_inner_divider_moves_without_disturbing_the_outer_one() {
+        let layout = Node::leaf(1)
+            .split(1, 2, true)
+            .with_ratio(&[], 0.3)
+            .split(2, 3, false)
+            .with_ratio(&[false], 0.8);
+        let Node::Split { ratio, second, .. } = &layout else { panic!() };
+        assert!((ratio - 0.3).abs() < 1e-9, "outer: {ratio}");
+        let Node::Split { ratio, .. } = &**second else { panic!() };
+        assert!((ratio - 0.8).abs() < 1e-9, "inner: {ratio}");
+    }
+
+    #[test]
+    fn a_divider_cannot_be_pushed_off_the_end() {
+        let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 9.0);
+        let Node::Split { ratio, .. } = &layout else { panic!() };
+        assert!(*ratio <= 0.95 && *ratio >= 0.05, "{ratio}");
     }
 
     #[test]

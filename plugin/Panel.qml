@@ -107,7 +107,7 @@ Panel {
       ? "Updating the watchlist"
       : (root.headline
         ? root.headline.display + " " + Model.formatPercent(root.headline.changePct)
-        : "omacharts watchlist")
+        : "Omacharts watchlist")
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.RightButton || buttonCode === Qt.MiddleButton) root.service.refresh()
       else root.toggle()
