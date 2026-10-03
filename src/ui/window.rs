@@ -1191,9 +1191,10 @@ impl Window {
         });
         self.window.add_controller(keys);
 
-        // Ctrl+V is paste, and GTK claims it before a controller on the window
-        // ever sees it — which is why the vertical split did nothing while the
-        // horizontal one worked. Splitting has to be caught on the way down.
+        // Ctrl+V is paste and Ctrl+X is cut, and GTK claims both before a
+        // controller on the window ever sees them — which is why the vertical
+        // split did nothing while the horizontal one worked. The layout keys
+        // have to be caught on the way down.
         //
         // Only when the focus is not in something you can type into, or
         // pasting a symbol into a box would split the window instead.
@@ -1208,6 +1209,7 @@ impl Window {
             match key {
                 Key::h | Key::H => this.split_focused(true),
                 Key::v | Key::V => this.split_focused(false),
+                Key::x | Key::X => this.close_focused(),
                 _ => return glib::Propagation::Proceed,
             }
             glib::Propagation::Stop
@@ -1442,6 +1444,7 @@ impl Window {
                 &[
                     ("Ctrl+H", "Split horizontally"),
                     ("Ctrl+V", "Split vertically"),
+                    ("Ctrl+X", "Close this chart"),
                     ("Alt+← →", "Focus the next or previous chart"),
                     ("Alt+↑ ↓", "The same, up and down"),
                 ],

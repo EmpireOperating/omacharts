@@ -285,6 +285,40 @@ popover.menu contents {
 popover.menu modelbutton:first-child { margin-top: 6px; }
 popover.menu modelbutton:last-child { margin-bottom: 6px; }
 
+/* The link toggle is a glyph, not a button: no frame, no fill, not even when
+   it is on — a chart that follows the rail says so by the icon being there at
+   full strength, and one that does not says so by the icon being nearly gone.
+   The only time it wears anything is under the pointer, which is the moment
+   you are about to click it. */
+.legend-link,
+.legend-link:checked,
+.legend-link:checked:not(:hover) {
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  outline: none;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 1px;
+}
+.legend-link:hover {
+  background: alpha(currentColor, 0.12);
+  border-radius: 5px;
+}
+
+/* The symbol over the chart is a button, because clicking the name of the
+   thing you are looking at to change it is the shortest route there is — but
+   it should read as the title it replaced until you reach for it. */
+.legend-symbol {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 4px;
+  min-height: 0;
+}
+.legend-symbol:hover { background: alpha(currentColor, 0.12); }
+
 /* The legend sits over the drawing, and the drawing is the point. Everything
    here stays faint until the pointer is near it. */
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }

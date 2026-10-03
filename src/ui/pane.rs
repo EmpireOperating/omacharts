@@ -68,6 +68,9 @@ impl ChartPane {
         let symbol_button = gtk::Button::new();
         symbol_button.add_css_class("flat");
         symbol_button.add_css_class("legend-symbol");
+        // The same weight the plain label had: it is still the title of the
+        // chart, it just happens to be clickable.
+        symbol_button.add_css_class("readout-symbol");
         symbol_button.set_valign(gtk::Align::Center);
         symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
@@ -93,8 +96,11 @@ impl ChartPane {
         gear.set_tooltip_text(Some("Chart settings"));
         gear.set_valign(gtk::Align::Center);
 
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        // The link sits with the symbol, because that is what it is about:
+        // whether this chart follows the rail's symbol or keeps its own.
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
         bar.append(&symbol_button);
+        bar.append(&link);
         bar.append(&timeframe_label);
         bar.append(&gear);
 
@@ -109,20 +115,9 @@ impl ChartPane {
         legend.append(&bar);
         legend.append(&indicator_legend);
 
-        // The link lives in the opposite corner from the legend, on its own.
-        // It is the one thing on a chart that is about the other charts, and
-        // putting it in the stack of names made it read as another indicator.
-        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        corner.set_halign(gtk::Align::End);
-        corner.set_valign(gtk::Align::Start);
-        corner.set_margin_end(10);
-        corner.set_margin_top(6);
-        corner.append(&link);
-
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&view.area));
         overlay.add_overlay(&legend);
-        overlay.add_overlay(&corner);
 
         // A box rather than the overlay itself, so the focus ring is drawn on
         // something that is not also the drawing surface.
@@ -210,11 +205,6 @@ fn set_link_look(link: &gtk::ToggleButton, linked: bool) {
     // rather than by a second glyph. A linked chart says so plainly; an
     // unlinked one keeps a faint handle you can find when you want it.
     link.set_opacity(if linked { 1.0 } else { 0.28 });
-    if linked {
-        link.add_css_class("accent");
-    } else {
-        link.remove_css_class("accent");
-    }
 }
 
 /// How the panes are arranged.

@@ -339,7 +339,7 @@ impl ChartView {
             price_offset: 0.0,
             price_auto: true,
         }));
-        let on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>> = Rc::new(RefCell::new(None));
+        let on_hover: Handler<dyn Fn(Option<Hover>)> = Rc::new(RefCell::new(None));
 
         let view = Rc::new(ChartView {
             area,

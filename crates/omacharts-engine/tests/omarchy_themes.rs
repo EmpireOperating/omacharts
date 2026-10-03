@@ -13,6 +13,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use omacharts_engine::frame::{MIN_FROM_CANDLE, MIN_FROM_FURNITURE, MIN_GUTTER, RING_CONTRAST};
 use omacharts_engine::theme::{
     contrast_ratio, delta_e, hue_gap, theme_bars, Direction, Oklch, SWATCH_SEQUENCE,
 };
@@ -419,6 +420,35 @@ fn the_palette_changes_with_the_theme() {
                 themes[i].0,
                 themes[j].0
             );
+        }
+    }
+}
+
+/// The frame around tiled charts: the gutter must read as a gap, and the
+/// focus ring must be seen the same amount everywhere and never be the colour
+/// of a line the chart draws. The derivation gives up on the last of those
+/// when no lightness in range is clear, so this is also the check that no
+/// shipped theme makes it give up.
+#[test]
+fn the_frame_is_visible_and_unmistakable_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let bars = theme_bars(&theme);
+        let frame = theme.frame(&bars);
+        let ui = &theme.ui;
+
+        let gutter = delta_e(&frame.gutter, &ui.background);
+        assert!(gutter >= MIN_GUTTER, "{name}: gutter {} vanishes into the chart ({gutter:.3})", frame.gutter);
+
+        let contrast = contrast_ratio(&frame.focus, &ui.background);
+        assert!(contrast >= RING_CONTRAST, "{name}: ring {} is {contrast:.2}:1", frame.focus);
+
+        for (what, colour) in [("axis", &ui.axis), ("grid", &ui.grid), ("border", &ui.border), ("crosshair", &ui.crosshair)] {
+            let d = delta_e(&frame.focus, colour);
+            assert!(d >= MIN_FROM_FURNITURE, "{name}: ring {} reads as the {what} {colour} ({d:.3})", frame.focus);
+        }
+        for (what, colour) in [("up", bars.outline(Direction::Up)), ("down", bars.outline(Direction::Down))] {
+            let d = delta_e(&frame.focus, colour);
+            assert!(d >= MIN_FROM_CANDLE, "{name}: ring {} reads as an {what} candle {colour} ({d:.3})", frame.focus);
         }
     }
 }
