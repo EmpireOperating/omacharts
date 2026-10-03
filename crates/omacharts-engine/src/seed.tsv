@@ -1,0 +1,240 @@
+# kind	symbol	name	suffix	currency	tier	session_origin	yahoo_override
+# Curated inventory shipped in the binary. Canonical, neutral symbols: the
+# Yahoo provider adds ^ / =F / =X from the kind. session_origin is seconds
+# past midnight UTC that the session opens (futures: 18:00 ET).
+index	GSPC	S&P 500	-	USD	0	0	-
+index	NDX	Nasdaq 100	-	USD	0	0	-
+index	IXIC	Nasdaq Composite	-	USD	0	0	-
+index	DJI	Dow Jones Industrial Average	-	USD	0	0	-
+index	RUT	Russell 2000	-	USD	0	0	-
+index	VIX	CBOE Volatility Index	-	USD	0	0	-
+index	TNX	US 10 Year Treasury Yield	-	USD	0	0	-
+index	TYX	US 30 Year Treasury Yield	-	USD	1	0	-
+index	FVX	US 5 Year Treasury Yield	-	USD	1	0	-
+index	NYA	NYSE Composite	-	USD	2	0	-
+index	SOX	PHLX Semiconductor	-	USD	1	0	-
+index	FTSE	FTSE 100	-	GBP	0	0	-
+index	GDAXI	DAX	-	EUR	0	0	-
+index	FCHI	CAC 40	-	EUR	0	0	-
+index	STOXX50E	Euro Stoxx 50	-	EUR	0	0	-
+index	IBEX	IBEX 35	-	EUR	0	0	-
+index	FTSEMIB.MI	FTSE MIB	-	EUR	1	0	FTSEMIB.MI
+index	AEX	AEX	-	EUR	1	0	-
+index	SSMI	Swiss Market Index	-	CHF	1	0	-
+index	N225	Nikkei 225	-	JPY	0	0	-
+index	HSI	Hang Seng	-	HKD	0	0	-
+index	AXJO	ASX 200	-	AUD	1	0	-
+index	GSPTSE	S&P/TSX Composite	-	CAD	1	0	-
+index	BVSP	Bovespa	-	BRL	2	0	-
+index	KS11	KOSPI	-	KRW	2	0	-
+index	TWII	Taiwan Weighted	-	TWD	2	0	-
+index	BSESN	BSE Sensex	-	INR	2	0	-
+index	DXY	US Dollar Index	-	USD	0	0	DX-Y.NYB
+future_root	ES	E-mini S&P 500	-	USD	0	79200	-
+future_root	MES	Micro E-mini S&P 500	-	USD	1	79200	-
+future_root	NQ	E-mini Nasdaq 100	-	USD	0	79200	-
+future_root	MNQ	Micro E-mini Nasdaq 100	-	USD	1	79200	-
+future_root	YM	E-mini Dow	-	USD	0	79200	-
+future_root	MYM	Micro E-mini Dow	-	USD	2	79200	-
+future_root	RTY	E-mini Russell 2000	-	USD	1	79200	-
+future_root	M2K	Micro E-mini Russell 2000	-	USD	2	79200	-
+future_root	CL	Crude Oil WTI	-	USD	0	79200	-
+future_root	MCL	Micro Crude Oil	-	USD	2	79200	-
+future_root	BZ	Brent Crude Oil	-	USD	1	79200	-
+future_root	NG	Natural Gas	-	USD	0	79200	-
+future_root	RB	RBOB Gasoline	-	USD	2	79200	-
+future_root	HO	Heating Oil	-	USD	2	79200	-
+future_root	GC	Gold	-	USD	0	79200	-
+future_root	MGC	Micro Gold	-	USD	1	79200	-
+future_root	SI	Silver	-	USD	0	79200	-
+future_root	SIL	Micro Silver	-	USD	2	79200	-
+future_root	HG	Copper	-	USD	0	79200	-
+future_root	PL	Platinum	-	USD	1	79200	-
+future_root	PA	Palladium	-	USD	2	79200	-
+future_root	ZB	30 Year T-Bond	-	USD	1	79200	-
+future_root	ZN	10 Year T-Note	-	USD	0	79200	-
+future_root	ZF	5 Year T-Note	-	USD	1	79200	-
+future_root	ZT	2 Year T-Note	-	USD	2	79200	-
+future_root	ZC	Corn	-	USD	1	79200	-
+future_root	ZS	Soybeans	-	USD	1	79200	-
+future_root	ZW	Wheat	-	USD	1	79200	-
+future_root	ZL	Soybean Oil	-	USD	2	79200	-
+future_root	ZM	Soybean Meal	-	USD	2	79200	-
+future_root	LE	Live Cattle	-	USD	2	79200	-
+future_root	HE	Lean Hogs	-	USD	2	79200	-
+future_root	KC	Coffee	-	USD	1	79200	-
+future_root	SB	Sugar	-	USD	2	79200	-
+future_root	CC	Cocoa	-	USD	2	79200	-
+future_root	CT	Cotton	-	USD	2	79200	-
+future_root	6E	Euro FX	-	USD	1	79200	-
+future_root	6J	Japanese Yen	-	USD	1	79200	-
+future_root	6B	British Pound	-	USD	2	79200	-
+future_root	6A	Australian Dollar	-	USD	2	79200	-
+future_root	6C	Canadian Dollar	-	USD	2	79200	-
+future_root	6S	Swiss Franc	-	USD	2	79200	-
+etf	SPY	SPDR S&P 500 ETF Trust	-	USD	0	0	-
+etf	QQQ	Invesco QQQ Trust	-	USD	0	0	-
+etf	DIA	SPDR Dow Jones Industrial Average ETF	-	USD	0	0	-
+etf	IWM	iShares Russell 2000 ETF	-	USD	0	0	-
+etf	VTI	Vanguard Total Stock Market ETF	-	USD	0	0	-
+etf	VOO	Vanguard S&P 500 ETF	-	USD	0	0	-
+etf	VEA	Vanguard FTSE Developed Markets ETF	-	USD	1	0	-
+etf	VWO	Vanguard FTSE Emerging Markets ETF	-	USD	1	0	-
+etf	EFA	iShares MSCI EAFE ETF	-	USD	1	0	-
+etf	EEM	iShares MSCI Emerging Markets ETF	-	USD	1	0	-
+etf	GLD	SPDR Gold Shares	-	USD	0	0	-
+etf	IAU	iShares Gold Trust	-	USD	1	0	-
+etf	SLV	iShares Silver Trust	-	USD	1	0	-
+etf	USO	United States Oil Fund	-	USD	1	0	-
+etf	UNG	United States Natural Gas Fund	-	USD	2	0	-
+etf	TLT	iShares 20+ Year Treasury Bond ETF	-	USD	0	0	-
+etf	IEF	iShares 7-10 Year Treasury Bond ETF	-	USD	1	0	-
+etf	SHY	iShares 1-3 Year Treasury Bond ETF	-	USD	2	0	-
+etf	HYG	iShares iBoxx High Yield Corporate Bond ETF	-	USD	1	0	-
+etf	LQD	iShares iBoxx Investment Grade Corporate Bond ETF	-	USD	2	0	-
+etf	AGG	iShares Core US Aggregate Bond ETF	-	USD	2	0	-
+etf	XLK	Technology Select Sector SPDR	-	USD	1	0	-
+etf	XLF	Financial Select Sector SPDR	-	USD	1	0	-
+etf	XLE	Energy Select Sector SPDR	-	USD	1	0	-
+etf	XLV	Health Care Select Sector SPDR	-	USD	1	0	-
+etf	XLI	Industrial Select Sector SPDR	-	USD	2	0	-
+etf	XLY	Consumer Discretionary Select Sector SPDR	-	USD	2	0	-
+etf	XLP	Consumer Staples Select Sector SPDR	-	USD	2	0	-
+etf	XLU	Utilities Select Sector SPDR	-	USD	2	0	-
+etf	XLB	Materials Select Sector SPDR	-	USD	2	0	-
+etf	XLRE	Real Estate Select Sector SPDR	-	USD	2	0	-
+etf	XLC	Communication Services Select Sector SPDR	-	USD	2	0	-
+etf	SMH	VanEck Semiconductor ETF	-	USD	1	0	-
+etf	SOXX	iShares Semiconductor ETF	-	USD	1	0	-
+etf	ARKK	ARK Innovation ETF	-	USD	1	0	-
+etf	VNQ	Vanguard Real Estate ETF	-	USD	2	0	-
+etf	VIXY	ProShares VIX Short-Term Futures ETF	-	USD	2	0	-
+etf	UVXY	ProShares Ultra VIX Short-Term Futures ETF	-	USD	2	0	-
+etf	TQQQ	ProShares UltraPro QQQ	-	USD	1	0	-
+etf	SQQQ	ProShares UltraPro Short QQQ	-	USD	2	0	-
+etf	SPXL	Direxion Daily S&P 500 Bull 3X	-	USD	2	0	-
+etf	BITO	ProShares Bitcoin Strategy ETF	-	USD	2	0	-
+etf	IBIT	iShares Bitcoin Trust	-	USD	1	0	-
+equity	AAPL	Apple	-	USD	0	0	-
+equity	MSFT	Microsoft	-	USD	0	0	-
+equity	NVDA	NVIDIA	-	USD	0	0	-
+equity	AMZN	Amazon	-	USD	0	0	-
+equity	GOOGL	Alphabet Class A	-	USD	0	0	-
+equity	GOOG	Alphabet Class C	-	USD	1	0	-
+equity	META	Meta Platforms	-	USD	0	0	-
+equity	TSLA	Tesla	-	USD	0	0	-
+equity	BRK.B	Berkshire Hathaway Class B	-	USD	0	0	BRK-B
+equity	AVGO	Broadcom	-	USD	0	0	-
+equity	LLY	Eli Lilly	-	USD	1	0	-
+equity	JPM	JPMorgan Chase	-	USD	0	0	-
+equity	V	Visa	-	USD	1	0	-
+equity	MA	Mastercard	-	USD	1	0	-
+equity	XOM	Exxon Mobil	-	USD	1	0	-
+equity	UNH	UnitedHealth	-	USD	1	0	-
+equity	JNJ	Johnson & Johnson	-	USD	1	0	-
+equity	WMT	Walmart	-	USD	1	0	-
+equity	PG	Procter & Gamble	-	USD	1	0	-
+equity	HD	Home Depot	-	USD	1	0	-
+equity	COST	Costco	-	USD	1	0	-
+equity	ORCL	Oracle	-	USD	1	0	-
+equity	AMD	Advanced Micro Devices	-	USD	0	0	-
+equity	NFLX	Netflix	-	USD	0	0	-
+equity	CRM	Salesforce	-	USD	1	0	-
+equity	BAC	Bank of America	-	USD	1	0	-
+equity	KO	Coca-Cola	-	USD	1	0	-
+equity	PEP	PepsiCo	-	USD	1	0	-
+equity	CVX	Chevron	-	USD	1	0	-
+equity	ABBV	AbbVie	-	USD	1	0	-
+equity	MRK	Merck	-	USD	1	0	-
+equity	ADBE	Adobe	-	USD	1	0	-
+equity	TMO	Thermo Fisher Scientific	-	USD	2	0	-
+equity	MCD	McDonald's	-	USD	1	0	-
+equity	CSCO	Cisco Systems	-	USD	1	0	-
+equity	ACN	Accenture	-	USD	2	0	-
+equity	LIN	Linde	-	USD	2	0	-
+equity	INTC	Intel	-	USD	1	0	-
+equity	QCOM	Qualcomm	-	USD	1	0	-
+equity	TXN	Texas Instruments	-	USD	1	0	-
+equity	AMAT	Applied Materials	-	USD	1	0	-
+equity	MU	Micron Technology	-	USD	1	0	-
+equity	ARM	Arm Holdings	-	USD	1	0	-
+equity	SMCI	Super Micro Computer	-	USD	1	0	-
+equity	PLTR	Palantir Technologies	-	USD	1	0	-
+equity	COIN	Coinbase Global	-	USD	1	0	-
+equity	MSTR	MicroStrategy	-	USD	1	0	-
+equity	UBER	Uber Technologies	-	USD	1	0	-
+equity	ABNB	Airbnb	-	USD	1	0	-
+equity	SHOP	Shopify	-	USD	1	0	-
+equity	SQ	Block	-	USD	2	0	-
+equity	PYPL	PayPal	-	USD	1	0	-
+equity	DIS	Walt Disney	-	USD	1	0	-
+equity	BA	Boeing	-	USD	1	0	-
+equity	CAT	Caterpillar	-	USD	1	0	-
+equity	GE	GE Aerospace	-	USD	1	0	-
+equity	GS	Goldman Sachs	-	USD	1	0	-
+equity	MS	Morgan Stanley	-	USD	2	0	-
+equity	WFC	Wells Fargo	-	USD	2	0	-
+equity	T	AT&T	-	USD	2	0	-
+equity	VZ	Verizon	-	USD	2	0	-
+equity	PFE	Pfizer	-	USD	1	0	-
+equity	NKE	Nike	-	USD	1	0	-
+equity	SBUX	Starbucks	-	USD	1	0	-
+equity	LMT	Lockheed Martin	-	USD	2	0	-
+equity	RTX	RTX	-	USD	2	0	-
+equity	NOW	ServiceNow	-	USD	2	0	-
+equity	ISRG	Intuitive Surgical	-	USD	2	0	-
+equity	BKNG	Booking Holdings	-	USD	2	0	-
+equity	MELI	MercadoLibre	-	USD	2	0	-
+equity	ASML	ASML Holding	-	USD	1	0	-
+equity	TSM	Taiwan Semiconductor ADR	-	USD	1	0	-
+equity	BABA	Alibaba ADR	-	USD	1	0	-
+equity	NVO	Novo Nordisk ADR	-	USD	1	0	-
+equity	SAP	SAP	DE	EUR	1	0	-
+equity	SIE	Siemens	DE	EUR	1	0	-
+equity	BMW	BMW	DE	EUR	2	0	-
+equity	ALV	Allianz	DE	EUR	2	0	-
+equity	AIR	Airbus	PA	EUR	1	0	-
+equity	MC	LVMH	PA	EUR	1	0	-
+equity	OR	L'Oreal	PA	EUR	2	0	-
+equity	TTE	TotalEnergies	PA	EUR	2	0	-
+equity	SAN	Banco Santander	MC	EUR	1	0	-
+equity	ITX	Inditex	MC	EUR	1	0	-
+equity	IBE	Iberdrola	MC	EUR	1	0	-
+equity	BBVA	BBVA	MC	EUR	1	0	-
+equity	TEF	Telefonica	MC	EUR	2	0	-
+equity	REP	Repsol	MC	EUR	2	0	-
+equity	AMS	Amadeus IT Group	MC	EUR	2	0	-
+equity	FER	Ferrovial	MC	EUR	2	0	-
+equity	SHEL	Shell	L	GBP	1	0	-
+equity	AZN	AstraZeneca	L	GBP	1	0	-
+equity	HSBA	HSBC Holdings	L	GBP	1	0	-
+equity	ULVR	Unilever	L	GBP	2	0	-
+equity	BP	BP	L	GBP	2	0	-
+equity	RIO	Rio Tinto	L	GBP	2	0	-
+equity	NESN	Nestle	SW	CHF	1	0	-
+equity	NOVN	Novartis	SW	CHF	2	0	-
+equity	ROG	Roche Holding	SW	CHF	2	0	-
+equity	7203	Toyota Motor	T	JPY	1	0	-
+equity	6758	Sony Group	T	JPY	1	0	-
+equity	9984	SoftBank Group	T	JPY	2	0	-
+fx	EURUSD	Euro / US Dollar	-	USD	0	0	-
+fx	GBPUSD	British Pound / US Dollar	-	USD	0	0	-
+fx	USDJPY	US Dollar / Japanese Yen	-	JPY	0	0	-
+fx	USDCHF	US Dollar / Swiss Franc	-	CHF	1	0	-
+fx	AUDUSD	Australian Dollar / US Dollar	-	USD	1	0	-
+fx	USDCAD	US Dollar / Canadian Dollar	-	CAD	1	0	-
+fx	NZDUSD	New Zealand Dollar / US Dollar	-	USD	2	0	-
+fx	EURGBP	Euro / British Pound	-	GBP	2	0	-
+fx	EURJPY	Euro / Japanese Yen	-	JPY	2	0	-
+fx	USDMXN	US Dollar / Mexican Peso	-	MXN	2	0	-
+fx	USDCNY	US Dollar / Chinese Yuan	-	CNY	2	0	-
+crypto	BTC	Bitcoin	-	USD	0	0	-
+crypto	ETH	Ethereum	-	USD	0	0	-
+crypto	SOL	Solana	-	USD	1	0	-
+crypto	XRP	XRP	-	USD	1	0	-
+crypto	ADA	Cardano	-	USD	2	0	-
+crypto	DOGE	Dogecoin	-	USD	2	0	-
+crypto	AVAX	Avalanche	-	USD	2	0	-
+crypto	LINK	Chainlink	-	USD	2	0	-
+crypto	DOT	Polkadot	-	USD	2	0	-
+crypto	LTC	Litecoin	-	USD	2	0	-

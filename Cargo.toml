@@ -1,0 +1,25 @@
+[package]
+name = "omacharts"
+version = "0.1.0"
+edition = "2024"
+description = "Fast, beautiful market charts for the Linux desktop"
+license = "MIT"
+
+[workspace]
+members = [".", "crates/omacharts-engine"]
+
+[dependencies]
+omacharts-engine = { path = "crates/omacharts-engine" }
+adw = { version = "0.9.2", package = "libadwaita", features = ["v1_5"] }
+async-channel = "2.5.0"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+chrono-tz = "0.10.4"
+gtk = { version = "0.11.5", package = "gtk4", features = ["v4_10"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
