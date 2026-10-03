@@ -436,16 +436,10 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
     toolbar.set_content(Some(&page));
 
     match panel {
+        // Nothing packed: an AdwHeaderBar inside a navigation page draws its
+        // own back button, and settings here apply as you change them, so a
+        // Done beside it would be the same action offered twice.
         Panel::Subpage(dialog) => {
-            header.set_show_end_title_buttons(false);
-            let done = gtk::Button::with_label("Done");
-            done.add_css_class("suggested-action");
-            let dialog_for_done = dialog.clone();
-            done.connect_clicked(move |_| {
-                dialog_for_done.pop_subpage();
-            });
-            header.pack_end(&done);
-
             let subpage = adw::NavigationPage::new(&toolbar, &indicator.label());
             dialog.push_subpage(&subpage);
         }
@@ -456,11 +450,24 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
             modal.set_content_height(620);
             modal.set_child(Some(&toolbar));
 
-            // One button, and it finishes the job. Backing out is the dialog's
-            // own close, which is where everything else on the desktop puts it.
+            // Cancel on the left, the suggested action on the right, and the
+            // dialog's own close button turned off — the arrangement GNOME
+            // uses for anything that creates something. A bare close button
+            // next to Add says nothing about what closing would do.
+            header.set_show_start_title_buttons(false);
+            header.set_show_end_title_buttons(false);
+
+            let added = Rc::new(std::cell::Cell::new(false));
+
+            let cancel = gtk::Button::with_label("Cancel");
+            let modal_for_cancel = modal.clone();
+            cancel.connect_clicked(move |_| {
+                modal_for_cancel.close();
+            });
+            header.pack_start(&cancel);
+
             let add = gtk::Button::with_label("Add");
             add.add_css_class("suggested-action");
-            let added = Rc::new(std::cell::Cell::new(false));
             let added_on_click = added.clone();
             let modal_for_add = modal.clone();
             add.connect_clicked(move |_| {
