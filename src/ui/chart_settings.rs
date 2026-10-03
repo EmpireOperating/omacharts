@@ -66,8 +66,8 @@ impl ChartSettings {
         // the rows, and reconnecting it each time would stack up handlers.
         let window_for_add = window.clone();
         let refresh_for_add = Refresh::rebuilding(window, &dialog, &list);
-        list.add.connect_clicked(move |button| {
-            pick_indicator(button, &window_for_add, &refresh_for_add);
+        list.add.connect_clicked(move |_| {
+            pick_indicator(&window_for_add, &refresh_for_add);
         });
         rebuild_indicators(window, &dialog, &list);
 
@@ -265,8 +265,8 @@ fn rebuild_indicators(
         empty.set_activatable(true);
         let window_for_empty = window.clone();
         let refresh_for_empty = refresh.clone();
-        empty.connect_activated(move |row| {
-            pick_indicator(row, &window_for_empty, &refresh_for_empty);
+        empty.connect_activated(move |_| {
+            pick_indicator(&window_for_empty, &refresh_for_empty);
         });
         list.push(&empty);
     }
@@ -1025,17 +1025,19 @@ fn update(window: &Rc<Window>, id: u32, change: impl Fn(&mut Indicator)) {
     window.set_indicators(indicators);
 }
 
-/// The picker on its own, for the hotkey.
+/// Pick the kind of indicator to add.
 ///
-/// No settings window behind it: you pick a kind and get that indicator's own
-/// dialog. Adding one should not require opening a page about everything else
-/// on the chart first.
-pub fn add_indicator(window: &Rc<Window>, anchor: &impl IsA<gtk::Widget>) {
-    pick_indicator(anchor, window, &Refresh::none());
+/// A dialog rather than a popover hanging off whatever was clicked. It is
+/// reached from a button in the settings and from a key on the chart, and the
+/// key has nothing to point at — a picker that lands in the top-left corner
+/// when summoned by Ctrl+Shift+I and under a button otherwise is two features
+/// wearing one name. The symbol search, which has exactly the same two ways
+/// in, has always been a dialog for the same reason.
+pub fn add_indicator(window: &Rc<Window>) {
+    pick_indicator(window, &Refresh::none());
 }
 
-/// The indicator picker: the same type-and-it-narrows as the symbol search.
-fn pick_indicator(anchor: &impl IsA<gtk::Widget>, window: &Rc<Window>, refresh: &Refresh) {
+fn pick_indicator(window: &Rc<Window>, refresh: &Refresh) {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some("Indicator"));
 
@@ -1045,19 +1047,28 @@ fn pick_indicator(anchor: &impl IsA<gtk::Widget>, window: &Rc<Window>, refresh: 
 
     let scroller = gtk::ScrolledWindow::new();
     scroller.set_child(Some(&rows));
-    scroller.set_min_content_height(220);
-    scroller.set_min_content_width(300);
+    scroller.set_vexpand(true);
     scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
 
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.append(&entry);
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    header.set_margin_top(10);
+    header.set_margin_bottom(10);
+    header.set_margin_start(12);
+    header.set_margin_end(12);
+    header.append(&entry);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&header);
+    content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     content.append(&scroller);
 
-    let popover = gtk::Popover::new();
-    popover.set_child(Some(&content));
-    popover.set_parent(anchor);
+    let dialog = adw::Dialog::new();
+    dialog.set_title("Add an indicator");
+    dialog.set_content_width(420);
+    dialog.set_content_height(380);
+    dialog.set_child(Some(&content));
 
-    let shown: Rc<std::cell::RefCell<Vec<Kind>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+    let shown: Rc<RefCell<Vec<Kind>>> = Rc::new(RefCell::new(Vec::new()));
 
     let fill = {
         let rows = rows.clone();
@@ -1105,36 +1116,61 @@ fn pick_indicator(anchor: &impl IsA<gtk::Widget>, window: &Rc<Window>, refresh: 
         }
     });
 
-    let window = window.clone();
-    let refresh = refresh.clone();
-    let popover_weak = popover.downgrade();
+    // Up and down move the selection while focus stays in the entry, so one
+    // hand never has to leave the keyboard.
+    let keys = gtk::EventControllerKey::new();
+    let rows_for_keys = rows.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        let delta = match key {
+            gtk::gdk::Key::Down => 1,
+            gtk::gdk::Key::Up => -1,
+            _ => return glib::Propagation::Proceed,
+        };
+        let at = rows_for_keys.selected_row().map(|r| r.index()).unwrap_or(0);
+        if let Some(next) = rows_for_keys.row_at_index(at + delta) {
+            rows_for_keys.select_row(Some(&next));
+        }
+        glib::Propagation::Stop
+    });
+    entry.add_controller(keys);
+
+    let window_for_pick = window.clone();
+    let refresh_for_pick = refresh.clone();
+    let dialog_for_pick = dialog.clone();
     rows.connect_row_activated(move |_, row| {
         let at = row.index().max(0) as usize;
         let Some(kind) = shown.borrow().get(at).copied() else { return };
-        let id = window.next_indicator_id();
-        let mut indicators = window.indicators();
+        let id = window_for_pick.next_indicator_id();
+        let mut indicators = window_for_pick.indicators();
         indicators.push(Indicator::new(id, kind));
-        window.set_indicators(indicators);
-        refresh.run();
-        if let Some(popover) = popover_weak.upgrade() {
-            popover.popdown();
-        }
-        // Straight into its settings, in a dialog of its own: picking the kind
-        // and setting it up are two steps, and the second one is where you say
-        // whether you meant it.
-        open_indicator_panel_for(&window, &refresh, id, Panel::Add);
+        window_for_pick.set_indicators(indicators);
+        refresh_for_pick.run();
+        dialog_for_pick.close();
+        // Straight into its settings: picking the kind and setting it up are
+        // two steps, and the second is where you say whether you meant it.
+        open_indicator_panel_for(&window_for_pick, &refresh_for_pick, id, Panel::Add);
     });
 
     // A GtkSearchEntry swallows Escape to clear itself, so closing hangs off
     // what it emits rather than off the key.
-    let popover_weak = popover.downgrade();
+    let dialog_for_stop = dialog.clone();
     entry.connect_stop_search(move |_| {
-        if let Some(popover) = popover_weak.upgrade() {
-            popover.popdown();
-        }
+        dialog_for_stop.close();
     });
 
-    popover.popup();
+    // And again on the dialog, for an Escape pressed with focus in the list.
+    let escape = gtk::EventControllerKey::new();
+    let dialog_for_escape = dialog.clone();
+    escape.connect_key_pressed(move |_, key, _, _| {
+        if key == gtk::gdk::Key::Escape {
+            dialog_for_escape.close();
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    dialog.add_controller(escape);
+
+    dialog.present(Some(&window.window));
     entry.grab_focus();
 }
 

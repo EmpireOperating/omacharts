@@ -201,9 +201,6 @@ pub struct Window {
     symbol_button: gtk::Button,
     /// The chart's legend: what this is, and at what resolution.
     legend: gtk::Label,
-    /// The gear beside the legend. Also what the add-indicator picker hangs
-    /// off, since it sits where the indicators are listed.
-    legend_gear: gtk::Button,
     /// One row per indicator, under the legend.
     indicator_legend: gtk::Box,
     /// Regular or extended hours.
@@ -276,7 +273,6 @@ impl Window {
             )),
             symbol_button,
             legend: readout.clone(),
-            legend_gear: gear.clone(),
             indicator_legend: {
                 let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 rows.set_halign(gtk::Align::Start);
@@ -923,9 +919,9 @@ impl Window {
         crate::ui::chart_settings::ChartSettings::present_indicators(self, self.store.clone());
     }
 
-    /// The indicator picker, on its own, beside the legend.
+    /// The indicator picker, centred like every other picker in the app.
     pub fn add_indicator(self: &Rc<Self>) {
-        crate::ui::chart_settings::add_indicator(self, &self.legend_gear);
+        crate::ui::chart_settings::add_indicator(self);
     }
 
     /// Re-fold and repaint what is on screen, after something that changes
