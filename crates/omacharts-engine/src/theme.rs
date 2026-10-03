@@ -780,6 +780,85 @@ pub fn contrast_ratio(a: &str, b: &str) -> f64 {
     (hi + 0.05) / (lo + 0.05)
 }
 
+/// A range of contrast a piece of the chart's furniture is held to against
+/// its ground: enough to be seen, not enough to be noticed.
+///
+/// The floor is the usual question — can this line be seen at all. The
+/// ceiling is the one the grid used to lack: a theme is free to hand us a
+/// grey that is a perfectly good terminal selection colour and a lattice
+/// across the chart, and a floor alone lets it through.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ContrastBand {
+    pub floor: f64,
+    pub ceiling: f64,
+}
+
+impl ContrastBand {
+    pub const fn new(floor: f64, ceiling: f64) -> ContrastBand {
+        ContrastBand { floor, ceiling }
+    }
+
+    pub fn holds(&self, ratio: f64) -> bool {
+        (self.floor..=self.ceiling).contains(&ratio)
+    }
+}
+
+/// How far a lightness walk moves per step. Near the quiet end of the scale
+/// one step is about 0.01 of contrast, which is finer than any band is.
+const LIGHTNESS_STEP: f64 = 0.005;
+
+/// Hold `colour` to `band` of contrast against `ground`, with its chroma at
+/// most `max_chroma` if one is given.
+///
+/// A colour already inside the band is returned exactly as it was: the
+/// theme's own colour is the right answer whenever it is an acceptable one.
+/// Otherwise only its lightness moves, and only as far as it must. A colour
+/// that is too loud walks toward the ground until it is just inside the
+/// ceiling, so a repaired theme stays as close as it can to what the theme
+/// asked for. A colour that is too quiet is rebuilt from the ground's own
+/// lightness, walking away from it — lighter on a dark theme, darker on a
+/// light one — until it reaches the floor, which is also what happens to a
+/// colour that sat on the wrong side of the ground, where walking away would
+/// only have found the end of the scale.
+///
+/// WCAG contrast rather than OKLab distance, for the same reason the overlay
+/// floors use it: the question is whether a line can be seen on its ground,
+/// which is a question about light. OKLab has no toe at black, so it calls
+/// a near-black grid on a black chart a tenth of the way to white, which is
+/// not what the eye sees.
+pub fn held_to(colour: &str, ground: &str, band: ContrastBand, max_chroma: Option<f64>) -> String {
+    let (Some(ground_l), Some(mut c)) = (Oklch::of(ground), Oklch::of(colour)) else {
+        return colour.to_string();
+    };
+    let chroma_ok = max_chroma.is_none_or(|max| c.c <= max);
+    if band.holds(contrast_ratio(colour, ground)) && chroma_ok {
+        return colour.to_string();
+    }
+    if let Some(max) = max_chroma {
+        c.c = c.c.min(max);
+    }
+    let ratio = contrast_ratio(&c.hex(), ground);
+    if ratio > band.ceiling {
+        let toward = if c.l > ground_l.l { -LIGHTNESS_STEP } else { LIGHTNESS_STEP };
+        for _ in 0..200 {
+            if contrast_ratio(&c.hex(), ground) <= band.ceiling {
+                break;
+            }
+            c = c.with_lightness(c.l + toward);
+        }
+    } else if ratio < band.floor {
+        let away = if ground_l.l < 0.5 { LIGHTNESS_STEP } else { -LIGHTNESS_STEP };
+        c = c.with_lightness(ground_l.l);
+        for _ in 0..200 {
+            if contrast_ratio(&c.hex(), ground) >= band.floor {
+                break;
+            }
+            c = c.with_lightness(c.l + away);
+        }
+    }
+    c.hex()
+}
+
 /// Luminance as physics counts it: linear light, not gamma-encoded bytes.
 fn relative_luminance(hex: &str) -> Option<f64> {
     let (r, g, b) = linear_rgb(hex)?;
@@ -1162,6 +1241,53 @@ mod tests {
         assert!(distance(&repaired, "#0c0b0c") >= 0.02, "{repaired}");
         // Something already separate is left exactly as it was.
         assert_eq!(ensure_distinct("#ffffff", "#000000", 0.02, "#888888"), "#ffffff");
+    }
+
+    #[test]
+    fn a_colour_inside_its_band_is_kept_to_the_byte() {
+        // Everforest's grid, which was always fine.
+        let band = ContrastBand::new(1.08, 1.20);
+        assert_eq!(held_to("#343f44", "#2d353b", band, None), "#343f44");
+    }
+
+    #[test]
+    fn a_loud_colour_walks_toward_its_ground_and_stops_just_inside() {
+        // White's grid: a mid grey on white, 1.8:1, a lattice.
+        let band = ContrastBand::new(1.08, 1.20);
+        let grid = held_to("#c0c0c0", "#ffffff", band, None);
+        let ratio = contrast_ratio(&grid, "#ffffff");
+        assert!(band.holds(ratio), "{grid} is {ratio:.3}:1");
+        // Just inside: it did not overshoot into the quiet half of the band.
+        assert!(ratio > 1.17, "{grid} is {ratio:.3}:1");
+        // And it kept its side of the ground.
+        assert!(Oklch::of(&grid).unwrap().l < 1.0);
+    }
+
+    #[test]
+    fn a_quiet_colour_is_rebuilt_away_from_its_ground() {
+        let band = ContrastBand::new(1.08, 1.20);
+        // Identical to the ground, on a dark theme: lifted.
+        let lifted = held_to("#0c0b0c", "#0c0b0c", band, None);
+        assert!(band.holds(contrast_ratio(&lifted, "#0c0b0c")), "{lifted}");
+        assert!(Oklch::of(&lifted).unwrap().l > Oklch::of("#0c0b0c").unwrap().l);
+        // On the wrong side of a light ground: a grid lighter than a
+        // near-white chart has nowhere to go but down.
+        let turned = held_to("#fcfcfc", "#fafafa", band, None);
+        assert!(band.holds(contrast_ratio(&turned, "#fafafa")), "{turned}");
+        assert!(Oklch::of(&turned).unwrap().l < Oklch::of("#fafafa").unwrap().l);
+    }
+
+    #[test]
+    fn a_colour_too_vivid_for_its_ground_is_toned_down() {
+        let band = ContrastBand::new(1.08, 1.20);
+        let vivid = held_to("#1a3a8a", "#1a1b26", band, Some(0.06));
+        assert!(Oklch::of(&vivid).unwrap().c <= 0.06 + 1e-6, "{vivid}");
+        assert!(band.holds(contrast_ratio(&vivid, "#1a1b26")), "{vivid}");
+    }
+
+    #[test]
+    fn a_colour_that_cannot_be_parsed_passes_through_held_to() {
+        assert_eq!(held_to("nonsense", "#ffffff", ContrastBand::new(1.0, 2.0), None), "nonsense");
     }
 
     #[test]

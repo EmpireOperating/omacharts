@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use omacharts_engine::frame::{MIN_FROM_CANDLE, MIN_FROM_FURNITURE, MIN_GUTTER, RING_CONTRAST};
+use omacharts_engine::omarchy::{AXIS_CONTRAST, CROSSHAIR_CONTRAST, GRID_CONTRAST};
 use omacharts_engine::theme::{
     contrast_ratio, delta_e, hue_gap, theme_bars, Direction, Oklch, SWATCH_SEQUENCE,
 };
@@ -76,21 +77,57 @@ fn text_is_readable_on_the_background_in_every_theme() {
     }
 }
 
+/// The grid is felt rather than read, on every theme, and the band it is
+/// held to has a ceiling as well as a floor.
+///
+/// It used to have only a floor that mattered: the grid had to be a
+/// different pixel value from the background (RGB 0.004, a hundredth of a
+/// step) and quieter than the text. On a light theme the text is near-black
+/// on near-white, so "quieter than the text" allowed anything up to a mid
+/// grey, and White's `#c0c0c0` grid on white, a lattice at 1.8:1, passed. So
+/// did Lupine's at 1.04:1, which is no grid at all. The band is the same
+/// one the derivation holds the grid to, so this is the check that no
+/// shipped theme makes the derivation give up.
 #[test]
 fn the_grid_is_visible_but_not_loud_in_every_theme() {
     for (name, theme) in fixtures() {
-        let from_background = distance(&theme.ui.grid, &theme.ui.background);
-        let text_contrast = distance(&theme.ui.text, &theme.ui.background);
+        let ratio = contrast_ratio(&theme.ui.grid, &theme.ui.background);
         assert!(
-            from_background > 0.004,
-            "{name}: grid {} is invisible on {} ({from_background:.4})",
+            GRID_CONTRAST.holds(ratio),
+            "{name}: grid {} on {} is {ratio:.3}:1, outside {:.2}..{:.2}",
             theme.ui.grid,
-            theme.ui.background
+            theme.ui.background,
+            GRID_CONTRAST.floor,
+            GRID_CONTRAST.ceiling
         );
+        // And it is lightness, not colour: never much more vivid than the
+        // chart it sits on.
+        let (ground, grid) = (Oklch::of(&theme.ui.background).unwrap(), Oklch::of(&theme.ui.grid).unwrap());
         assert!(
-            from_background < text_contrast,
-            "{name}: grid competes with the text ({from_background:.3} vs {text_contrast:.3})",
+            grid.c <= ground.c + 0.04 + 1e-6,
+            "{name}: grid {} has chroma {:.3} on a chart of {:.3}",
+            theme.ui.grid,
+            grid.c,
+            ground.c
         );
+    }
+}
+
+/// The axis is a line at the edge of the plot: louder than the grid, since
+/// it marks where the plot ends, and never a bar.
+#[test]
+fn the_axis_is_a_line_and_not_a_bar_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let ratio = contrast_ratio(&theme.ui.axis, &theme.ui.background);
+        assert!(
+            AXIS_CONTRAST.holds(ratio),
+            "{name}: axis {} on {} is {ratio:.2}:1, outside {:.2}..{:.2}",
+            theme.ui.axis,
+            theme.ui.background,
+            AXIS_CONTRAST.floor,
+            AXIS_CONTRAST.ceiling
+        );
+        assert_eq!(theme.ui.border, theme.ui.axis, "{name}: the border is not the axis");
     }
 }
 
@@ -193,7 +230,9 @@ fn panels_are_distinguishable_from_the_chart_in_every_theme() {
 }
 
 /// The crosshair and the accent are things you look for, so they have to be
-/// findable against the chart.
+/// findable against the chart. The crosshair is also held below the text:
+/// it is a pointer, and a pointer as bright as the price labels reads as a
+/// mark the chart made rather than where the hand is.
 #[test]
 fn the_crosshair_and_accent_are_visible_in_every_theme() {
     for (name, theme) in fixtures() {
@@ -201,6 +240,15 @@ fn the_crosshair_and_accent_are_visible_in_every_theme() {
             let d = distance(colour, &theme.ui.background);
             assert!(d > 0.15, "{name}: the {what} ({colour}) is lost on the chart ({d:.3})");
         }
+        let ratio = contrast_ratio(&theme.ui.crosshair, &theme.ui.background);
+        assert!(
+            CROSSHAIR_CONTRAST.holds(ratio),
+            "{name}: crosshair {} on {} is {ratio:.2}:1, outside {:.1}..{:.1}",
+            theme.ui.crosshair,
+            theme.ui.background,
+            CROSSHAIR_CONTRAST.floor,
+            CROSSHAIR_CONTRAST.ceiling
+        );
     }
 }
 

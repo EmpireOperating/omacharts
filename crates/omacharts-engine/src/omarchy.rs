@@ -15,7 +15,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::palette;
-use crate::theme::{distance, ensure_distinct, mix, Mode, Source, Theme, UiColors, OMARCHY_ID};
+use crate::theme::{
+    distance, ensure_distinct, held_to, mix, ContrastBand, Mode, Oklch, Source, Theme, UiColors,
+    OMARCHY_ID,
+};
 
 const COLORS: &str = ".local/state/omarchy/current/theme/colors.toml";
 const NAME: &str = ".local/state/omarchy/current/theme.name";
@@ -104,10 +107,40 @@ fn pretty_name(raw: &str) -> String {
     }
 }
 
-/// How far off the background a grid line has to sit to be a grid line.
-const MIN_GRID: f64 = 0.015;
 /// How far a panel has to sit off the chart to read as a panel.
 const MIN_SURFACE: f64 = 0.012;
+
+/// The grid's contrast against the chart, as WCAG counts it.
+///
+/// The grid is felt rather than read: enough to judge alignment by, not
+/// enough to notice. The four hand-tuned built-in themes put theirs between
+/// 1.11 and 1.16, and that is the band's middle. Below 1.08 a hairline is
+/// not reliably there (Lupine's 1.04 was a grid in name only); above 1.20 it
+/// is a lattice the candles have to compete with, which is what Flexoki
+/// Light's 1.24 and White's 1.82 were. The band is the same on light and
+/// dark themes, because the ratio already accounts for the ground.
+pub const GRID_CONTRAST: ContrastBand = ContrastBand::new(1.08, 1.20);
+
+/// The axis lines' contrast against the chart. Louder than the grid, since
+/// they mark where the plot ends, and still a line rather than a bar: the
+/// built-ins sit between 1.48 and 1.72, where Ethereal's and Vantablack's
+/// "muted" greys taken as they were made an axis at nearly 5:1, as visible
+/// as a candle.
+pub const AXIS_CONTRAST: ContrastBand = ContrastBand::new(1.35, 2.20);
+
+/// The crosshair's contrast against the chart. It is a pointer, so the floor
+/// is WCAG's 3:1 for graphics that carry meaning, the same as the focus
+/// ring's. The ceiling is wide, because a pointer may be loud; 10:1 is
+/// where it stops being a pointer and becomes the text colour, which is
+/// what Kanagawa's accent literally is and Hackerman's nearly is.
+pub const CROSSHAIR_CONTRAST: ContrastBand = ContrastBand::new(3.0, 10.0);
+
+/// How much more vivid than the chart the grid may be. A grid is lightness,
+/// not colour: a theme whose selection colour is a saturated blue would
+/// otherwise produce a grid at the right contrast that still reads as blue
+/// lines. No shipped theme comes within a third of this; it bounds the
+/// theme we have not seen.
+const GRID_CHROMA_ABOVE_GROUND: f64 = 0.04;
 
 /// Map the semantic keys onto our theme.
 ///
@@ -157,23 +190,28 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
         &text,
     );
 
-    // The grid must sit just off the background. `lighter_background` is
-    // where Omarchy themes usually put it, but not every theme has the key
-    // and some set it to the background itself, so the result is nudged
-    // until it is actually visible.
-    let grid = ensure_distinct(
+    // The chart's furniture is held to a contrast band rather than taken as
+    // it comes. `lighter_background` is where Omarchy themes usually put the
+    // grid, but it was chosen for a terminal's selection, not for a hairline
+    // across a chart: some themes set it to the background itself, and the
+    // light ones set it to a grey that is a lattice on a pale chart. The
+    // theme's own colour is kept whenever it sits inside the band, and moved
+    // in lightness only as far as it must when it does not.
+    let grid_chroma = Oklch::of(&background).map(|b| b.c + GRID_CHROMA_ABOVE_GROUND);
+    let grid = held_to(
         &pick(&["lighter_background", "selection"], &background),
         &background,
-        MIN_GRID,
-        &text,
+        GRID_CONTRAST,
+        grid_chroma,
     );
 
     // The furniture is decided before the palette, because an overlay must
     // stay clear of it: the crosshair is the accent, which is also the first
     // colour most themes call blue, and the axis is the muted colour, which
-    // in Ethereal is a blue of its own.
-    let crosshair = accent.clone();
-    let axis = muted.clone();
+    // in Ethereal is a blue of its own. Each keeps its hue and loses only
+    // the loudness.
+    let crosshair = held_to(&accent, &background, CROSSHAIR_CONTRAST, None);
+    let axis = held_to(&muted, &background, AXIS_CONTRAST, None);
     let swatches = palette::generate(
         keys,
         &palette::Ground { background: &background, grid: &grid, axis: &axis, crosshair: &crosshair },
@@ -192,7 +230,10 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
                 &text,
             ),
             surface,
-            border: muted.clone(),
+            // The border is the axis: it rules the edge above an indicator
+            // strip and the edges of the window's panels, and a rule heavier
+            // than the axis beside it reads as a second axis.
+            border: axis.clone(),
             text_muted,
             grid,
             axis,
@@ -208,7 +249,7 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{theme_bars, SWATCH_NAMES};
+    use crate::theme::{contrast_ratio, theme_bars, SWATCH_NAMES};
 
     const EVERFOREST: &str = r##"
 mode = "dark"
@@ -271,6 +312,54 @@ magenta = "#d699b6"
         assert!(!theme.ui.grid.is_empty());
         assert_eq!(theme.swatches.len(), SWATCH_NAMES.len());
         assert!(theme.swatches.iter().all(|s| !s.hex.is_empty()));
+    }
+
+    #[test]
+    fn a_grid_the_theme_made_loud_is_quietened_and_a_quiet_one_is_kept() {
+        // White ships a mid grey as its lighter background, which on a white
+        // chart is a lattice at 1.8:1.
+        let white = derive(&parse("mode = \"light\"\nbackground = \"#ffffff\"\nlighter_background = \"#c0c0c0\"\nforeground = \"#000000\"\n"), "White");
+        let ratio = contrast_ratio(&white.ui.grid, &white.ui.background);
+        assert!(GRID_CONTRAST.holds(ratio), "grid {} is {ratio:.3}:1", white.ui.grid);
+        assert_ne!(white.ui.grid, "#c0c0c0");
+        // Everforest's grid was always inside the band and is kept to the byte.
+        assert_eq!(derive(&parse(EVERFOREST), "Everforest").ui.grid, "#343f44");
+    }
+
+    #[test]
+    fn a_grid_the_theme_set_to_the_background_is_lifted_off_it() {
+        // Solitude and Last Horizon both do this.
+        let theme = derive(&parse("mode = \"dark\"\nbackground = \"#101315\"\nlighter_background = \"#101315\"\nforeground = \"#cacccc\"\n"), "Solitude");
+        let ratio = contrast_ratio(&theme.ui.grid, &theme.ui.background);
+        assert!(GRID_CONTRAST.holds(ratio), "grid {} is {ratio:.3}:1", theme.ui.grid);
+    }
+
+    #[test]
+    fn the_axis_and_the_crosshair_keep_their_hue_and_lose_their_loudness() {
+        // Ethereal: a saturated blue "muted" at nearly 5:1, and an accent
+        // that is fine as it is.
+        let theme = derive(
+            &parse("mode = \"dark\"\nbackground = \"#060B1E\"\nmuted = \"#6d7db6\"\naccent = \"#7d82d9\"\nforeground = \"#ffcead\"\n"),
+            "Ethereal",
+        );
+        let axis = contrast_ratio(&theme.ui.axis, &theme.ui.background);
+        assert!(AXIS_CONTRAST.holds(axis), "axis {} is {axis:.2}:1", theme.ui.axis);
+        let (was, now) = (Oklch::of("#6d7db6").unwrap(), Oklch::of(&theme.ui.axis).unwrap());
+        assert!((was.h - now.h).abs() < 2.0, "the axis changed hue: {} vs {}", was.h, now.h);
+        assert_eq!(theme.ui.border, theme.ui.axis);
+        assert_eq!(theme.ui.crosshair, "#7d82d9");
+    }
+
+    #[test]
+    fn a_crosshair_the_colour_of_the_text_is_brought_below_it() {
+        // Kanagawa's accent is its foreground.
+        let theme = derive(
+            &parse("mode = \"dark\"\nbackground = \"#1f1f28\"\naccent = \"#dcd7ba\"\nforeground = \"#dcd7ba\"\n"),
+            "Kanagawa",
+        );
+        let ratio = contrast_ratio(&theme.ui.crosshair, &theme.ui.background);
+        assert!(CROSSHAIR_CONTRAST.holds(ratio), "crosshair {} is {ratio:.2}:1", theme.ui.crosshair);
+        assert_ne!(theme.ui.crosshair, theme.ui.text);
     }
 
     #[test]
