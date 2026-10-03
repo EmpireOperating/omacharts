@@ -43,14 +43,23 @@ every design decision below resolves in its favor.
 | Launch → interactive window | **< 200 ms** |
 | Network on any paint path | **never** |
 
-Startup is the exception, and it is worth being honest about. Measured on
-the development machine: an *empty* GTK4/libadwaita window takes 490 ms to
-present, and omacharts takes 508 ms. Everything the app does — opening the
-database, deriving the theme, building the symbol index, the watchlist and
-the chart, restoring the last symbol — costs 8 ms of that, and the app adds
-18 ms over an empty window in total. The rest is toolkit and compositor
-initialisation. There is nothing here to optimise; a launch budget below
-that floor would be a wish rather than a target.
+Startup was measured rather than assumed, twice, and the first answer was
+wrong. Instrumenting the phases showed everything the app does — opening
+the database, deriving the theme, building the symbol index, the watchlist
+and the chart, restoring the last symbol — costing 8 ms, with 460 ms
+inside `present()`. An empty GTK4/libadwaita window took 490 ms on the same
+machine, so that looked like a toolkit floor and the budget was written off.
+
+It was not a floor, it was a default. GTK4 chooses the Vulkan renderer,
+and bringing up a Vulkan context is where the time went: 561 ms to a
+window with it, 226 ms with the GL renderer, 124 ms with cairo. The chart
+is drawn with cairo into a `DrawingArea` either way — the renderer only
+composites the result — so a third of a second for that is a bad trade.
+The app sets `GSK_RENDERER=ngl` unless something already chose one, and
+opens in about 166 ms.
+
+The lesson is in the method: "an empty window is just as slow" ruled out
+our code, and then stopped the investigation one question early.
 
 The rules that follow from this:
 

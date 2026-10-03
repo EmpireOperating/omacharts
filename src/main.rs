@@ -38,6 +38,21 @@ fn main() -> glib::ExitCode {
         Some(_) => {}
     }
 
+    // GTK4 picks the Vulkan renderer by default, and bringing up a Vulkan
+    // context costs around 350ms before anything of ours runs — measured
+    // here at 561ms to a window with it, 226ms with the GL renderer, against
+    // 8ms of our own work. The chart is drawn with cairo into a DrawingArea
+    // either way, so the renderer only composites the result; paying a third
+    // of a second for that is a bad trade on an app whose whole point is
+    // feeling instant.
+    //
+    // GSK_RENDERER=cairo is faster still (124ms) at the cost of software
+    // compositing. Anything already set is left alone.
+    if std::env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: single-threaded, before GTK or any other thread starts.
+        unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+    }
+
     // The command line is handled rather than ignored, because a second
     // launch is how anything outside the app asks for a symbol: the bar widget
     // runs `omacharts NVDA`, and GTK hands that to the instance already
