@@ -356,7 +356,8 @@ impl ChartView {
 
             match (region, shift, ctrl) {
                 (Region::PriceAxis, _, _) | (Region::Plot, false, true) => {
-                    s.scale_price(2f64.powf(-dy / 4.0));
+                    // Same sense as dragging the axis.
+                    s.scale_price(2f64.powf(dy / 4.0));
                 }
                 (Region::Plot, true, _) => {
                     let visible = s.slice().1 as f64;
@@ -424,15 +425,19 @@ impl ChartView {
                         s.anchored = next >= max_first;
                     }
                     // Vertical panning only means something once the scale is
-                    // no longer fitting itself to the data.
+                    // no longer fitting itself to the data. The content follows
+                    // the hand: drag down and the bars come down with it, which
+                    // means the window moves up the price axis.
                     if !s.price_auto {
                         let plot_h = (area.height() as f64 - TIME_AXIS_H - PAD).max(1.0);
-                        s.price_offset = offset - offset_y / plot_h / s.price_zoom;
+                        s.price_offset = offset + offset_y / plot_h / s.price_zoom;
                     }
                 }
                 Drag::PriceScale { zoom } => {
-                    // Dragging down compresses: more price on screen.
-                    let factor = 2f64.powf(-offset_y / DRAG_PER_DOUBLING);
+                    // Grabbing the axis and pulling up stretches it: the
+                    // numbers spread apart and less price fits on screen.
+                    // Pulling down squeezes them together and shows more.
+                    let factor = 2f64.powf(offset_y / DRAG_PER_DOUBLING);
                     s.price_zoom = (zoom * factor).clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
                 }
                 Drag::TimeScale { visible } => {

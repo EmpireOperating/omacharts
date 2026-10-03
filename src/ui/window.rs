@@ -16,13 +16,13 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, Direction, Instrument, Provider, SearchIndex, Timeframe,
+    resample, Instrument, Provider, SearchIndex, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
-use crate::ui::chart::{ChartView, Hover};
+use crate::ui::chart::ChartView;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
@@ -67,7 +67,6 @@ pub struct Window {
     symbol_button: gtk::Button,
     /// The preset strip, so a typed resolution can update it.
     timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
-    readout: gtk::Label,
 }
 
 impl Window {
@@ -94,15 +93,6 @@ impl Window {
         symbol_button.add_css_class("flat");
         symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
-        let readout = gtk::Label::new(None);
-        readout.add_css_class("readout");
-        readout.add_css_class("numeric");
-        readout.set_halign(gtk::Align::Start);
-        readout.set_valign(gtk::Align::Start);
-        readout.set_margin_start(14);
-        readout.set_margin_top(10);
-        readout.set_can_target(false);
-
         let this = Rc::new(Window {
             window: window.clone(),
             chart: chart.clone(),
@@ -123,7 +113,6 @@ impl Window {
             )),
             symbol_button,
             timeframe_buttons: RefCell::new(None),
-            readout: readout.clone(),
         });
 
         let watchlist = this.build_watchlist();
@@ -135,10 +124,7 @@ impl Window {
         split.set_collapsed(false);
         split.set_show_sidebar(store.setting_bool(SHOW_WATCHLIST, true));
 
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&chart.area));
-        overlay.add_overlay(&readout);
-        split.set_content(Some(&overlay));
+        split.set_content(Some(&chart.area));
 
         let header = this.build_header(&split);
         let toolbar = adw::ToolbarView::new();
@@ -146,7 +132,6 @@ impl Window {
         toolbar.set_content(Some(&split));
         window.set_content(Some(&toolbar));
 
-        this.wire_hover();
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
@@ -258,33 +243,6 @@ impl Window {
         )
     }
 
-    fn wire_hover(self: &Rc<Self>) {
-        let readout = self.readout.clone();
-        let current = self.current.clone();
-        let theming = self.theming.clone();
-        self.chart.set_hover_handler(move |hover| match hover {
-            Some(Hover { bar, .. }) => {
-                let direction = Direction::of_bar(bar.open, bar.close);
-                readout.remove_css_class("change-up");
-                readout.remove_css_class("change-down");
-                readout.remove_css_class("change-flat");
-                readout.add_css_class(direction.css_class());
-                let name = current
-                    .borrow()
-                    .as_ref()
-                    .map(|i| i.display_symbol())
-                    .unwrap_or_default();
-                let change = bar.close - bar.open;
-                let pct = if bar.open == 0.0 { 0.0 } else { change / bar.open * 100.0 };
-                readout.set_text(&format!(
-                    "{name}   O {:.2}  H {:.2}  L {:.2}  C {:.2}   {:+.2} ({:+.2}%)",
-                    bar.open, bar.high, bar.low, bar.close, change, pct
-                ));
-                let _ = &theming;
-            }
-            None => readout.set_text(""),
-        });
-    }
 
     fn wire_shortcuts(self: &Rc<Self>) {
         let preferences = gio::SimpleAction::new("preferences", None);
