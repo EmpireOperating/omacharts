@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
+use gtk::gio;
 use gtk::glib;
 use omacharts_engine::{Instrument, SearchIndex};
 
@@ -579,39 +580,30 @@ impl Watchlist {
         x: f64,
         y: f64,
     ) {
-        let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let popover = gtk::Popover::new();
-        popover.set_child(Some(&items));
-        popover.set_parent(anchor);
-        popover.set_has_arrow(false);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let actions = gio::SimpleActionGroup::new();
 
-        let add = menu_item("Add symbol…");
+        let add = gio::SimpleAction::new("add", None);
         let this = self.clone();
-        let popover_weak = popover.downgrade();
-        add.connect_clicked(move |_| {
-            if let Some(p) = popover_weak.upgrade() {
-                p.popdown();
-            }
-            this.add_symbol_to(id);
-        });
-        items.append(&add);
+        add.connect_activate(move |_, _| this.add_symbol_to(id));
+        actions.add_action(&add);
 
-        let remove = menu_item("Remove section…");
-        remove.add_css_class("destructive-action");
+        let remove = gio::SimpleAction::new("remove", None);
         let this = self.clone();
-        let popover_weak = popover.downgrade();
         let name = name.to_string();
-        let anchor = anchor.clone();
-        remove.connect_clicked(move |_| {
-            if let Some(p) = popover_weak.upgrade() {
-                p.popdown();
-            }
-            this.confirm_remove_section(&anchor, id, &name);
+        let anchor_for_remove = anchor.clone();
+        remove.connect_activate(move |_, _| {
+            this.confirm_remove_section(&anchor_for_remove, id, &name);
         });
-        items.append(&remove);
+        actions.add_action(&remove);
+        anchor.insert_action_group("section", Some(&actions));
 
-        popover.popup();
+        let model = gio::Menu::new();
+        model.append(Some("Add symbol…"), Some("section.add"));
+        let destructive = gio::Menu::new();
+        destructive.append(Some("Remove section…"), Some("section.remove"));
+        model.append_section(None, &destructive);
+
+        popup_menu(&model, anchor, x, y);
     }
 
     fn entry_row(
@@ -690,26 +682,18 @@ impl Watchlist {
         let row_weak = row.downgrade();
         click.connect_pressed(move |_, _, x, y| {
             let Some(row) = row_weak.upgrade() else { return };
-            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let popover = gtk::Popover::new();
-            popover.set_child(Some(&items));
-            popover.set_parent(&row);
-            popover.set_has_arrow(false);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
 
-            let remove = menu_item("Remove");
-            remove.add_css_class("destructive-action");
+            let actions = gio::SimpleActionGroup::new();
+            let remove = gio::SimpleAction::new("remove", None);
             let this = this.clone();
             let entry = entry.clone();
-            let popover_weak = popover.downgrade();
-            remove.connect_clicked(move |_| {
-                if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
-                }
-                this.remove_entry(section_id, &entry);
-            });
-            items.append(&remove);
-            popover.popup();
+            remove.connect_activate(move |_, _| this.remove_entry(section_id, &entry));
+            actions.add_action(&remove);
+            row.insert_action_group("symbol", Some(&actions));
+
+            let model = gio::Menu::new();
+            model.append(Some("Remove"), Some("symbol.remove"));
+            popup_menu(&model, &row, x, y);
         });
         row.add_controller(click);
     }
@@ -881,15 +865,18 @@ fn decimals_for(price: f64) -> usize {
     }
 }
 
-/// A flat row in one of the little context menus.
-fn menu_item(label: &str) -> gtk::Button {
-    let button = gtk::Button::with_label(label);
-    button.add_css_class("flat");
-    button.set_halign(gtk::Align::Fill);
-    if let Some(child) = button.child().and_downcast::<gtk::Label>() {
-        child.set_xalign(0.0);
-    }
-    button
+/// Pop a real menu up where the pointer is.
+///
+/// A GtkPopoverMenu from a model, not a box of buttons: it is what the
+/// platform draws for a context menu, and it behaves like one.
+fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
+    let popover = gtk::PopoverMenu::from_model(Some(model));
+    popover.set_parent(over);
+    popover.set_has_arrow(false);
+    popover.set_halign(gtk::Align::Start);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    popover.connect_closed(|popover| popover.unparent());
+    popover.popup();
 }
 
 #[cfg(test)]

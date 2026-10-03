@@ -135,27 +135,21 @@ mod tests {
     }
 }
 
-/// One row of a popover menu, optionally ticked.
-fn menu_item(label: &str, selected: bool) -> gtk::Button {
-    let tick = gtk::Image::from_icon_name(if selected {
-        "object-select-symbolic"
-    } else {
-        "empty-symbolic"
-    });
-    tick.set_opacity(if selected { 1.0 } else { 0.0 });
-
-    let text = gtk::Label::new(Some(label));
-    text.set_xalign(0.0);
-    text.set_hexpand(true);
-
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    row.append(&tick);
-    row.append(&text);
-
-    let button = gtk::Button::new();
-    button.set_child(Some(&row));
-    button.add_css_class("flat");
-    button
+/// Pop a real menu up where the pointer is.
+///
+/// A GtkPopoverMenu built from a menu model, rather than a box of flat
+/// buttons: it is what the platform draws for a context menu, it handles
+/// radio items and keyboard navigation itself, and it looks like every other
+/// menu on the desktop.
+fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
+    let popover = gtk::PopoverMenu::from_model(Some(model));
+    popover.set_parent(over);
+    popover.set_has_arrow(false);
+    popover.set_halign(gtk::Align::Start);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    // A popover with no parent left behind is a warning on every teardown.
+    popover.connect_closed(|popover| popover.unparent());
+    popover.popup();
 }
 
 /// How many symbols either side of the selection to fetch ahead.
@@ -334,6 +328,7 @@ impl Window {
         toolbar.set_content(Some(split));
         window.set_content(Some(&toolbar));
 
+        this.install_chart_actions();
         this.chart.set_bar_style(*this.bar_style.borrow());
         let menu_owner = this.clone();
         this.chart.set_context_menu_handler(move |x, y| menu_owner.chart_menu(x, y));
@@ -361,24 +356,9 @@ impl Window {
         menu.set_button(gtk::gdk::BUTTON_SECONDARY);
         let this = self.clone();
         menu.connect_pressed(move |_, _, x, y| {
-            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let popover = gtk::Popover::new();
-            popover.set_child(Some(&items));
-            popover.set_parent(&this.timeframe_strip);
-            popover.set_has_arrow(false);
-            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-
-            let edit = menu_item("Edit resolutions…", false);
-            let opener = this.clone();
-            let popover_weak = popover.downgrade();
-            edit.connect_clicked(move |_| {
-                if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
-                }
-                opener.edit_timeframes();
-            });
-            items.append(&edit);
-            popover.popup();
+            let model = gio::Menu::new();
+            model.append(Some("Edit resolutions…"), Some("chart.edit-resolutions"));
+            popup_menu(&model, &this.timeframe_strip, x, y);
         });
         self.timeframe_strip.add_controller(menu);
 
@@ -638,7 +618,10 @@ impl Window {
                     this.open_preferences();
                     return glib::Propagation::Stop;
                 }
-                Key::question if ctrl => {
+                // Bare "?" as well as Ctrl+?, because it is what people try
+                // first and it collides with nothing: the type-to-search path
+                // only takes letters and digits.
+                Key::question => {
                     this.show_shortcuts();
                     return glib::Propagation::Stop;
                 }
@@ -894,7 +877,7 @@ impl Window {
                     ("Ctrl+K", "Find a symbol"),
                     ("Ctrl+I", "Chart settings and indicators"),
                     ("Ctrl+,", "Preferences"),
-                    ("Ctrl+?", "This list"),
+                    ("? · Ctrl+?", "This list"),
                     ("Ctrl+W · Ctrl+Q", "Close"),
                 ],
             ),
@@ -1275,60 +1258,86 @@ impl Window {
     /// Right-clicking the chart offers the things you change most, and a way
     /// to everything else.
     fn chart_menu(self: &Rc<Self>, x: f64, y: f64) {
-        let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let popover = gtk::Popover::new();
-        popover.set_child(Some(&items));
-        popover.set_parent(&self.chart.area);
-        popover.set_has_arrow(false);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let menu = gio::Menu::new();
 
-        let current_style = self.bar_style();
+        let bars = gio::Menu::new();
         for style in BarStyle::ALL {
-            let item = menu_item(style.label(), style == current_style);
-            let this = self.clone();
-            let popover_weak = popover.downgrade();
-            item.connect_clicked(move |_| {
-                this.set_bar_style(style);
-                if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
-                }
-            });
-            items.append(&item);
+            let item = gio::MenuItem::new(Some(style.label()), None);
+            item.set_action_and_target_value(
+                Some("chart.bar-style"),
+                Some(&style.key().to_variant()),
+            );
+            bars.append_item(&item);
         }
+        menu.append_section(None, &bars);
 
-        items.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-        let current_session = *self.session.borrow();
+        let sessions = gio::Menu::new();
         for session in Session::ALL {
-            let item = menu_item(session.label(), session == current_session);
-            let this = self.clone();
-            let popover_weak = popover.downgrade();
-            item.connect_clicked(move |_| {
-                *this.session.borrow_mut() = session;
-                this.store
-                    .set_setting(crate::ui::chart_settings::SETTING_SESSION, session.key());
-                this.redraw_current();
-                if let Some(p) = popover_weak.upgrade() {
-                    p.popdown();
-                }
-            });
-            items.append(&item);
+            let item = gio::MenuItem::new(Some(session.label()), None);
+            item.set_action_and_target_value(
+                Some("chart.session"),
+                Some(&session.key().to_variant()),
+            );
+            sessions.append_item(&item);
         }
+        menu.append_section(None, &sessions);
 
-        items.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        let rest = gio::Menu::new();
+        rest.append(Some("Chart settings…"), Some("chart.settings"));
+        menu.append_section(None, &rest);
 
-        let settings = menu_item("Chart settings…", false);
+        popup_menu(&menu, &self.chart.area, x, y);
+    }
+
+    /// The actions the chart's menus drive.
+    ///
+    /// Stateful actions rather than plain ones, so the menu draws the current
+    /// choice as a selected radio item without anybody building ticks by hand.
+    fn install_chart_actions(self: &Rc<Self>) {
+        let actions = gio::SimpleActionGroup::new();
+
+        let bar_style = gio::SimpleAction::new_stateful(
+            "bar-style",
+            Some(glib::VariantTy::STRING),
+            &self.bar_style().key().to_variant(),
+        );
         let this = self.clone();
-        let popover_weak = popover.downgrade();
-        settings.connect_clicked(move |_| {
-            if let Some(p) = popover_weak.upgrade() {
-                p.popdown();
-            }
-            this.open_chart_settings();
+        bar_style.connect_activate(move |action, value| {
+            let Some(key) = value.and_then(|v| v.str().map(str::to_string)) else { return };
+            let Some(style) = BarStyle::from_key(&key) else { return };
+            action.set_state(&key.to_variant());
+            this.set_bar_style(style);
         });
-        items.append(&settings);
+        actions.add_action(&bar_style);
 
-        popover.popup();
+        let session = gio::SimpleAction::new_stateful(
+            "session",
+            Some(glib::VariantTy::STRING),
+            &self.session.borrow().key().to_variant(),
+        );
+        let this = self.clone();
+        session.connect_activate(move |action, value| {
+            let Some(key) = value.and_then(|v| v.str().map(str::to_string)) else { return };
+            let Some(chosen) = Session::from_key(&key) else { return };
+            action.set_state(&key.to_variant());
+            *this.session.borrow_mut() = chosen;
+            this.store
+                .set_setting(crate::ui::chart_settings::SETTING_SESSION, chosen.key());
+            this.redraw_current();
+        });
+        actions.add_action(&session);
+
+        let settings = gio::SimpleAction::new("settings", None);
+        let this = self.clone();
+        settings.connect_activate(move |_, _| this.open_chart_settings());
+        actions.add_action(&settings);
+
+        let resolutions = gio::SimpleAction::new("edit-resolutions", None);
+        let this = self.clone();
+        resolutions.connect_activate(move |_, _| this.edit_timeframes());
+        actions.add_action(&resolutions);
+
+        self.window.insert_action_group("chart", Some(&actions));
     }
 
     /// One key for the whole watchlist, doing the obvious next thing.
