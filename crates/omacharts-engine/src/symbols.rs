@@ -36,6 +36,15 @@ impl InstrumentKind {
         }
     }
 
+    /// Does this trade around the clock?
+    ///
+    /// A market that never closes has no auction open — today's open is
+    /// yesterday's close — which matters anywhere a bar's open is treated as
+    /// a separate price rather than a continuation.
+    pub fn is_continuous(self) -> bool {
+        matches!(self, InstrumentKind::Fx | InstrumentKind::Crypto)
+    }
+
     pub fn from_key(key: &str) -> Option<InstrumentKind> {
         Some(match key {
             "index" => InstrumentKind::Index,
@@ -424,6 +433,20 @@ mod tests {
         // The budget is a millisecond; anything near it means the index
         // regressed into a full scan.
         assert!(per_query < std::time::Duration::from_micros(500), "{per_query:?} per query");
+    }
+
+    #[test]
+    fn only_the_round_the_clock_markets_are_continuous() {
+        assert!(InstrumentKind::Fx.is_continuous());
+        assert!(InstrumentKind::Crypto.is_continuous());
+        for kind in [
+            InstrumentKind::Equity,
+            InstrumentKind::Etf,
+            InstrumentKind::Index,
+            InstrumentKind::FutureRoot,
+        ] {
+            assert!(!kind.is_continuous(), "{kind:?}");
+        }
     }
 
     #[test]

@@ -1186,10 +1186,11 @@ impl Window {
         timeframe: Timeframe,
         bars: Vec<omacharts_engine::Bar>,
     ) {
-        // Yahoo's currency pairs come back with the open equal to the close,
-        // which draws a chart of nothing but dojis. Continuous markets open
-        // where they left off.
-        let bars = if instrument.kind == omacharts_engine::InstrumentKind::Fx {
+        // A market that never closes opens where it left off. Nothing here is
+        // specific to a provider: the repair only fires when the series it is
+        // given has no bodies, which is true of Yahoo's currency pairs and
+        // not of its crypto.
+        let bars = if instrument.kind.is_continuous() {
             omacharts_engine::repair_continuous_opens(&bars)
         } else {
             bars
