@@ -12,6 +12,12 @@ use omacharts_engine::{Instrument, Provider, SearchIndex, Timeframe};
 
 use crate::store::{Store, ROOT_SECTION};
 
+/// How many closes the row's sparkline gets.
+///
+/// Enough to show a shape, few enough that a watchlist of forty stays a small
+/// payload: the widget re-reads this every couple of minutes.
+const SPARK_POINTS: usize = 30;
+
 /// How stale a quote may be before a `--refresh` run goes and gets it.
 const STALE_AFTER_SECONDS: i64 = 15 * 60;
 
@@ -151,6 +157,15 @@ fn entry_json(store: &Store, provider: &Yahoo, instrument: &Instrument) -> Strin
         json_string(&instrument.name),
         json_string(instrument.kind.label()),
     );
+    if let Some(key) = cache_key(provider, instrument) {
+        let bars = store.load_bars(&key, Timeframe::days(1));
+        let tail = &bars[bars.len().saturating_sub(SPARK_POINTS)..];
+        if tail.len() >= 2 {
+            let points: Vec<String> =
+                tail.iter().map(|bar| format!("{:.6}", bar.close)).collect();
+            fields.push_str(&format!(",\"spark\":[{}]", points.join(",")));
+        }
+    }
     match quote(store, provider, instrument) {
         // A quote we do not have is absent rather than zero. Zero is a price.
         Some(q) => fields.push_str(&format!(
@@ -237,6 +252,45 @@ mod tests {
         assert!(parsed["last"].is_null(), "a missing price must not read as 0");
         assert_eq!(parsed["symbol"], "ES");
         assert_eq!(parsed["kind"], "Futures");
+    }
+
+    #[test]
+    fn a_row_carries_a_short_series_for_its_sparkline() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let index = SearchIndex::new(omacharts_engine::symbols::seed());
+        let instrument = index.find("ES", None).unwrap();
+        let key = cache_key(&provider, instrument).unwrap();
+
+        // More history than the sparkline wants, so it has to take the tail.
+        let bars: Vec<omacharts_engine::Bar> = (0..100)
+            .map(|i| omacharts_engine::Bar {
+                ts: (i + 1) * 86_400,
+                open: i as f64,
+                high: i as f64,
+                low: i as f64,
+                close: i as f64,
+                volume: 1.0,
+            })
+            .collect();
+        store.write_bars(&key, Timeframe::days(1), &bars);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&entry_json(&store, &provider, instrument)).unwrap();
+        let spark = parsed["spark"].as_array().unwrap();
+        assert_eq!(spark.len(), SPARK_POINTS);
+        assert_eq!(spark.last().unwrap().as_f64().unwrap(), 99.0, "the tail, not the start");
+    }
+
+    #[test]
+    fn a_row_with_nothing_to_draw_has_no_series() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let index = SearchIndex::new(omacharts_engine::symbols::seed());
+        let instrument = index.find("ES", None).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&entry_json(&store, &provider, instrument)).unwrap();
+        assert!(parsed["spark"].is_null(), "an absent series beats an empty one");
     }
 
     #[test]

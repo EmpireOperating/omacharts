@@ -65,6 +65,7 @@ const FILES: &[(&str, &str)] = &[
     ("Service.qml", include_str!("../plugin/Service.qml")),
     ("Panel.qml", include_str!("../plugin/Panel.qml")),
     ("OmachartsIcon.qml", include_str!("../plugin/OmachartsIcon.qml")),
+    ("Sparkline.qml", include_str!("../plugin/Sparkline.qml")),
 ];
 
 /// Write the plugin folder and add it to the bar.

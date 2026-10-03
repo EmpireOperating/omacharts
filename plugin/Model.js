@@ -44,7 +44,8 @@ function rows(sections) {
         last: entry.last,
         change: entry.change,
         changePct: entry.changePct,
-        hasQuote: entry.last !== null && entry.last !== undefined
+        hasQuote: entry.last !== null && entry.last !== undefined,
+        spark: Array.isArray(entry.spark) ? entry.spark : []
       })
     }
   }

@@ -50,8 +50,14 @@ pub enum Column {
 
 impl Column {
     pub const ALL: [Column; 4] = [Column::Symbol, Column::Last, Column::Change, Column::ChangePct];
-    /// What a fresh install shows.
-    pub const DEFAULT: [Column; 3] = [Column::Symbol, Column::Change, Column::ChangePct];
+    /// What a fresh install shows: what it costs now, and how far it has
+    /// moved. The absolute change is the one of the three you can work out
+    /// from the other two.
+    pub const DEFAULT: [Column; 3] = [Column::Symbol, Column::Last, Column::ChangePct];
+
+    /// The columns shipped before, kept so a rail still carrying them can be
+    /// moved on without overriding a choice somebody actually made.
+    const PREVIOUS_DEFAULT: [Column; 3] = [Column::Symbol, Column::Change, Column::ChangePct];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -95,6 +101,11 @@ pub fn parse_columns(stored: Option<&str>) -> Vec<Column> {
         .map(|s| s.split(',').filter_map(|k| Column::from_key(k.trim())).collect())
         .unwrap_or_default();
     if columns.is_empty() {
+        columns = Column::DEFAULT.to_vec();
+    }
+    // A rail still showing the old default was never configured — it was
+    // simply never touched. Move it on rather than leaving it behind.
+    if columns == Column::PREVIOUS_DEFAULT {
         columns = Column::DEFAULT.to_vec();
     }
     columns.retain(|c| *c != Column::Symbol);
@@ -946,10 +957,26 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_symbol_change_and_percent() {
+    fn the_default_is_symbol_price_and_percent() {
         assert_eq!(
             Column::DEFAULT.to_vec(),
-            vec![Column::Symbol, Column::Change, Column::ChangePct]
+            vec![Column::Symbol, Column::Last, Column::ChangePct]
+        );
+    }
+
+    #[test]
+    fn a_rail_still_on_the_old_default_moves_on() {
+        let old = columns_to_string(&Column::PREVIOUS_DEFAULT);
+        assert_eq!(parse_columns(Some(&old)), Column::DEFAULT.to_vec());
+    }
+
+    #[test]
+    fn a_choice_that_merely_includes_the_change_is_left_alone() {
+        // Only the exact old default is migrated; anything else was chosen.
+        let chosen = columns_to_string(&[Column::Symbol, Column::Change]);
+        assert_eq!(
+            parse_columns(Some(&chosen)),
+            vec![Column::Symbol, Column::Change]
         );
     }
 }

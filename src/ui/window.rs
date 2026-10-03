@@ -647,6 +647,24 @@ impl Window {
                     this.chart.reset_view();
                     return glib::Propagation::Stop;
                 }
+                // Walk the chart without leaving it: resolutions sideways,
+                // symbols up and down, whichever pane has the keyboard.
+                Key::Left if ctrl && alt => {
+                    this.step_timeframe(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Right if ctrl && alt => {
+                    this.step_timeframe(1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Up if ctrl && alt => {
+                    this.step_symbol(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Down if ctrl && alt => {
+                    this.step_symbol(1);
+                    return glib::Propagation::Stop;
+                }
                 _ => {}
             }
 
@@ -915,6 +933,8 @@ impl Window {
             (
                 "Chart",
                 &[
+                    ("Ctrl+Alt+← →", "Previous or next resolution"),
+                    ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
                     ("← →", "Pan"),
                     ("+ −", "Zoom"),
                     ("End", "Jump to the latest bar"),
@@ -949,6 +969,48 @@ impl Window {
         dialog.set_content_height(620);
         dialog.set_child(Some(&toolbar));
         dialog.present(Some(&self.window));
+    }
+
+    /// Move along the resolution strip.
+    fn step_timeframe(self: &Rc<Self>, delta: i32) {
+        let listed = self.timeframes.borrow().clone();
+        if listed.is_empty() {
+            return;
+        }
+        let current = *self.timeframe.borrow();
+        // A resolution typed but not on the strip has no neighbours; start
+        // from the nearest thing that is.
+        let at = listed
+            .iter()
+            .position(|t| *t == current)
+            .unwrap_or_else(|| {
+                listed
+                    .iter()
+                    .position(|t| t.seconds() >= current.seconds())
+                    .unwrap_or(listed.len() - 1)
+            }) as i32;
+        let next = (at + delta).clamp(0, listed.len() as i32 - 1) as usize;
+        self.apply_timeframe(listed[next]);
+    }
+
+    /// Move through the watchlist without going to it.
+    fn step_symbol(self: &Rc<Self>, delta: i32) {
+        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
+        let order = watchlist.flat_order();
+        if order.is_empty() {
+            return;
+        }
+        let current = self.current.borrow().clone();
+        let at = current
+            .and_then(|instrument| {
+                order
+                    .iter()
+                    .position(|i| i.symbol == instrument.symbol && i.suffix == instrument.suffix)
+            })
+            .map(|at| at as i32)
+            .unwrap_or(if delta > 0 { -1 } else { order.len() as i32 });
+        let next = (at + delta).clamp(0, order.len() as i32 - 1) as usize;
+        self.show(order[next].clone());
     }
 
     /// Switch resolution from somewhere other than the strip, keeping the

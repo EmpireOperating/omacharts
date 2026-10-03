@@ -262,6 +262,14 @@ Panel {
 
               Item { Layout.fillWidth: true }
 
+              Sparkline {
+                visible: modelData.spark && modelData.spark.length > 1
+                Layout.preferredWidth: Style.space(52)
+                Layout.preferredHeight: Style.space(22)
+                points: modelData.spark || []
+                stroke: root.colorFor(modelData.change)
+              }
+
               Text {
                 text: Model.formatPrice(modelData.last)
                 font.family: root.fontFamily
