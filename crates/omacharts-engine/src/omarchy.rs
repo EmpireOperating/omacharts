@@ -15,8 +15,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::theme::{
-    distance, ensure_distinct, rotate_hue, Mode, Source, Swatch, Theme, UiColors, OMARCHY_ID,
-    SWATCH_NAMES, SWATCH_SEQUENCE,
+    distance, ensure_distinct, mix, rotate_hue, Mode, Source, Swatch, Theme, UiColors,
+    OMARCHY_ID, SWATCH_NAMES, SWATCH_SEQUENCE,
 };
 
 const COLORS: &str = ".local/state/omarchy/current/theme/colors.toml";
@@ -108,6 +108,8 @@ fn pretty_name(raw: &str) -> String {
 
 /// How far off the background a grid line has to sit to be a grid line.
 const MIN_GRID: f64 = 0.015;
+/// How far a panel has to sit off the chart to read as a panel.
+const MIN_SURFACE: f64 = 0.012;
 /// How far apart up and down have to be to mean opposite things.
 const MIN_DIRECTION: f64 = 0.15;
 /// How far an overlay colour has to be from the chart to be seen on it.
@@ -205,6 +207,28 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
     let muted = pick(&["muted", "selection"], &text);
     let accent = pick(&["accent", "blue", "cyan"], &text);
 
+    // Secondary text has to read as secondary. Some themes put their
+    // "light_foreground" further from the background than the foreground
+    // itself, which inverts the hierarchy; derive it instead when that
+    // happens.
+    let text_muted = {
+        let picked = pick(&["light_foreground", "dark_foreground"], &muted);
+        let contrast = |colour: &str| distance(colour, &background);
+        if contrast(&picked) >= contrast(&text) || contrast(&picked) < 0.12 {
+            mix(&text, &background, 0.42)
+        } else {
+            picked
+        }
+    };
+
+    // A panel the same colour as the chart is not a panel.
+    let surface = ensure_distinct(
+        &pick(&["lighter_background", "dark_background"], &background),
+        &background,
+        MIN_SURFACE,
+        &text,
+    );
+
     // Omarchy's sixteen colours are already chosen to sit together, which is
     // exactly what an indicator palette needs.
     let hexes = [
@@ -230,10 +254,15 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
         mode,
         source: Source::Omarchy,
         ui: UiColors {
-            surface: pick(&["lighter_background", "dark_background"], &background),
-            surface_variant: pick(&["selection", "lighter_background"], &background),
+            surface_variant: ensure_distinct(
+                &pick(&["selection", "lighter_background"], &surface),
+                &background,
+                MIN_SURFACE,
+                &text,
+            ),
+            surface,
             border: muted.clone(),
-            text_muted: pick(&["light_foreground", "dark_foreground"], &muted),
+            text_muted,
             // The grid must sit just off the background. `lighter_background`
             // is where Omarchy themes usually put it, but not every theme has
             // the key and some set it to the background itself, so the result

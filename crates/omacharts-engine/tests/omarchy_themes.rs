@@ -147,6 +147,75 @@ fn fills_sit_between_their_line_and_the_background_in_every_theme() {
     }
 }
 
+/// The chart's furniture has an order to it: text is the loudest thing on the
+/// ground, the axis is quieter, the grid quieter still. A theme that inverts
+/// that reads as a grid with some prices on it.
+#[test]
+fn the_chart_furniture_keeps_its_order_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let text = distance(&theme.ui.text, &theme.ui.background);
+        let axis = distance(&theme.ui.axis, &theme.ui.background);
+        let grid = distance(&theme.ui.grid, &theme.ui.background);
+
+        assert!(grid < axis, "{name}: the grid is louder than the axis");
+        assert!(axis < text, "{name}: the axis is louder than the text");
+        assert!(
+            grid < text * 0.5,
+            "{name}: the grid competes with the text ({grid:.3} vs {text:.3})"
+        );
+    }
+}
+
+/// Secondary text has to be legible and still read as secondary.
+#[test]
+fn muted_text_is_between_the_background_and_the_text_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let text = distance(&theme.ui.text, &theme.ui.background);
+        let muted = distance(&theme.ui.text_muted, &theme.ui.background);
+        assert!(muted > 0.12, "{name}: secondary text is unreadable ({muted:.3})");
+        assert!(muted < text, "{name}: secondary text is louder than primary");
+    }
+}
+
+/// Panels sit on the chart, so they have to be visible against it without
+/// becoming another bright object.
+#[test]
+fn panels_are_distinguishable_from_the_chart_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let surface = distance(&theme.ui.surface, &theme.ui.background);
+        let text = distance(&theme.ui.text, &theme.ui.background);
+        assert!(surface > 0.008, "{name}: panels vanish into the chart ({surface:.3})");
+        assert!(surface < text, "{name}: panels are louder than the text");
+    }
+}
+
+/// The crosshair and the accent are things you look for, so they have to be
+/// findable against the chart.
+#[test]
+fn the_crosshair_and_accent_are_visible_in_every_theme() {
+    for (name, theme) in fixtures() {
+        for (what, colour) in [("crosshair", &theme.ui.crosshair), ("accent", &theme.ui.accent)] {
+            let d = distance(colour, &theme.ui.background);
+            assert!(d > 0.15, "{name}: the {what} ({colour}) is lost on the chart ({d:.3})");
+        }
+    }
+}
+
+/// A candle must not be mistakable for the text or the grid around it.
+#[test]
+fn candles_stand_apart_from_the_furniture_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let bars = theme_bars(&theme);
+        for direction in [Direction::Up, Direction::Down] {
+            let colour = bars.outline(direction);
+            assert!(
+                distance(colour, &theme.ui.grid) > 0.12,
+                "{name}: a {direction:?} candle is the colour of the grid"
+            );
+        }
+    }
+}
+
 #[test]
 fn light_themes_are_detected_as_light() {
     let themes = fixtures();
