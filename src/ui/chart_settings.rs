@@ -37,7 +37,7 @@ impl ChartSettings {
         indicators_page.set_title("Indicators");
         indicators_page.set_icon_name(Some("view-list-symbolic"));
         dialog.add(&indicators_page);
-        rebuild_indicators(window, &indicators_page);
+        rebuild_indicators(window, &dialog, &indicators_page);
 
         dialog.present(Some(&window.window));
     }
@@ -100,12 +100,17 @@ fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGrou
     group
 }
 
-/// Clear and re-add the indicator groups.
+/// Rebuild the list of indicators.
 ///
-/// One group per indicator, because each has its own parameters and its own
-/// colour, and a flat list of every field from every indicator would be
-/// unreadable.
-fn rebuild_indicators(window: &Rc<Window>, page: &adw::PreferencesPage) {
+/// A list, and only a list: each row says what the indicator is and lets you
+/// turn it off or take it away. Everything else lives on its own panel, because
+/// a column of expanders holding every parameter of every indicator is a shape
+/// you cannot read.
+fn rebuild_indicators(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    page: &adw::PreferencesPage,
+) {
     let mut child = page.first_child();
     while let Some(widget) = child {
         let next = widget.next_sibling();
@@ -117,121 +122,227 @@ fn rebuild_indicators(window: &Rc<Window>, page: &adw::PreferencesPage) {
 
     let indicators = window.indicators();
 
-    let add_group = adw::PreferencesGroup::new();
-    add_group.set_title("Indicators");
-    add_group.set_description(Some(if indicators.is_empty() {
-        "Nothing on the chart yet."
+    let group = adw::PreferencesGroup::new();
+    group.set_title("On the chart");
+    group.set_description(Some(if indicators.is_empty() {
+        "Nothing yet."
     } else {
-        "Drawn in the order they were added, each taking the next colour from the theme."
+        "Drawn in order, each taking the next colour from the theme."
     }));
 
-    let add = gtk::Button::with_label("Add indicator…");
-    add.add_css_class("suggested-action");
+    let add = gtk::Button::from_icon_name("list-add-symbolic");
+    add.add_css_class("flat");
+    add.set_tooltip_text(Some("Add an indicator"));
     add.set_valign(gtk::Align::Center);
     let window_for_add = window.clone();
+    let dialog_for_add = dialog.clone();
     let page_for_add = page.clone();
     add.connect_clicked(move |button| {
-        pick_indicator(button, &window_for_add, &page_for_add);
+        pick_indicator(button, &window_for_add, &dialog_for_add, &page_for_add);
     });
-    let add_row = adw::ActionRow::new();
-    add_row.set_title("Add");
-    add_row.add_suffix(&add);
-    add_group.add(&add_row);
-    page.add(&add_group);
+    group.set_header_suffix(Some(&add));
 
     for (slot, indicator) in indicators.iter().enumerate() {
-        page.add(&indicator_group(window, page, slot, indicator));
+        group.add(&indicator_row(window, dialog, page, slot, indicator));
     }
+
+    if indicators.is_empty() {
+        let empty = adw::ActionRow::new();
+        empty.set_title("Add an indicator");
+        empty.set_subtitle("Moving averages, VWAP, volume profile");
+        empty.set_activatable(true);
+        let window_for_empty = window.clone();
+        let dialog_for_empty = dialog.clone();
+        let page_for_empty = page.clone();
+        empty.connect_activated(move |row| {
+            pick_indicator(row, &window_for_empty, &dialog_for_empty, &page_for_empty);
+        });
+        group.add(&empty);
+    }
+
+    page.add(&group);
 }
 
-fn indicator_group(
+/// One line in the list: what it is, whether it is drawn, and a way in.
+fn indicator_row(
     window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
     page: &adw::PreferencesPage,
     slot: usize,
     indicator: &Indicator,
-) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::new();
-    group.set_title(&indicator.label());
-    group.set_description(Some(indicator.kind.name()));
+) -> adw::ActionRow {
+    let id = indicator.id;
+    let row = adw::ActionRow::new();
+    row.set_title(&indicator.label());
+    row.set_subtitle(indicator.kind.name());
+    row.set_activatable(true);
 
-    // Shown / removed.
-    let header = adw::ActionRow::new();
-    header.set_title("Shown");
+    // A dot in the indicator's own colour, so the list matches the chart.
+    let swatch = gtk::DrawingArea::new();
+    swatch.set_size_request(12, 12);
+    swatch.set_valign(gtk::Align::Center);
+    let colour = indicator.color(&window.theme(), slot);
+    swatch.set_draw_func(move |_, cr, width, height| {
+        let radius = (width.min(height) as f64) / 2.0;
+        colors::set_source(cr, &colour);
+        cr.arc(width as f64 / 2.0, height as f64 / 2.0, radius, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+    });
+    row.add_prefix(&swatch);
+
     let visible = gtk::Switch::new();
     visible.set_active(indicator.visible);
     visible.set_valign(gtk::Align::Center);
-    let id = indicator.id;
+    visible.set_tooltip_text(Some("Show on the chart"));
     let window_for_visible = window.clone();
     visible.connect_state_set(move |_, state| {
         update(&window_for_visible, id, |i| i.visible = state);
         glib::Propagation::Proceed
     });
-    header.add_suffix(&visible);
+    row.add_suffix(&visible);
 
     let remove = gtk::Button::from_icon_name("user-trash-symbolic");
     remove.add_css_class("flat");
     remove.set_valign(gtk::Align::Center);
     remove.set_tooltip_text(Some("Remove"));
     let window_for_remove = window.clone();
+    let dialog_for_remove = dialog.clone();
     let page_for_remove = page.clone();
     remove.connect_clicked(move |_| {
         let kept: Vec<Indicator> =
             window_for_remove.indicators().into_iter().filter(|i| i.id != id).collect();
         window_for_remove.set_indicators(kept);
-        rebuild_indicators(&window_for_remove, &page_for_remove);
+        rebuild_indicators(&window_for_remove, &dialog_for_remove, &page_for_remove);
     });
-    header.add_suffix(&remove);
-    group.add(&header);
+    row.add_suffix(&remove);
+    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
 
-    // Colour: the palette by default, a fixed colour once chosen.
-    let colour_row = adw::ActionRow::new();
-    colour_row.set_title("Colour");
-    colour_row.set_subtitle(if indicator.color.is_none() {
-        "From the theme palette"
-    } else {
-        "Chosen"
+    let window_for_open = window.clone();
+    let dialog_for_open = dialog.clone();
+    let page_for_open = page.clone();
+    row.connect_activated(move |_| {
+        open_indicator_panel(&window_for_open, &dialog_for_open, &page_for_open, id);
     });
-    let theme = window.theme();
+    row
+}
+
+/// The indicator's own panel, pushed over the list.
+fn open_indicator_panel(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list_page: &adw::PreferencesPage,
+    id: u32,
+) {
+    let indicators = window.indicators();
+    let Some((slot, indicator)) =
+        indicators.iter().enumerate().find(|(_, i)| i.id == id).map(|(s, i)| (s, i.clone()))
+    else {
+        return;
+    };
+
+    let page = adw::PreferencesPage::new();
+    page.add(&appearance_group(window, dialog, list_page, slot, &indicator));
+    page.add(&parameters_group(window, dialog, list_page, &indicator));
+
+    let toolbar = adw::ToolbarView::new();
+    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.set_content(Some(&page));
+
+    let subpage = adw::NavigationPage::new(&toolbar, &indicator.label());
+    dialog.push_subpage(&subpage);
+}
+
+fn appearance_group(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list_page: &adw::PreferencesPage,
+    slot: usize,
+    indicator: &Indicator,
+) -> adw::PreferencesGroup {
+    let id = indicator.id;
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Appearance");
+
+    let row = adw::ActionRow::new();
+    row.set_title("Colour");
+    // The distinction is whether this colour keeps up with the theme. An
+    // indicator with no colour of its own takes the next one from the theme's
+    // palette, which is what makes a set of them distinguishable without
+    // anyone choosing anything — and what makes them all change together when
+    // the desktop theme does.
+    row.set_subtitle(if indicator.color.is_none() {
+        "Automatic — takes the next colour from the theme, and follows it"
+    } else {
+        "Fixed — stays this colour whatever the theme does"
+    });
+
     let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-    button.set_rgba(&colors::parse(&indicator.color(&theme, slot)));
+    button.set_rgba(&colors::parse(&indicator.color(&window.theme(), slot)));
     button.set_valign(gtk::Align::Center);
     button.add_css_class("swatch-button");
     let window_for_colour = window.clone();
+    let dialog_for_colour = dialog.clone();
+    let list_for_colour = list_page.clone();
     button.connect_rgba_notify(move |button| {
         let hex = colors::to_hex(&button.rgba());
         update(&window_for_colour, id, |i| {
             i.color = Some(ColorChoice::Fixed { hex: hex.clone() })
         });
+        rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
     });
-    colour_row.add_suffix(&button);
+    row.add_suffix(&button);
 
-    let reset = gtk::Button::with_label("Use palette");
+    let reset = gtk::Button::with_label("Automatic");
     reset.add_css_class("flat");
     reset.set_valign(gtk::Align::Center);
+    reset.set_tooltip_text(Some("Go back to taking the colour from the theme"));
+    reset.set_sensitive(indicator.color.is_some());
     let window_for_reset = window.clone();
-    let page_for_reset = page.clone();
+    let dialog_for_reset = dialog.clone();
+    let list_for_reset = list_page.clone();
     reset.connect_clicked(move |_| {
         update(&window_for_reset, id, |i| i.color = None);
-        rebuild_indicators(&window_for_reset, &page_for_reset);
+        rebuild_indicators(&window_for_reset, &dialog_for_reset, &list_for_reset);
     });
-    colour_row.add_suffix(&reset);
-    group.add(&colour_row);
+    row.add_suffix(&reset);
+    group.add(&row);
+    group
+}
 
-    // Parameters.
+fn parameters_group(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list_page: &adw::PreferencesPage,
+    indicator: &Indicator,
+) -> adw::PreferencesGroup {
+    let id = indicator.id;
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Parameters");
+
     match &indicator.params {
         Params::MovingAverage { period } => {
-            group.add(&spin_row(window, page, id, "Period", *period as f64, 1.0, 500.0, 1.0, {
+            group.add(&spin_row(
+                window,
+                dialog,
+                list_page,
+                id,
+                "Period",
+                *period as f64,
+                1.0,
+                500.0,
+                1.0,
                 move |indicator, value| {
                     indicator.params = Params::MovingAverage { period: value as usize };
-                }
-            }));
+                },
+            ));
         }
         Params::Vwap { reset, deviations } => {
-            group.add(&reset_row(window, page, id, *reset));
+            group.add(&reset_row(window, dialog, list_page, id, *reset));
             for (band, multiple) in deviations.iter().enumerate() {
                 group.add(&spin_row(
                     window,
-                    page,
+                    dialog,
+                    list_page,
                     id,
                     &format!("Band {}", band + 1),
                     *multiple,
@@ -250,19 +361,29 @@ fn indicator_group(
             }
         }
         Params::VolumeProfile { reset, rows, value_area } => {
-            group.add(&reset_row(window, page, id, *reset));
-            group.add(&spin_row(window, page, id, "Rows", *rows as f64, 4.0, 400.0, 1.0, {
+            group.add(&reset_row(window, dialog, list_page, id, *reset));
+            group.add(&spin_row(
+                window,
+                dialog,
+                list_page,
+                id,
+                "Rows",
+                *rows as f64,
+                4.0,
+                400.0,
+                1.0,
                 move |indicator, value| {
                     if let Params::VolumeProfile { rows, .. } = &mut indicator.params {
                         *rows = value as usize;
                     }
-                }
-            }));
+                },
+            ));
             group.add(&spin_row(
                 window,
-                page,
+                dialog,
+                list_page,
                 id,
-                "Value area",
+                "Value area %",
                 *value_area * 100.0,
                 10.0,
                 100.0,
@@ -280,7 +401,8 @@ fn indicator_group(
 
 fn reset_row(
     window: &Rc<Window>,
-    page: &adw::PreferencesPage,
+    dialog: &adw::PreferencesDialog,
+    list_page: &adw::PreferencesPage,
     id: u32,
     current: Reset,
 ) -> adw::ComboRow {
@@ -292,7 +414,8 @@ fn reset_row(
     row.set_selected(Reset::ALL.iter().position(|r| *r == current).unwrap_or(0) as u32);
 
     let window = window.clone();
-    let page = page.clone();
+    let dialog = dialog.clone();
+    let list_page = list_page.clone();
     row.connect_selected_notify(move |row| {
         let Some(chosen) = Reset::ALL.get(row.selected() as usize).copied() else { return };
         update(&window, id, |indicator| match &mut indicator.params {
@@ -300,7 +423,7 @@ fn reset_row(
             Params::VolumeProfile { reset, .. } => *reset = chosen,
             Params::MovingAverage { .. } => {}
         });
-        rebuild_indicators(&window, &page);
+        rebuild_indicators(&window, &dialog, &list_page);
     });
     row
 }
@@ -308,7 +431,8 @@ fn reset_row(
 #[allow(clippy::too_many_arguments)]
 fn spin_row(
     window: &Rc<Window>,
-    page: &adw::PreferencesPage,
+    dialog: &adw::PreferencesDialog,
+    list_page: &adw::PreferencesPage,
     id: u32,
     title: &str,
     value: f64,
@@ -325,12 +449,13 @@ fn spin_row(
     }
 
     let window = window.clone();
-    let page = page.clone();
+    let dialog = dialog.clone();
+    let list_page = list_page.clone();
     row.connect_value_notify(move |row| {
         let value = row.value();
         update(&window, id, |indicator| apply(indicator, value));
-        // The group's title carries the period, so it has to follow.
-        rebuild_indicators(&window, &page);
+        // The list behind this panel shows the period in its title.
+        rebuild_indicators(&window, &dialog, &list_page);
     });
     row
 }
@@ -344,7 +469,12 @@ fn update(window: &Rc<Window>, id: u32, change: impl Fn(&mut Indicator)) {
 }
 
 /// The indicator picker: the same type-and-it-narrows as the symbol search.
-fn pick_indicator(anchor: &gtk::Button, window: &Rc<Window>, page: &adw::PreferencesPage) {
+fn pick_indicator(
+    anchor: &impl IsA<gtk::Widget>,
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    page: &adw::PreferencesPage,
+) {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some("Indicator"));
 
@@ -415,18 +545,22 @@ fn pick_indicator(anchor: &gtk::Button, window: &Rc<Window>, page: &adw::Prefere
     });
 
     let window = window.clone();
+    let dialog = dialog.clone();
     let page = page.clone();
     let popover_weak = popover.downgrade();
     list.connect_row_activated(move |_, row| {
         let at = row.index().max(0) as usize;
         let Some(kind) = shown.borrow().get(at).copied() else { return };
+        let id = window.next_indicator_id();
         let mut indicators = window.indicators();
-        indicators.push(Indicator::new(window.next_indicator_id(), kind));
+        indicators.push(Indicator::new(id, kind));
         window.set_indicators(indicators);
-        rebuild_indicators(&window, &page);
+        rebuild_indicators(&window, &dialog, &page);
         if let Some(popover) = popover_weak.upgrade() {
             popover.popdown();
         }
+        // Straight into its settings: you added it to set it up.
+        open_indicator_panel(&window, &dialog, &page, id);
     });
 
     popover.popup();
