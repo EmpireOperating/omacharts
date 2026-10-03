@@ -355,11 +355,31 @@ impl Window {
         self.rebuild_timeframes();
         header.set_title_widget(Some(&self.timeframe_strip));
 
-        // Right-clicking the strip edits what is on it.
+        // Right-clicking the strip offers to edit it, rather than throwing a
+        // modal at you for a click you may not have meant.
         let menu = gtk::GestureClick::new();
         menu.set_button(gtk::gdk::BUTTON_SECONDARY);
         let this = self.clone();
-        menu.connect_pressed(move |_, _, _, _| this.edit_timeframes());
+        menu.connect_pressed(move |_, _, x, y| {
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let popover = gtk::Popover::new();
+            popover.set_child(Some(&items));
+            popover.set_parent(&this.timeframe_strip);
+            popover.set_has_arrow(false);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+
+            let edit = menu_item("Edit resolutions…", false);
+            let opener = this.clone();
+            let popover_weak = popover.downgrade();
+            edit.connect_clicked(move |_| {
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
+                }
+                opener.edit_timeframes();
+            });
+            items.append(&edit);
+            popover.popup();
+        });
         self.timeframe_strip.add_controller(menu);
 
         let menu = gio::Menu::new();
