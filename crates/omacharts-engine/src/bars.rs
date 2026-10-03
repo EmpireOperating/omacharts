@@ -13,65 +13,163 @@ pub struct Bar {
     pub volume: f64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
-pub enum Timeframe {
-    M5,
-    M15,
-    H1,
-    H4,
-    #[default]
-    D1,
-    W1,
+/// The unit a resolution is counted in.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Unit {
+    Minute,
+    Hour,
+    Day,
+    Week,
+}
+
+/// A chart resolution: a count of a unit.
+///
+/// Not an enum of presets, because people type resolutions. "3m" is a perfectly
+/// reasonable thing to want and no fixed list will ever contain everyone's.
+/// The strip in the header is just [`Timeframe::PRESETS`]; anything parseable
+/// works.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
+pub struct Timeframe {
+    pub count: u32,
+    pub unit: Unit,
+}
+
+impl Default for Timeframe {
+    fn default() -> Timeframe {
+        Timeframe::days(1)
+    }
 }
 
 impl Timeframe {
-    pub const ALL: [Timeframe; 6] = [
-        Timeframe::M5,
-        Timeframe::M15,
-        Timeframe::H1,
-        Timeframe::H4,
-        Timeframe::D1,
-        Timeframe::W1,
+    pub const fn minutes(count: u32) -> Timeframe {
+        Timeframe { count, unit: Unit::Minute }
+    }
+    pub const fn hours(count: u32) -> Timeframe {
+        Timeframe { count, unit: Unit::Hour }
+    }
+    pub const fn days(count: u32) -> Timeframe {
+        Timeframe { count, unit: Unit::Day }
+    }
+    pub const fn weeks(count: u32) -> Timeframe {
+        Timeframe { count, unit: Unit::Week }
+    }
+
+    /// What the header strip offers. Everything else is typed.
+    pub const PRESETS: [Timeframe; 6] = [
+        Timeframe::minutes(5),
+        Timeframe::minutes(15),
+        Timeframe::hours(1),
+        Timeframe::hours(4),
+        Timeframe::days(1),
+        Timeframe::weeks(1),
     ];
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Timeframe::M5 => "5m",
-            Timeframe::M15 => "15m",
-            Timeframe::H1 => "1h",
-            Timeframe::H4 => "4h",
-            Timeframe::D1 => "1D",
-            Timeframe::W1 => "1W",
-        }
-    }
-
-    /// Stable key for the cache and for settings.
-    pub fn key(self) -> &'static str {
-        self.label()
-    }
-
-    pub fn from_key(key: &str) -> Option<Timeframe> {
-        Timeframe::ALL.into_iter().find(|t| t.key() == key)
-    }
+    /// The intervals a provider is expected to serve directly. Anything else
+    /// is folded from one of these.
+    const SERVED_MINUTES: [u32; 7] = [1, 2, 5, 15, 30, 60, 90];
 
     pub fn seconds(self) -> i64 {
-        match self {
-            Timeframe::M5 => 300,
-            Timeframe::M15 => 900,
-            Timeframe::H1 => 3_600,
-            Timeframe::H4 => 14_400,
-            Timeframe::D1 => 86_400,
-            Timeframe::W1 => 604_800,
+        let unit = match self.unit {
+            Unit::Minute => 60,
+            Unit::Hour => 3_600,
+            Unit::Day => 86_400,
+            Unit::Week => 604_800,
+        };
+        unit * self.count.max(1) as i64
+    }
+
+    /// "5m", "4h", "1D", "1W" — what you type and what is stored.
+    pub fn key(self) -> String {
+        let suffix = match self.unit {
+            Unit::Minute => 'm',
+            Unit::Hour => 'h',
+            Unit::Day => 'D',
+            Unit::Week => 'W',
+        };
+        format!("{}{suffix}", self.count)
+    }
+
+    pub fn label(self) -> String {
+        self.key()
+    }
+
+    /// Parse what someone typed.
+    ///
+    /// A bare number means minutes, the way every charting package has worked
+    /// since the 80s: "15" is fifteen minutes, "240" is four hours. A suffix
+    /// is honoured when given, and case does not matter except that both "d"
+    /// and "D" mean days.
+    pub fn parse(text: &str) -> Option<Timeframe> {
+        let text = text.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let (digits, suffix): (String, String) =
+            text.chars().partition(|c| c.is_ascii_digit());
+        let suffix = suffix.trim().to_lowercase();
+
+        // "D" and "W" on their own mean one of them.
+        let count: u32 = if digits.is_empty() { 1 } else { digits.parse().ok()? };
+        if count == 0 {
+            return None;
+        }
+
+        let unit = match suffix.as_str() {
+            "" => Unit::Minute,
+            "m" | "min" | "mins" | "minute" | "minutes" => Unit::Minute,
+            "h" | "hr" | "hrs" | "hour" | "hours" => Unit::Hour,
+            "d" | "day" | "days" => Unit::Day,
+            "w" | "wk" | "week" | "weeks" => Unit::Week,
+            _ => return None,
+        };
+        Some(Timeframe { count, unit }.normalised())
+    }
+
+    /// Collapse a resolution onto the largest unit that expresses it exactly,
+    /// so "60m" and "1h" are the same thing rather than two chart states.
+    pub fn normalised(self) -> Timeframe {
+        match self.unit {
+            Unit::Minute if self.count % 1440 == 0 => Timeframe::days(self.count / 1440),
+            Unit::Minute if self.count % 60 == 0 => Timeframe::hours(self.count / 60),
+            Unit::Hour if self.count % 24 == 0 => Timeframe::days(self.count / 24),
+            Unit::Day if self.count % 7 == 0 => Timeframe::weeks(self.count / 7),
+            _ => self,
         }
     }
 
-    /// What we actually ask a provider for. No free feed serves 4h, and weekly
-    /// is cheaper and more accurate folded from daily than fetched.
+    /// The resolution to actually fetch, which this one folds from.
+    ///
+    /// The largest served interval that divides this one evenly — folding
+    /// needs whole bars, and asking for a finer interval than necessary burns
+    /// history limits and rate limit for nothing.
     pub fn native(self) -> Timeframe {
-        match self {
-            Timeframe::H4 => Timeframe::H1,
-            Timeframe::W1 => Timeframe::D1,
-            other => other,
+        match self.unit {
+            Unit::Minute => {
+                if Timeframe::SERVED_MINUTES.contains(&self.count) {
+                    return self;
+                }
+                let base = Timeframe::SERVED_MINUTES
+                    .into_iter()
+                    .rev()
+                    .find(|m| self.count % m == 0)
+                    .unwrap_or(1);
+                Timeframe::minutes(base)
+            }
+            Unit::Hour => {
+                if self.count == 1 {
+                    self
+                } else {
+                    Timeframe::hours(1)
+                }
+            }
+            Unit::Day | Unit::Week => {
+                if self.unit == Unit::Day && self.count == 1 {
+                    self
+                } else {
+                    Timeframe::days(1)
+                }
+            }
         }
     }
 
@@ -80,7 +178,7 @@ impl Timeframe {
     }
 
     pub fn is_intraday(self) -> bool {
-        self.seconds() < 86_400
+        matches!(self.unit, Unit::Minute | Unit::Hour)
     }
 }
 
@@ -95,8 +193,15 @@ pub fn resample(src: &[Bar], target: Timeframe, origin: i64) -> Vec<Bar> {
     if src.is_empty() {
         return Vec::new();
     }
-    if target == Timeframe::W1 {
-        return fold(src, |ts| week_start(*ts));
+    if target.unit == Unit::Week {
+        let weeks = target.count.max(1) as i64;
+        return fold(src, move |ts| {
+            let start = week_start(*ts);
+            // Multi-week buckets count from the epoch's first Monday so they
+            // are stable rather than depending on where the data begins.
+            const FIRST_MONDAY: i64 = 4 * 86_400;
+            (start - FIRST_MONDAY).div_euclid(weeks * 604_800) * (weeks * 604_800) + FIRST_MONDAY
+        });
     }
     let step = target.seconds();
     fold(src, move |ts| (ts - origin).div_euclid(step) * step + origin)
@@ -140,7 +245,7 @@ mod tests {
         let src: Vec<Bar> = (0..8)
             .map(|i| bar(i * 3600, 10.0 + i as f64, 12.0 + i as f64, 9.0 + i as f64, 11.0 + i as f64, 1.0))
             .collect();
-        let out = resample(&src, Timeframe::H4, 0);
+        let out = resample(&src, Timeframe::hours(4), 0);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].open, 10.0);
         assert_eq!(out[0].close, 14.0);
@@ -154,8 +259,8 @@ mod tests {
         // Two hourly bars either side of a boundary that only exists when the
         // session origin is applied.
         let src = vec![bar(0, 1.0, 1.0, 1.0, 1.0, 1.0), bar(3600, 2.0, 2.0, 2.0, 2.0, 1.0)];
-        assert_eq!(resample(&src, Timeframe::H4, 0).len(), 1);
-        assert_eq!(resample(&src, Timeframe::H4, 3600).len(), 2);
+        assert_eq!(resample(&src, Timeframe::hours(4), 0).len(), 1);
+        assert_eq!(resample(&src, Timeframe::hours(4), 3600).len(), 2);
     }
 
     #[test]
@@ -170,7 +275,85 @@ mod tests {
     }
 
     #[test]
+    fn resolutions_parse_the_way_people_type_them() {
+        assert_eq!(Timeframe::parse("3"), Some(Timeframe::minutes(3)));
+        assert_eq!(Timeframe::parse("3m"), Some(Timeframe::minutes(3)));
+        assert_eq!(Timeframe::parse("15"), Some(Timeframe::minutes(15)));
+        assert_eq!(Timeframe::parse("4h"), Some(Timeframe::hours(4)));
+        assert_eq!(Timeframe::parse("1D"), Some(Timeframe::days(1)));
+        assert_eq!(Timeframe::parse("d"), Some(Timeframe::days(1)));
+        assert_eq!(Timeframe::parse("W"), Some(Timeframe::weeks(1)));
+        assert_eq!(Timeframe::parse(" 30 min "), Some(Timeframe::minutes(30)));
+
+        assert_eq!(Timeframe::parse(""), None);
+        assert_eq!(Timeframe::parse("0"), None);
+        assert_eq!(Timeframe::parse("banana"), None);
+    }
+
+    #[test]
+    fn equivalent_resolutions_collapse_to_one() {
+        // "60" and "1h" must not be two different chart states.
+        assert_eq!(Timeframe::parse("60").unwrap(), Timeframe::hours(1));
+        assert_eq!(Timeframe::parse("240").unwrap(), Timeframe::hours(4));
+        assert_eq!(Timeframe::parse("1440").unwrap(), Timeframe::days(1));
+        assert_eq!(Timeframe::parse("24h").unwrap(), Timeframe::days(1));
+        assert_eq!(Timeframe::parse("7d").unwrap(), Timeframe::weeks(1));
+        // But 90 minutes has no larger exact unit.
+        assert_eq!(Timeframe::parse("90").unwrap(), Timeframe::minutes(90));
+    }
+
+    #[test]
+    fn keys_round_trip_through_parse() {
+        for timeframe in Timeframe::PRESETS {
+            assert_eq!(Timeframe::parse(&timeframe.key()), Some(timeframe));
+        }
+        for odd in [Timeframe::minutes(3), Timeframe::minutes(7), Timeframe::days(3)] {
+            assert_eq!(Timeframe::parse(&odd.key()), Some(odd));
+        }
+    }
+
+    #[test]
+    fn a_custom_resolution_folds_from_something_the_provider_serves() {
+        // 3m divides by 1 only, so it folds from one-minute bars.
+        assert_eq!(Timeframe::minutes(3).native(), Timeframe::minutes(1));
+        // 10m folds from 5m, which is cheaper than asking for 1m.
+        assert_eq!(Timeframe::minutes(10).native(), Timeframe::minutes(5));
+        assert_eq!(Timeframe::minutes(45).native(), Timeframe::minutes(15));
+        // Served intervals are fetched directly.
+        assert_eq!(Timeframe::minutes(5).native(), Timeframe::minutes(5));
+        assert_eq!(Timeframe::hours(1).native(), Timeframe::hours(1));
+        assert_eq!(Timeframe::days(1).native(), Timeframe::days(1));
+        // And everything coarse folds from daily.
+        assert_eq!(Timeframe::hours(4).native(), Timeframe::hours(1));
+        assert_eq!(Timeframe::weeks(1).native(), Timeframe::days(1));
+        assert_eq!(Timeframe::days(3).native(), Timeframe::days(1));
+    }
+
+    #[test]
+    fn the_native_resolution_always_divides_the_one_asked_for() {
+        for count in 1..=240u32 {
+            let timeframe = Timeframe::minutes(count).normalised();
+            let native = timeframe.native();
+            assert_eq!(
+                timeframe.seconds() % native.seconds(),
+                0,
+                "{} does not fold from {}",
+                timeframe.key(),
+                native.key()
+            );
+        }
+    }
+
+    #[test]
+    fn intraday_is_about_the_unit_not_the_length() {
+        assert!(Timeframe::minutes(3).is_intraday());
+        assert!(Timeframe::hours(12).is_intraday());
+        assert!(!Timeframe::days(1).is_intraday());
+        assert!(!Timeframe::weeks(1).is_intraday());
+    }
+
+    #[test]
     fn empty_in_empty_out() {
-        assert!(resample(&[], Timeframe::H4, 0).is_empty());
+        assert!(resample(&[], Timeframe::hours(4), 0).is_empty());
     }
 }

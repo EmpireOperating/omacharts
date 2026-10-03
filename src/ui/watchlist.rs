@@ -1,13 +1,15 @@
 //! The watchlist rail.
 //!
-//! A column on the right that can be hidden outright. Symbols can sit at the
-//! root or inside sections you name; sections are optional. Click to chart,
-//! drag to reorder, double-click a section title to rename it.
+//! One `ListBox` holding every section's header and every symbol, rather than
+//! a list per section. That is what lets the arrow keys run from the bottom of
+//! one section into the top of the next without the user noticing there was a
+//! boundary — which is the whole point of a watchlist you navigate rather than
+//! click.
 //!
 //! Prices shown here come from the cache only. The rail never issues a
-//! request — a sidebar that quietly fetches twenty quotes on every repaint is
-//! precisely how you get rate limited.
+//! request; the window prefetches around the selection instead.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -36,15 +38,99 @@ pub struct Quote {
 
 pub type QuoteLookup = Rc<dyn Fn(&Instrument) -> Option<Quote>>;
 
+/// A column of the rail.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Column {
+    Symbol,
+    Last,
+    Change,
+    ChangePct,
+}
+
+impl Column {
+    pub const ALL: [Column; 4] = [Column::Symbol, Column::Last, Column::Change, Column::ChangePct];
+    /// What a fresh install shows.
+    pub const DEFAULT: [Column; 3] = [Column::Symbol, Column::Change, Column::ChangePct];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Column::Symbol => "Symbol",
+            Column::Last => "Last",
+            Column::Change => "Chg",
+            Column::ChangePct => "Chg%",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Column::Symbol => "symbol",
+            Column::Last => "last",
+            Column::Change => "change",
+            Column::ChangePct => "change_pct",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Column> {
+        Column::ALL.into_iter().find(|c| c.key() == key)
+    }
+
+    fn width_chars(self) -> i32 {
+        match self {
+            Column::Symbol => 0,
+            Column::Last => 9,
+            Column::Change => 8,
+            Column::ChangePct => 7,
+        }
+    }
+}
+
+/// Parse the stored column list, falling back to the default.
+///
+/// The symbol column is always present and always first: a row without it is
+/// not a row, and no amount of configuration should let you hide what you are
+/// looking at.
+pub fn parse_columns(stored: Option<&str>) -> Vec<Column> {
+    let mut columns: Vec<Column> = stored
+        .map(|s| s.split(',').filter_map(|k| Column::from_key(k.trim())).collect())
+        .unwrap_or_default();
+    if columns.is_empty() {
+        columns = Column::DEFAULT.to_vec();
+    }
+    columns.retain(|c| *c != Column::Symbol);
+    let mut out = vec![Column::Symbol];
+    out.extend(columns);
+    out
+}
+
+pub fn columns_to_string(columns: &[Column]) -> String {
+    columns.iter().map(|c| c.key()).collect::<Vec<_>>().join(",")
+}
+
+/// What a row in the list is.
+#[derive(Clone)]
+enum RowKind {
+    Header { section_id: i64 },
+    Entry { section_id: i64, entry: Entry, instrument: Instrument },
+}
+
 pub struct Watchlist {
     pub widget: gtk::Box,
-    body: gtk::Box,
+    list: gtk::ListBox,
+    header: gtk::Box,
     store: Rc<Store>,
     index: Rc<SearchIndex>,
     quote: QuoteLookup,
     search: Rc<SymbolSearch>,
     on_pick: Rc<dyn Fn(Instrument)>,
+    /// Parallel to the list's rows.
+    rows: RefCell<Vec<RowKind>>,
+    columns: RefCell<Vec<Column>>,
+    /// Set while we are selecting a row ourselves, so rebuilding does not
+    /// re-load the chart.
+    quiet: Cell<bool>,
 }
+
+const SETTING_COLUMNS: &str = "watchlist_columns";
 
 impl Watchlist {
     pub fn new(
@@ -54,26 +140,41 @@ impl Watchlist {
         quote: QuoteLookup,
         on_pick: impl Fn(Instrument) + 'static,
     ) -> Rc<Watchlist> {
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body.set_margin_bottom(8);
+        let list = gtk::ListBox::new();
+        list.set_selection_mode(gtk::SelectionMode::Single);
+        list.add_css_class("navigation-sidebar");
 
         let scroller = gtk::ScrolledWindow::new();
-        scroller.set_child(Some(&body));
+        scroller.set_child(Some(&list));
         scroller.set_vexpand(true);
         scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
 
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        header.set_margin_start(12);
+        header.set_margin_end(10);
+        header.set_margin_top(6);
+        header.set_margin_bottom(4);
+
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        widget.set_size_request(236, -1);
+        widget.set_size_request(248, -1);
+        widget.append(&header);
+        widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         widget.append(&scroller);
+
+        let columns = parse_columns(store.setting(SETTING_COLUMNS).as_deref());
 
         let watchlist = Rc::new(Watchlist {
             widget,
-            body,
+            list,
+            header,
             store,
             index,
             quote,
             search,
             on_pick: Rc::new(on_pick),
+            rows: RefCell::new(Vec::new()),
+            columns: RefCell::new(columns),
+            quiet: Cell::new(false),
         });
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -98,41 +199,260 @@ impl Watchlist {
         watchlist.widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         watchlist.widget.append(&actions);
 
+        watchlist.wire_selection();
+        watchlist.wire_keys();
         watchlist.rebuild();
         watchlist
+    }
+
+    pub fn columns(&self) -> Vec<Column> {
+        self.columns.borrow().clone()
+    }
+
+    pub fn set_columns(self: &Rc<Self>, columns: Vec<Column>) {
+        let columns = parse_columns(Some(&columns_to_string(&columns)));
+        self.store.set_setting(SETTING_COLUMNS, &columns_to_string(&columns));
+        *self.columns.borrow_mut() = columns;
+        self.rebuild();
+    }
+
+    /// Every symbol on the rail, in the order the arrow keys walk them.
+    ///
+    /// Collapsed sections are excluded: what you cannot see, you cannot arrow
+    /// onto, and prefetching it would spend the request budget on rows that
+    /// are not there.
+    pub fn flat_order(&self) -> Vec<Instrument> {
+        self.rows
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, kind)| match kind {
+                RowKind::Entry { instrument, .. } => {
+                    let visible = self
+                        .list
+                        .row_at_index(at as i32)
+                        .map(|row| row.is_visible())
+                        .unwrap_or(false);
+                    visible.then(|| instrument.clone())
+                }
+                RowKind::Header { .. } => None,
+            })
+            .collect()
+    }
+
+    /// Highlight a symbol without loading it again.
+    pub fn highlight(self: &Rc<Self>, instrument: &Instrument) {
+        let target = self.rows.borrow().iter().position(|kind| match kind {
+            RowKind::Entry { instrument: i, .. } => {
+                i.symbol == instrument.symbol && i.suffix == instrument.suffix
+            }
+            RowKind::Header { .. } => false,
+        });
+        let Some(at) = target else { return };
+        let Some(row) = self.list.row_at_index(at as i32) else { return };
+        self.quiet.set(true);
+        self.list.select_row(Some(&row));
+        self.quiet.set(false);
+    }
+
+    fn wire_selection(self: &Rc<Self>) {
+        let this = self.clone();
+        self.list.connect_row_selected(move |_, row| {
+            if this.quiet.get() {
+                return;
+            }
+            let Some(row) = row else { return };
+            let at = row.index().max(0) as usize;
+            let picked = match this.rows.borrow().get(at) {
+                Some(RowKind::Entry { instrument, .. }) => Some(instrument.clone()),
+                _ => None,
+            };
+            if let Some(instrument) = picked {
+                (this.on_pick)(instrument);
+            }
+        });
+    }
+
+    /// Plain arrows move a symbol at a time — the list does that itself.
+    /// Ctrl with an arrow jumps a whole section, for a long rail.
+    fn wire_keys(self: &Rc<Self>) {
+        let keys = gtk::EventControllerKey::new();
+        let this = self.clone();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            if !ctrl {
+                return glib::Propagation::Proceed;
+            }
+            let forward = match key {
+                gtk::gdk::Key::Down => true,
+                gtk::gdk::Key::Up => false,
+                _ => return glib::Propagation::Proceed,
+            };
+            this.jump_section(forward);
+            glib::Propagation::Stop
+        });
+        self.list.add_controller(keys);
+
+        // Delete takes the highlighted symbol off the rail.
+        let keys = gtk::EventControllerKey::new();
+        let this = self.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if !matches!(key, gtk::gdk::Key::Delete | gtk::gdk::Key::KP_Delete) {
+                return glib::Propagation::Proceed;
+            }
+            this.remove_selected();
+            glib::Propagation::Stop
+        });
+        self.list.add_controller(keys);
+    }
+
+    /// Remove whatever is highlighted, and leave the highlight where it was so
+    /// Delete can be pressed again.
+    pub fn remove_selected(self: &Rc<Self>) {
+        let at = self.list.selected_row().map(|r| r.index().max(0) as usize);
+        let Some(at) = at else { return };
+        let target = match self.rows.borrow().get(at) {
+            Some(RowKind::Entry { section_id, entry, .. }) => Some((*section_id, entry.clone())),
+            _ => None,
+        };
+        let Some((section_id, entry)) = target else { return };
+        self.remove_entry(section_id, &entry);
+
+        // Land on the row that took its place, or the one above if it was last.
+        let next = self
+            .list
+            .row_at_index(at as i32)
+            .or_else(|| self.list.row_at_index(at as i32 - 1));
+        if let Some(row) = next {
+            if row.is_selectable() {
+                self.list.select_row(Some(&row));
+            }
+        }
+    }
+
+    fn remove_entry(self: &Rc<Self>, section_id: i64, entry: &Entry) {
+        self.store.remove_from_section(section_id, &entry.symbol, entry.suffix.as_deref());
+        self.rebuild();
+    }
+
+    /// Select the first symbol of the next or previous section.
+    fn jump_section(self: &Rc<Self>, forward: bool) {
+        let current = self.list.selected_row().map(|r| r.index()).unwrap_or(0).max(0) as usize;
+        let rows = self.rows.borrow();
+
+        // Which section are we in now?
+        let current_section = rows[..=current.min(rows.len().saturating_sub(1))]
+            .iter()
+            .rev()
+            .find_map(|kind| match kind {
+                RowKind::Entry { section_id, .. } | RowKind::Header { section_id } => {
+                    Some(*section_id)
+                }
+            });
+
+        let candidates: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(at, kind)| match kind {
+                RowKind::Entry { section_id, .. } if Some(*section_id) != current_section => {
+                    Some(at)
+                }
+                _ => None,
+            })
+            .collect();
+        drop(rows);
+
+        let target = if forward {
+            candidates.into_iter().find(|at| *at > current)
+        } else {
+            candidates.into_iter().filter(|at| *at < current).next_back()
+        };
+        if let Some(at) = target {
+            if let Some(row) = self.list.row_at_index(at as i32) {
+                self.list.select_row(Some(&row));
+                row.grab_focus();
+            }
+        }
     }
 
     /// Rebuild the whole rail. A few dozen rows, so there is nothing to gain
     /// from patching it in place.
     pub fn rebuild(self: &Rc<Self>) {
-        while let Some(child) = self.body.first_child() {
-            self.body.remove(&child);
-        }
-        for section in self.store.watchlist() {
-            // The root has no name and no header.
-            if section.id != ROOT_SECTION {
-                self.body.append(&self.section_header(section.id, &section.name));
-            } else {
-                let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                spacer.set_margin_top(4);
-                self.body.append(&spacer);
-            }
+        let selected = self.list.selected_row().map(|r| r.index());
 
-            let list = gtk::ListBox::new();
-            list.set_selection_mode(gtk::SelectionMode::None);
-            list.add_css_class("navigation-sidebar");
-            for entry in &section.entries {
-                if let Some(row) = self.entry_row(section.id, entry) {
-                    list.append(&row);
-                }
-            }
-            self.body.append(&list);
+        self.quiet.set(true);
+        while let Some(child) = self.list.first_child() {
+            self.list.remove(&child);
         }
+        while let Some(child) = self.header.first_child() {
+            self.header.remove(&child);
+        }
+
+        for column in self.columns.borrow().iter() {
+            let label = gtk::Label::new(Some(column.label()));
+            label.add_css_class("dim-label");
+            label.add_css_class("caption");
+            if *column == Column::Symbol {
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+            } else {
+                label.set_xalign(1.0);
+                label.set_width_chars(column.width_chars());
+            }
+            self.header.append(&label);
+        }
+
+        let mut kinds = Vec::new();
+        for section in self.store.watchlist() {
+            if section.id != ROOT_SECTION {
+                self.list.append(&self.section_header(section.id, &section.name, section.collapsed));
+                kinds.push(RowKind::Header { section_id: section.id });
+            }
+            for entry in &section.entries {
+                let Some(instrument) = self.index.find(&entry.symbol, entry.suffix.as_deref()) else {
+                    continue;
+                };
+                let row = self.entry_row(section.id, entry, instrument);
+                row.set_visible(!section.collapsed);
+                self.list.append(&row);
+                kinds.push(RowKind::Entry {
+                    section_id: section.id,
+                    entry: entry.clone(),
+                    instrument: instrument.clone(),
+                });
+            }
+        }
+        *self.rows.borrow_mut() = kinds;
+
+        if let Some(index) = selected {
+            if let Some(row) = self.list.row_at_index(index) {
+                self.list.select_row(Some(&row));
+            }
+        }
+        self.quiet.set(false);
     }
 
-    /// Section title, a button to add to it, and its menu. Double-clicking the
+    /// Section title, a disclosure arrow, and its controls. Double-clicking the
     /// title renames it in place.
-    fn section_header(self: &Rc<Self>, id: i64, name: &str) -> gtk::Box {
+    fn section_header(
+        self: &Rc<Self>,
+        id: i64,
+        name: &str,
+        collapsed: bool,
+    ) -> gtk::ListBoxRow {
+        let arrow = gtk::Button::from_icon_name(if collapsed {
+            "pan-end-symbolic"
+        } else {
+            "pan-down-symbolic"
+        });
+        arrow.add_css_class("flat");
+        arrow.set_valign(gtk::Align::Center);
+        let this = self.clone();
+        arrow.connect_clicked(move |_| {
+            this.store.set_section_collapsed(id, !collapsed);
+            this.rebuild();
+        });
+
         let label = gtk::Label::new(Some(name));
         label.set_xalign(0.0);
         label.set_hexpand(true);
@@ -143,16 +463,12 @@ impl Watchlist {
         let stack = gtk::Stack::new();
         stack.set_hexpand(true);
         stack.add_named(&label, Some("label"));
-
         let rename = gtk::Entry::new();
         rename.set_text(name);
-        rename.add_css_class("caption-heading");
         stack.add_named(&rename, Some("entry"));
         stack.set_visible_child_name("label");
 
-        // Double-click to rename.
         let click = gtk::GestureClick::new();
-        click.set_button(gtk::gdk::BUTTON_PRIMARY);
         let stack_weak = stack.downgrade();
         let rename_weak = rename.downgrade();
         click.connect_pressed(move |_, presses, _, _| {
@@ -168,19 +484,13 @@ impl Watchlist {
         label.add_controller(click);
 
         let this = self.clone();
-        let stack_weak = stack.downgrade();
         rename.connect_activate(move |entry| {
             let text = entry.text().trim().to_string();
             if !text.is_empty() {
                 this.store.rename_section(id, &text);
             }
-            if let Some(stack) = stack_weak.upgrade() {
-                stack.set_visible_child_name("label");
-            }
             this.rebuild();
         });
-
-        // Leaving the entry without confirming abandons the edit.
         let focus = gtk::EventControllerFocus::new();
         let stack_weak = stack.downgrade();
         focus.connect_leave(move |_| {
@@ -190,97 +500,147 @@ impl Watchlist {
         });
         rename.add_controller(focus);
 
-        let add = gtk::Button::from_icon_name("list-add-symbolic");
-        add.add_css_class("flat");
-        add.set_tooltip_text(Some("Add a symbol to this section"));
-        add.set_valign(gtk::Align::Center);
-        let this = self.clone();
-        add.connect_clicked(move |_| this.add_symbol_to(id));
+        let header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        header.set_margin_start(4);
+        header.set_margin_end(10);
+        header.set_margin_top(6);
+        header.append(&arrow);
+        header.append(&stack);
 
-        let remove = gtk::Button::from_icon_name("user-trash-symbolic");
-        remove.add_css_class("flat");
-        remove.set_tooltip_text(Some("Remove this section"));
-        remove.set_valign(gtk::Align::Center);
+        let row = gtk::ListBoxRow::new();
+        row.set_child(Some(&header));
+        // Headers are scenery: the arrow keys walk past them.
+        row.set_selectable(false);
+        row.set_activatable(false);
+
+        // Everything you can do to a section lives behind a right-click. A
+        // delete button sitting on every header all the time is both noise and
+        // an invitation to lose a section by accident.
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
         let this = self.clone();
         let section_name = name.to_string();
-        remove.connect_clicked(move |button| this.confirm_remove_section(button, id, &section_name));
-
-        let header = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        header.set_margin_start(12);
-        header.set_margin_end(6);
-        header.set_margin_top(10);
-        header.append(&stack);
-        header.append(&add);
-        header.append(&remove);
-        header
+        let row_weak = row.downgrade();
+        menu.connect_pressed(move |_, _, x, y| {
+            let Some(row) = row_weak.upgrade() else { return };
+            this.section_menu(&row, id, &section_name, x, y);
+        });
+        row.add_controller(menu);
+        row
     }
 
-    /// Ticker, change, and change percent. Nothing else by default.
-    fn entry_row(self: &Rc<Self>, section_id: i64, entry: &Entry) -> Option<gtk::ListBoxRow> {
-        let instrument = self.index.find(&entry.symbol, entry.suffix.as_deref())?.clone();
+    /// The section context menu.
+    fn section_menu(
+        self: &Rc<Self>,
+        anchor: &gtk::ListBoxRow,
+        id: i64,
+        name: &str,
+        x: f64,
+        y: f64,
+    ) {
+        let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let popover = gtk::Popover::new();
+        popover.set_child(Some(&items));
+        popover.set_parent(anchor);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
 
-        let ticker = gtk::Label::new(Some(&instrument.display_symbol()));
-        ticker.set_xalign(0.0);
-        ticker.set_hexpand(true);
-        ticker.add_css_class("symbol-row-ticker");
-        ticker.set_ellipsize(gtk::pango::EllipsizeMode::End);
-
-        let change = gtk::Label::new(None);
-        change.add_css_class("numeric");
-        change.add_css_class("caption");
-        change.set_xalign(1.0);
-        change.set_width_chars(8);
-
-        let percent = gtk::Label::new(None);
-        percent.add_css_class("numeric");
-        percent.add_css_class("caption");
-        percent.set_xalign(1.0);
-        percent.set_width_chars(7);
-
-        match (self.quote)(&instrument) {
-            Some(quote) => {
-                let class = if quote.change > 0.0 {
-                    "change-up"
-                } else if quote.change < 0.0 {
-                    "change-down"
-                } else {
-                    "change-flat"
-                };
-                change.set_text(&format!("{:+.2}", quote.change));
-                percent.set_text(&format!("{:+.2}%", quote.change_pct));
-                change.add_css_class(class);
-                percent.add_css_class(class);
-                change.set_tooltip_text(Some(&format!("Last {:.2}", quote.last)));
+        let add = menu_item("Add symbol…");
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        add.connect_clicked(move |_| {
+            if let Some(p) = popover_weak.upgrade() {
+                p.popdown();
             }
-            // Never charted, so never fetched. Blank beats a fake zero.
-            None => {
-                change.set_text("–");
-                percent.set_text("");
-                change.add_css_class("dim-label");
-            }
-        }
+            this.add_symbol_to(id);
+        });
+        items.append(&add);
 
+        let remove = menu_item("Remove section…");
+        remove.add_css_class("destructive-action");
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        let name = name.to_string();
+        let anchor = anchor.clone();
+        remove.connect_clicked(move |_| {
+            if let Some(p) = popover_weak.upgrade() {
+                p.popdown();
+            }
+            this.confirm_remove_section(&anchor, id, &name);
+        });
+        items.append(&remove);
+
+        popover.popup();
+    }
+
+    fn entry_row(
+        self: &Rc<Self>,
+        section_id: i64,
+        entry: &Entry,
+        instrument: &Instrument,
+    ) -> gtk::ListBoxRow {
+        let quote = (self.quote)(instrument);
         let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         row_box.set_margin_top(4);
         row_box.set_margin_bottom(4);
         row_box.set_margin_start(12);
         row_box.set_margin_end(10);
-        row_box.append(&ticker);
-        row_box.append(&change);
-        row_box.append(&percent);
+
+        for column in self.columns.borrow().iter() {
+            row_box.append(&self.cell(*column, instrument, quote));
+        }
 
         let row = gtk::ListBoxRow::new();
         row.set_child(Some(&row_box));
         row.set_activatable(true);
         row.set_tooltip_text(Some(&instrument.name));
 
-        let on_pick = self.on_pick.clone();
-        let picked = instrument.clone();
-        row.connect_activate(move |_| on_pick(picked.clone()));
-
         self.wire_row_removal(&row, section_id, entry);
         self.wire_row_reorder(&row, section_id, entry);
-        Some(row)
+        row
+    }
+
+    fn cell(&self, column: Column, instrument: &Instrument, quote: Option<Quote>) -> gtk::Label {
+        let label = gtk::Label::new(None);
+        match column {
+            Column::Symbol => {
+                label.set_text(&instrument.display_symbol());
+                label.set_xalign(0.0);
+                label.set_hexpand(true);
+                label.add_css_class("symbol-row-ticker");
+                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                return label;
+            }
+            Column::Last => match quote {
+                Some(q) => label.set_text(&format!("{:.2}", q.last)),
+                None => label.set_text("–"),
+            },
+            Column::Change => match quote {
+                Some(q) => label.set_text(&format!("{:+.2}", q.change)),
+                None => label.set_text("–"),
+            },
+            Column::ChangePct => match quote {
+                Some(q) => label.set_text(&format!("{:+.2}%", q.change_pct)),
+                None => label.set_text(""),
+            },
+        }
+
+        label.add_css_class("numeric");
+        label.add_css_class("caption");
+        label.set_xalign(1.0);
+        label.set_width_chars(column.width_chars());
+
+        match quote {
+            // Direction is defined once, in the engine; this just wears it.
+            Some(q) if column != Column::Last => {
+                label.add_css_class(
+                    omacharts_engine::Direction::of_change(q.change).css_class(),
+                );
+            }
+            None => label.add_css_class("dim-label"),
+            _ => {}
+        }
+        label
     }
 
     /// Right-click offers removal, rather than removing on the click itself.
@@ -291,36 +651,39 @@ impl Watchlist {
         let this = self.clone();
         let entry = entry.clone();
         let row_weak = row.downgrade();
-        click.connect_pressed(move |_, _, _, _| {
+        click.connect_pressed(move |_, _, x, y| {
             let Some(row) = row_weak.upgrade() else { return };
-            let button = gtk::Button::with_label("Remove");
-            button.add_css_class("destructive-action");
-            button.add_css_class("flat");
-
+            let items = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let popover = gtk::Popover::new();
-            popover.set_child(Some(&button));
+            popover.set_child(Some(&items));
             popover.set_parent(&row);
+            popover.set_has_arrow(false);
+            popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
 
+            let remove = menu_item("Remove");
+            remove.add_css_class("destructive-action");
             let this = this.clone();
             let entry = entry.clone();
             let popover_weak = popover.downgrade();
-            button.connect_clicked(move |_| {
-                this.store.remove_from_section(section_id, &entry.symbol, entry.suffix.as_deref());
-                if let Some(popover) = popover_weak.upgrade() {
-                    popover.popdown();
+            remove.connect_clicked(move |_| {
+                if let Some(p) = popover_weak.upgrade() {
+                    p.popdown();
                 }
-                this.rebuild();
+                this.remove_entry(section_id, &entry);
             });
+            items.append(&remove);
             popover.popup();
         });
         row.add_controller(click);
     }
 
-    /// Drag a row onto another to put it there. Reordering is within a section
-    /// — moving between sections is a remove and an add, which the menus
-    /// already do more legibly.
+    /// Drag a row onto another to put it there, within its section.
     fn wire_row_reorder(self: &Rc<Self>, row: &gtk::ListBoxRow, section_id: i64, entry: &Entry) {
-        let payload = format!("{section_id}\t{}\t{}", entry.symbol, entry.suffix.clone().unwrap_or_default());
+        let payload = format!(
+            "{section_id}\t{}\t{}",
+            entry.symbol,
+            entry.suffix.clone().unwrap_or_default()
+        );
 
         let source = gtk::DragSource::new();
         source.set_actions(gtk::gdk::DragAction::MOVE);
@@ -334,15 +697,9 @@ impl Watchlist {
         let this = self.clone();
         let onto = entry.clone();
         target.connect_drop(move |_, value, _, _| {
-            let Ok(text) = value.get::<String>() else {
-                return false;
-            };
+            let Ok(text) = value.get::<String>() else { return false };
             let parts: Vec<&str> = text.split('\t').collect();
-            if parts.len() != 3 {
-                return false;
-            }
-            // Only within the same section.
-            if parts[0].parse::<i64>().ok() != Some(section_id) {
+            if parts.len() != 3 || parts[0].parse::<i64>().ok() != Some(section_id) {
                 return false;
             }
             let moving = Entry {
@@ -360,7 +717,7 @@ impl Watchlist {
     }
 
     /// Adding uses the same picker as everywhere else.
-    fn add_symbol_to(self: &Rc<Self>, section_id: i64) {
+    pub fn add_symbol_to(self: &Rc<Self>, section_id: i64) {
         let title = if section_id == ROOT_SECTION {
             "Add to watchlist".to_string()
         } else {
@@ -375,11 +732,7 @@ impl Watchlist {
         };
         let this = self.clone();
         self.search.present(&self.widget, &title, move |instrument| {
-            this.store.add_to_section(
-                section_id,
-                &instrument.symbol,
-                instrument.suffix.as_deref(),
-            );
+            this.store.add_to_section(section_id, &instrument.symbol, instrument.suffix.as_deref());
             this.rebuild();
         });
     }
@@ -412,7 +765,7 @@ impl Watchlist {
     /// Removing a section takes its symbols with it, so it asks first.
     fn confirm_remove_section(
         self: &Rc<Self>,
-        anchor: &gtk::Button,
+        anchor: &impl IsA<gtk::Widget>,
         id: i64,
         name: &str,
     ) {
@@ -445,5 +798,61 @@ impl Watchlist {
             }
         });
         dialog.present(Some(anchor));
+    }
+}
+
+/// A flat row in one of the little context menus.
+fn menu_item(label: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("flat");
+    button.set_halign(gtk::Align::Fill);
+    if let Some(child) = button.child().and_downcast::<gtk::Label>() {
+        child.set_xalign(0.0);
+    }
+    button
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_symbol_column_is_always_first_and_never_hidden() {
+        assert_eq!(parse_columns(Some("change,change_pct"))[0], Column::Symbol);
+        assert_eq!(parse_columns(Some("last"))[0], Column::Symbol);
+        // Even if someone stores a list without it.
+        let columns = parse_columns(Some("change_pct,change"));
+        assert_eq!(columns, vec![Column::Symbol, Column::ChangePct, Column::Change]);
+    }
+
+    #[test]
+    fn column_order_is_respected() {
+        let columns = parse_columns(Some("symbol,change_pct,last,change"));
+        assert_eq!(
+            columns,
+            vec![Column::Symbol, Column::ChangePct, Column::Last, Column::Change]
+        );
+    }
+
+    #[test]
+    fn an_empty_or_unreadable_setting_falls_back_to_the_default() {
+        assert_eq!(parse_columns(None), Column::DEFAULT.to_vec());
+        assert_eq!(parse_columns(Some("")), Column::DEFAULT.to_vec());
+        assert_eq!(parse_columns(Some("nonsense,rubbish")), Column::DEFAULT.to_vec());
+    }
+
+    #[test]
+    fn columns_round_trip_through_settings() {
+        let columns = vec![Column::Symbol, Column::Last, Column::ChangePct];
+        let stored = columns_to_string(&columns);
+        assert_eq!(parse_columns(Some(&stored)), columns);
+    }
+
+    #[test]
+    fn the_default_is_symbol_change_and_percent() {
+        assert_eq!(
+            Column::DEFAULT.to_vec(),
+            vec![Column::Symbol, Column::Change, Column::ChangePct]
+        );
     }
 }

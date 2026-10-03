@@ -7,6 +7,8 @@
 //! The worker opens its own [`Store`]: a rusqlite connection is `Send` but not
 //! `Sync`, and WAL means a writer here never blocks the reader there.
 
+use std::sync::{Arc, Condvar, Mutex};
+
 use omacharts_engine::{Bar, Provider, ProviderError, Timeframe};
 
 use crate::store::Store;
@@ -23,6 +25,7 @@ const OVERLAP: i64 = 5;
 /// adjusted values wobble in the last decimal place between responses.
 const TOLERANCE: f64 = 0.0005;
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Request {
     /// Cache key: `provider:symbol`.
     pub key: String,
@@ -39,16 +42,130 @@ pub enum Response {
     Failed { key: String, timeframe: Timeframe, bars: Vec<Bar>, error: String, rate_limited: bool },
 }
 
-/// Read the cache, fetch only what is missing, merge, and reply.
-pub fn spawn<P>(request: Request, provider: P, sender: async_channel::Sender<Response>)
-where
-    P: Provider + 'static,
-{
-    std::thread::spawn(move || {
-        let response = run(&request, &provider);
-        // The window closing before we finish is normal, not an error.
-        let _ = sender.send_blocking(response);
-    });
+/// The chart you are looking at. Jumps every queued prefetch.
+pub const FOREGROUND: u32 = 0;
+
+/// Fetches bars on one worker thread, nearest-wanted first.
+///
+/// One thread, not one per request, for two reasons. The provider is paced —
+/// requests are deliberately kept apart — so concurrency would only queue
+/// inside the throttle anyway. And a queue can be reordered: when you arrow
+/// onto a different symbol, the chart you are now looking at must overtake
+/// the twenty prefetches queued behind it, not wait for them.
+pub struct Loader {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    queue: Mutex<Queue>,
+    wake: Condvar,
+}
+
+struct Queue {
+    jobs: Vec<Job>,
+    /// Breaks ties so equal priorities keep the order they were asked in.
+    next_seq: u64,
+    shutdown: bool,
+}
+
+struct Job {
+    request: Request,
+    priority: u32,
+    seq: u64,
+}
+
+impl Loader {
+    pub fn new<P>(provider: P, sender: async_channel::Sender<Response>) -> Loader
+    where
+        P: Provider + 'static,
+    {
+        let inner = Arc::new(Inner {
+            queue: Mutex::new(Queue { jobs: Vec::new(), next_seq: 0, shutdown: false }),
+            wake: Condvar::new(),
+        });
+
+        let worker = inner.clone();
+        std::thread::spawn(move || {
+            while let Some(job) = worker.take() {
+                let response = run(&job.request, &provider);
+                // The window closing before we finish is normal, not an error.
+                if sender.send_blocking(response).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Loader { inner }
+    }
+
+    /// Queue a fetch. Lower `priority` runs first.
+    ///
+    /// Asking again for something already queued keeps the better priority
+    /// rather than queueing it twice — which is what happens constantly as you
+    /// arrow down a watchlist and the same neighbours keep being re-offered.
+    pub fn fetch(&self, request: Request, priority: u32) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(existing) = queue
+            .jobs
+            .iter_mut()
+            .find(|j| j.request.key == request.key && j.request.timeframe == request.timeframe)
+        {
+            existing.priority = existing.priority.min(priority);
+            return;
+        }
+        let seq = queue.next_seq;
+        queue.next_seq += 1;
+        queue.jobs.push(Job { request, priority, seq });
+        drop(queue);
+        self.inner.wake.notify_one();
+    }
+
+    /// Forget everything that is not the chart on screen.
+    ///
+    /// Called when the selection moves: the old neighbours are no longer the
+    /// nearest ones, and leaving them queued would spend the request budget on
+    /// symbols that are now far away.
+    pub fn drop_prefetches(&self) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.jobs.retain(|job| job.priority == FOREGROUND);
+    }
+
+    pub fn queued(&self) -> usize {
+        self.inner.queue.lock().unwrap_or_else(|e| e.into_inner()).jobs.len()
+    }
+}
+
+impl Drop for Loader {
+    fn drop(&mut self) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.shutdown = true;
+        drop(queue);
+        self.inner.wake.notify_all();
+    }
+}
+
+impl Inner {
+    /// Block until there is a job, then hand back the most wanted one.
+    fn take(&self) -> Option<Job> {
+        let mut queue = self.queue.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if queue.shutdown {
+                return None;
+            }
+            if let Some(at) = best(&queue.jobs) {
+                return Some(queue.jobs.remove(at));
+            }
+            queue = self.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// Index of the job to run next: lowest priority, then earliest asked.
+fn best(jobs: &[Job]) -> Option<usize> {
+    jobs.iter()
+        .enumerate()
+        .min_by_key(|(_, job)| (job.priority, job.seq))
+        .map(|(at, _)| at)
 }
 
 fn run<P: Provider>(request: &Request, provider: &P) -> Response {
@@ -178,6 +295,38 @@ mod tests {
         let cached = vec![bar(100, 10.0)];
         let fresh = vec![bar(500, 50.0), bar(600, 60.0)];
         assert!(overlap_agrees(&cached, &fresh));
+    }
+
+    fn job(key: &str, priority: u32, seq: u64) -> Job {
+        Job {
+            request: Request {
+                key: key.into(),
+                symbol: key.into(),
+                timeframe: Timeframe::days(1),
+            },
+            priority,
+            seq,
+        }
+    }
+
+    #[test]
+    fn the_most_wanted_job_runs_first() {
+        let jobs = vec![job("far", 9, 0), job("near", 1, 1), job("chart", FOREGROUND, 2)];
+        assert_eq!(best(&jobs), Some(2), "the chart on screen jumps the queue");
+
+        let jobs = vec![job("far", 9, 0), job("near", 1, 1)];
+        assert_eq!(best(&jobs), Some(1), "then the nearest neighbour");
+    }
+
+    #[test]
+    fn equal_priorities_keep_their_order() {
+        let jobs = vec![job("b", 3, 7), job("a", 3, 2)];
+        assert_eq!(best(&jobs), Some(1), "asked for first, so run first");
+    }
+
+    #[test]
+    fn an_empty_queue_has_nothing_to_run() {
+        assert_eq!(best(&[]), None);
     }
 
     #[test]

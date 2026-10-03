@@ -617,22 +617,22 @@ mod tests {
     fn bars_round_trip() {
         let store = Store::memory().unwrap();
         let bars = vec![bar(100, 10.0), bar(200, 11.0), bar(300, 12.0)];
-        store.write_bars("yahoo:ES=F", Timeframe::D1, &bars);
+        store.write_bars("yahoo:ES=F", Timeframe::days(1), &bars);
 
-        let back = store.load_bars("yahoo:ES=F", Timeframe::D1);
+        let back = store.load_bars("yahoo:ES=F", Timeframe::days(1));
         assert_eq!(back, bars);
 
-        let coverage = store.coverage("yahoo:ES=F", Timeframe::D1).unwrap();
+        let coverage = store.coverage("yahoo:ES=F", Timeframe::days(1)).unwrap();
         assert_eq!((coverage.first_ts, coverage.last_ts, coverage.count), (100, 300, 3));
     }
 
     #[test]
     fn a_tail_fetch_overwrites_the_provisional_last_bar() {
         let store = Store::memory().unwrap();
-        store.write_bars("k", Timeframe::H1, &[bar(100, 10.0), bar(200, 11.0)]);
+        store.write_bars("k", Timeframe::hours(1), &[bar(100, 10.0), bar(200, 11.0)]);
 
         // 200 was still forming when we stored it; 300 is new.
-        let merged = store.merge_bars("k", Timeframe::H1, &[bar(200, 99.0), bar(300, 12.0)]);
+        let merged = store.merge_bars("k", Timeframe::hours(1), &[bar(200, 99.0), bar(300, 12.0)]);
         assert_eq!(merged.len(), 3);
         assert_eq!(merged[1].close, 99.0);
         assert_eq!(merged[2].ts, 300);
@@ -641,18 +641,18 @@ mod tests {
     #[test]
     fn backfill_extends_without_duplicating() {
         let store = Store::memory().unwrap();
-        store.write_bars("k", Timeframe::D1, &[bar(300, 12.0)]);
-        let merged = store.merge_bars("k", Timeframe::D1, &[bar(100, 10.0), bar(200, 11.0)]);
+        store.write_bars("k", Timeframe::days(1), &[bar(300, 12.0)]);
+        let merged = store.merge_bars("k", Timeframe::days(1), &[bar(100, 10.0), bar(200, 11.0)]);
         assert_eq!(merged.iter().map(|b| b.ts).collect::<Vec<_>>(), vec![100, 200, 300]);
     }
 
     #[test]
     fn timeframes_do_not_collide() {
         let store = Store::memory().unwrap();
-        store.write_bars("k", Timeframe::D1, &[bar(100, 1.0)]);
-        store.write_bars("k", Timeframe::H1, &[bar(100, 2.0), bar(200, 3.0)]);
-        assert_eq!(store.load_bars("k", Timeframe::D1).len(), 1);
-        assert_eq!(store.load_bars("k", Timeframe::H1).len(), 2);
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
+        store.write_bars("k", Timeframe::hours(1), &[bar(100, 2.0), bar(200, 3.0)]);
+        assert_eq!(store.load_bars("k", Timeframe::days(1)).len(), 1);
+        assert_eq!(store.load_bars("k", Timeframe::hours(1)).len(), 2);
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         let store = Store::memory().unwrap();
         store.set_setting("theme", "midnight");
         store.save_theme(&omacharts_engine::theme::builtin_themes()[0].duplicate("mine", "Mine"));
-        store.write_bars("k", Timeframe::D1, &[bar(100, 1.0)]);
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
         assert!(store.cache_bytes() > 0);
 
         store.clear_market_data().unwrap();
@@ -875,9 +875,9 @@ mod tests {
     #[test]
     fn an_empty_write_removes_the_series() {
         let store = Store::memory().unwrap();
-        store.write_bars("k", Timeframe::D1, &[bar(100, 1.0)]);
-        store.write_bars("k", Timeframe::D1, &[]);
-        assert!(store.coverage("k", Timeframe::D1).is_none());
+        store.write_bars("k", Timeframe::days(1), &[bar(100, 1.0)]);
+        store.write_bars("k", Timeframe::days(1), &[]);
+        assert!(store.coverage("k", Timeframe::days(1)).is_none());
     }
 }
 

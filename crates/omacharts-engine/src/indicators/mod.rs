@@ -15,7 +15,7 @@ pub mod vwap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bars::Bar;
+use crate::bars::{Bar, Timeframe};
 use crate::theme::{ColorChoice, Theme};
 
 pub use periods::Reset;
@@ -165,15 +165,31 @@ pub enum Output {
 ///
 /// `session_origin` is the instrument's session open, which is what makes a
 /// session-reset VWAP on futures start in the evening rather than at midnight.
-pub fn compute(indicator: &Indicator, bars: &[Bar], session_origin: i64) -> Output {
+/// `timeframe` lets a reset period that is too fine for the chart be promoted
+/// rather than drawn as nonsense.
+pub fn compute(
+    indicator: &Indicator,
+    bars: &[Bar],
+    session_origin: i64,
+    timeframe: Timeframe,
+) -> Output {
     match (&indicator.kind, &indicator.params) {
         (Kind::Sma, Params::MovingAverage { period }) => Output::Line(sma(bars, *period)),
         (Kind::Ema, Params::MovingAverage { period }) => Output::Line(ema(bars, *period)),
-        (Kind::Vwap, Params::Vwap { reset, deviations }) => {
-            Output::Bands(vwap::compute(bars, *reset, session_origin, deviations))
-        }
+        (Kind::Vwap, Params::Vwap { reset, deviations }) => Output::Bands(vwap::compute(
+            bars,
+            reset.effective_for(timeframe),
+            session_origin,
+            deviations,
+        )),
         (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area }) => {
-            Output::Profiles(profile::compute(bars, *reset, session_origin, *rows, *value_area))
+            Output::Profiles(profile::compute(
+                bars,
+                reset.effective_for(timeframe),
+                session_origin,
+                *rows,
+                *value_area,
+            ))
         }
         // Params and kind are set together; a mismatch means a stored
         // indicator from a future version. Draw nothing rather than guess.

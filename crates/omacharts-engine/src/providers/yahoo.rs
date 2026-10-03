@@ -14,7 +14,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::bars::{Bar, Timeframe};
+use crate::bars::{Bar, Timeframe, Unit};
 use crate::provider::{Capability, Provider, ProviderError};
 use crate::symbols::{Instrument, InstrumentKind};
 
@@ -24,11 +24,19 @@ const ENDPOINT: &str = "https://query1.finance.yahoo.com/v8/finance/chart";
 const AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 \
                      (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
+/// What Yahoo serves directly, and how far back each goes.
+///
+/// Anything else is folded from one of these by the caller, which is why a
+/// three-minute chart works at all.
 const CAPABILITIES: &[Capability] = &[
-    Capability { timeframe: Timeframe::M5, history_days: Some(60) },
-    Capability { timeframe: Timeframe::M15, history_days: Some(60) },
-    Capability { timeframe: Timeframe::H1, history_days: Some(730) },
-    Capability { timeframe: Timeframe::D1, history_days: None },
+    Capability { timeframe: Timeframe::minutes(1), history_days: Some(30) },
+    Capability { timeframe: Timeframe::minutes(2), history_days: Some(60) },
+    Capability { timeframe: Timeframe::minutes(5), history_days: Some(60) },
+    Capability { timeframe: Timeframe::minutes(15), history_days: Some(60) },
+    Capability { timeframe: Timeframe::minutes(30), history_days: Some(60) },
+    Capability { timeframe: Timeframe::minutes(90), history_days: Some(60) },
+    Capability { timeframe: Timeframe::hours(1), history_days: Some(730) },
+    Capability { timeframe: Timeframe::days(1), history_days: None },
 ];
 
 /// Smallest gap between two requests. Yahoo tolerates a steady trickle and
@@ -107,24 +115,27 @@ impl Yahoo {
         }
     }
 
-    /// Yahoo's own spelling of a timeframe.
-    fn interval(timeframe: Timeframe) -> Option<&'static str> {
-        Some(match timeframe {
-            Timeframe::M5 => "5m",
-            Timeframe::M15 => "15m",
-            Timeframe::H1 => "1h",
-            Timeframe::D1 => "1d",
-            // Folded from a native timeframe by the caller.
-            Timeframe::H4 | Timeframe::W1 => return None,
+    /// Yahoo's own spelling of a resolution, for the ones it serves.
+    fn interval(timeframe: Timeframe) -> Option<String> {
+        if !CAPABILITIES.iter().any(|c| c.timeframe == timeframe) {
+            // Folded from a served resolution by the caller.
+            return None;
+        }
+        Some(match timeframe.unit {
+            Unit::Minute => format!("{}m", timeframe.count),
+            Unit::Hour => format!("{}h", timeframe.count),
+            Unit::Day => format!("{}d", timeframe.count),
+            Unit::Week => format!("{}wk", timeframe.count),
         })
     }
 
-    /// The whole history Yahoo will serve at this timeframe.
+    /// The whole history Yahoo will serve at this resolution.
     fn full_range(timeframe: Timeframe) -> &'static str {
-        match timeframe {
-            Timeframe::M5 | Timeframe::M15 => "60d",
-            Timeframe::H1 => "2y",
-            _ => "max",
+        match CAPABILITIES.iter().find(|c| c.timeframe == timeframe).and_then(|c| c.history_days) {
+            Some(days) if days <= 30 => "1mo",
+            Some(days) if days <= 60 => "60d",
+            Some(_) => "2y",
+            None => "max",
         }
     }
 
@@ -402,11 +413,11 @@ mod tests {
 
     #[test]
     fn urls_encode_and_window_correctly() {
-        let full = Yahoo::url("^GSPC", Timeframe::D1, None).unwrap();
+        let full = Yahoo::url("^GSPC", Timeframe::days(1), None).unwrap();
         assert!(full.contains("%5EGSPC"), "{full}");
         assert!(full.contains("interval=1d") && full.contains("range=max"), "{full}");
 
-        let tail = Yahoo::url("GC=F", Timeframe::H1, Some(1_700_000_000)).unwrap();
+        let tail = Yahoo::url("GC=F", Timeframe::hours(1), Some(1_700_000_000)).unwrap();
         assert!(tail.contains("GC%3DF"), "{tail}");
         assert!(tail.contains("period1=1700000000"), "{tail}");
         assert!(!tail.contains("range="), "{tail}");
@@ -414,11 +425,11 @@ mod tests {
 
     #[test]
     fn derived_timeframes_are_never_fetched() {
-        assert!(Yahoo::url("AAPL", Timeframe::H4, None).is_err());
-        assert!(Yahoo::url("AAPL", Timeframe::W1, None).is_err());
+        assert!(Yahoo::url("AAPL", Timeframe::hours(4), None).is_err());
+        assert!(Yahoo::url("AAPL", Timeframe::weeks(1), None).is_err());
         let y = Yahoo::new();
-        assert!(!y.serves(Timeframe::H4));
-        assert!(y.serves(Timeframe::H1));
+        assert!(!y.serves(Timeframe::hours(4)));
+        assert!(y.serves(Timeframe::hours(1)));
     }
 
     #[test]

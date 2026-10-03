@@ -88,7 +88,7 @@ impl ChartView {
             theme,
             scheme,
             instrument: None,
-            timeframe: Timeframe::D1,
+            timeframe: Timeframe::days(1),
             first: 0,
             visible: 160,
             pointer: None,
@@ -497,7 +497,7 @@ fn draw_time_axis(
         cr.line_to(x.round() + 0.5, y);
         let _ = cr.stroke();
 
-        let label = format_axis_time(bar.ts, span);
+        let label = format_axis_time(bar.ts, span, state.timeframe.is_intraday());
         colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
         if let Ok(extents) = cr.text_extents(&label) {
             cr.move_to(x - extents.width() / 2.0, height - 7.0);
@@ -784,18 +784,27 @@ pub fn decimals_for(step: f64) -> usize {
 }
 
 /// Label an axis tick at a detail the visible span justifies.
-fn format_axis_time(ts: i64, span_seconds: i64) -> String {
+///
+/// `intraday` matters independently of the span: a week of 15-minute bars
+/// covers several days, but labelling the ticks by date alone repeats the same
+/// day over and over, since several ticks fall inside each one.
+fn format_axis_time(ts: i64, span_seconds: i64, intraday: bool) -> String {
     use chrono::{Local, TimeZone};
     let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
         return String::new();
     };
     const DAY: i64 = 86_400;
+    if intraday {
+        return match span_seconds {
+            s if s > 10 * DAY => dt.format("%d %b %H:%M").to_string(),
+            s if s > DAY => dt.format("%a %H:%M").to_string(),
+            _ => dt.format("%H:%M").to_string(),
+        };
+    }
     match span_seconds {
         s if s > 1460 * DAY => dt.format("%Y").to_string(),
         s if s > 160 * DAY => dt.format("%b %Y").to_string(),
-        s if s > 4 * DAY => dt.format("%d %b").to_string(),
-        s if s > DAY => dt.format("%a %H:%M").to_string(),
-        _ => dt.format("%H:%M").to_string(),
+        _ => dt.format("%d %b").to_string(),
     }
 }
 
@@ -846,24 +855,40 @@ mod tests {
 
         // Decades: years only. This is the case that read "01 Jun" for every
         // tick before the span was taken into account.
-        let decade = format_axis_time(ts, 4000 * DAY);
+        let decade = format_axis_time(ts, 4000 * DAY, false);
         assert_eq!(decade.len(), 4, "{decade}");
         assert!(decade.chars().all(|c| c.is_ascii_digit()), "{decade}");
 
         // A year or two: month and year.
-        assert!(format_axis_time(ts, 400 * DAY).contains("20"));
-        // A few weeks: day and month, no year.
-        assert!(!format_axis_time(ts, 30 * DAY).contains("20"));
-        // Intraday: a clock.
-        assert!(format_axis_time(ts, 3600).contains(':'));
+        assert!(format_axis_time(ts, 400 * DAY, false).contains("20"));
+        // A few weeks of daily bars: day and month, no year.
+        assert!(!format_axis_time(ts, 30 * DAY, false).contains("20"));
+        // Intraday always carries a clock, however long the span.
+        assert!(format_axis_time(ts, 3600, true).contains(':'));
+        assert!(format_axis_time(ts, 30 * DAY, true).contains(':'));
+    }
+
+    #[test]
+    fn intraday_ticks_a_few_days_apart_do_not_repeat_a_date() {
+        // A week of 15-minute bars: several ticks land inside each day, so a
+        // date-only label printed the same thing over and over.
+        const DAY: i64 = 86_400;
+        let span = 8 * DAY;
+        let labels: Vec<String> = (0..6)
+            .map(|i| format_axis_time(1_700_000_000 + i * 6 * 3600, span, true))
+            .collect();
+        let mut unique = labels.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), labels.len(), "repeated labels: {labels:?}");
     }
 
     #[test]
     fn two_ticks_a_decade_apart_get_different_labels() {
         const DAY: i64 = 86_400;
         let span = 4000 * DAY;
-        let a = format_axis_time(1_200_000_000, span);
-        let b = format_axis_time(1_700_000_000, span);
+        let a = format_axis_time(1_200_000_000, span, false);
+        let b = format_axis_time(1_700_000_000, span, false);
         assert_ne!(a, b);
     }
 

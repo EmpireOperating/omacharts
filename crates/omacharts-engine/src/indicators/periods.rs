@@ -7,6 +7,8 @@
 use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::bars::Timeframe;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Reset {
@@ -46,6 +48,53 @@ impl Reset {
 
     pub fn from_key(key: &str) -> Option<Reset> {
         Reset::ALL.into_iter().find(|r| r.key() == key)
+    }
+
+    /// Roughly how long the period lasts. Approximate on purpose — it is used
+    /// to judge whether a period is worth resetting on, not to bucket.
+    pub fn approx_seconds(self) -> i64 {
+        const DAY: i64 = 86_400;
+        match self {
+            Reset::Session => DAY,
+            Reset::Week => 7 * DAY,
+            Reset::Month => 30 * DAY,
+            Reset::Quarter => 91 * DAY,
+            Reset::Year => 365 * DAY,
+        }
+    }
+
+    /// Fewest bars a period needs to contain to say anything.
+    ///
+    /// A session VWAP on a daily chart resets every single bar, which draws a
+    /// line through the closes and calls it an average. Below this many bars
+    /// the indicator is noise wearing an indicator's name.
+    const MIN_BARS: i64 = 10;
+
+    /// Is this period worth resetting on at this timeframe?
+    pub fn is_meaningful_for(self, timeframe: Timeframe) -> bool {
+        self.approx_seconds() >= Reset::MIN_BARS * timeframe.seconds()
+    }
+
+    /// The period to reach for at this timeframe: the finest one that still
+    /// holds enough bars to mean something.
+    pub fn default_for(timeframe: Timeframe) -> Reset {
+        Reset::ALL
+            .into_iter()
+            .find(|reset| reset.is_meaningful_for(timeframe))
+            .unwrap_or(Reset::Year)
+    }
+
+    /// What to actually compute with.
+    ///
+    /// A period kept from a lower timeframe is promoted rather than drawn as
+    /// nonsense — switch a session VWAP to the daily chart and it becomes a
+    /// monthly one instead of a line through the closes.
+    pub fn effective_for(self, timeframe: Timeframe) -> Reset {
+        if self.is_meaningful_for(timeframe) {
+            self
+        } else {
+            Reset::default_for(timeframe)
+        }
     }
 
     /// The start of the period `ts` falls in, as a unix second.
@@ -143,6 +192,43 @@ mod tests {
         ];
         for (ts, label, expected) in cases {
             assert_eq!(Reset::Quarter.bucket(ts, 0), expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn the_default_period_fits_the_timeframe() {
+        // Intraday resets per session; a daily chart needs something coarser
+        // than a session, because a session *is* one bar.
+        assert_eq!(Reset::default_for(Timeframe::minutes(5)), Reset::Session);
+        assert_eq!(Reset::default_for(Timeframe::minutes(15)), Reset::Session);
+        assert_eq!(Reset::default_for(Timeframe::hours(1)), Reset::Session);
+        assert_eq!(Reset::default_for(Timeframe::hours(4)), Reset::Week);
+        assert_eq!(Reset::default_for(Timeframe::days(1)), Reset::Month);
+        assert_eq!(Reset::default_for(Timeframe::weeks(1)), Reset::Quarter);
+    }
+
+    #[test]
+    fn a_session_reset_is_meaningless_on_a_daily_chart() {
+        assert!(!Reset::Session.is_meaningful_for(Timeframe::days(1)));
+        assert!(!Reset::Week.is_meaningful_for(Timeframe::days(1)));
+        assert!(Reset::Month.is_meaningful_for(Timeframe::days(1)));
+        assert!(Reset::Session.is_meaningful_for(Timeframe::hours(1)));
+    }
+
+    #[test]
+    fn too_fine_a_period_is_promoted_not_drawn() {
+        // Carried up from an intraday chart.
+        assert_eq!(Reset::Session.effective_for(Timeframe::days(1)), Reset::Month);
+        // Already coarse enough: left alone.
+        assert_eq!(Reset::Year.effective_for(Timeframe::days(1)), Reset::Year);
+        assert_eq!(Reset::Session.effective_for(Timeframe::minutes(5)), Reset::Session);
+    }
+
+    #[test]
+    fn every_timeframe_has_some_workable_period() {
+        for timeframe in Timeframe::PRESETS {
+            let reset = Reset::default_for(timeframe);
+            assert!(reset.is_meaningful_for(timeframe), "{timeframe:?} -> {reset:?}");
         }
     }
 

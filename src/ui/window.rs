@@ -18,7 +18,7 @@ use omacharts_engine::{
     resample, Direction, Instrument, Provider, SearchIndex, Timeframe,
 };
 
-use crate::loader::{self, Request, Response};
+use crate::loader::{Loader, Request, Response, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::chart::{ChartView, Hover};
@@ -45,11 +45,11 @@ pub struct Window {
     search: Rc<SymbolSearch>,
     watchlist: RefCell<Option<Rc<Watchlist>>>,
     provider: Rc<Yahoo>,
+    loader: Loader,
     current: Rc<RefCell<Option<Instrument>>>,
     timeframe: Rc<RefCell<Timeframe>>,
     symbol_button: gtk::Button,
     readout: gtk::Label,
-    sender: async_channel::Sender<Response>,
 }
 
 impl Window {
@@ -66,6 +66,7 @@ impl Window {
         };
         let chart = Rc::new(ChartView::new(theme, scheme));
         let (sender, receiver) = async_channel::unbounded::<Response>();
+        let loader = Loader::new(Yahoo::new(), sender.clone());
 
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some("omacharts"));
@@ -93,16 +94,16 @@ impl Window {
             search: SymbolSearch::new(index.clone()),
             watchlist: RefCell::new(None),
             provider: Rc::new(Yahoo::new()),
+            loader,
             current: Rc::new(RefCell::new(None)),
             timeframe: Rc::new(RefCell::new(
                 store
                     .setting(LAST_TIMEFRAME)
-                    .and_then(|k| Timeframe::from_key(&k))
-                    .unwrap_or(Timeframe::D1),
+                    .and_then(|k| Timeframe::parse(&k))
+                    .unwrap_or(Timeframe::days(1)),
             )),
             symbol_button,
             readout: readout.clone(),
-            sender,
         });
 
         let watchlist = this.build_watchlist();
@@ -151,7 +152,7 @@ impl Window {
         header.pack_end(&menu_button);
 
         let toggle = gtk::ToggleButton::new();
-        toggle.set_icon_name("view-right-pane-symbolic");
+        toggle.set_icon_name("sidebar-show-right-symbolic");
         toggle.set_tooltip_text(Some("Watchlist (Ctrl+B)"));
         toggle.set_active(split.shows_sidebar());
         let split_weak = split.downgrade();
@@ -183,8 +184,8 @@ impl Window {
         strip.add_css_class("timeframe-strip");
 
         let mut first: Option<gtk::ToggleButton> = None;
-        for timeframe in Timeframe::ALL {
-            let button = gtk::ToggleButton::with_label(timeframe.label());
+        for timeframe in Timeframe::PRESETS {
+            let button = gtk::ToggleButton::with_label(&timeframe.label());
             button.add_css_class("flat");
             match &first {
                 Some(anchor) => button.set_group(Some(anchor)),
@@ -210,7 +211,7 @@ impl Window {
         // gets you throttled.
         let quote: crate::ui::watchlist::QuoteLookup = Rc::new(move |instrument: &Instrument| {
             let symbol = provider.symbol_for(instrument)?;
-            let bars = store.load_bars(&format!("yahoo:{symbol}"), Timeframe::D1);
+            let bars = store.load_bars(&format!("yahoo:{symbol}"), Timeframe::days(1));
             let (previous, last) = (bars.get(bars.len().checked_sub(2)?)?, bars.last()?);
             let change = last.close - previous.close;
             Some(Quote {
@@ -395,7 +396,7 @@ impl Window {
 
     fn set_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
         *self.timeframe.borrow_mut() = timeframe;
-        self.store.set_setting(LAST_TIMEFRAME, timeframe.key());
+        self.store.set_setting(LAST_TIMEFRAME, &timeframe.key());
         let instrument = self.current.borrow().clone();
         if let Some(instrument) = instrument {
             self.show(instrument);
@@ -425,11 +426,54 @@ impl Window {
         self.paint(&instrument, timeframe, cached);
         self.chart.set_stale(false);
 
-        loader::spawn(
-            Request { key, symbol, timeframe },
-            Yahoo::new(),
-            self.sender.clone(),
-        );
+        // The chart on screen overtakes everything queued behind it, and the
+        // old neighbours stop being the nearest ones the moment we move.
+        if let Some(watchlist) = self.watchlist.borrow().as_ref() {
+            watchlist.highlight(&instrument);
+        }
+        self.loader.drop_prefetches();
+        self.loader.fetch(Request { key, symbol, timeframe }, FOREGROUND);
+        self.prefetch_neighbours(&instrument, timeframe);
+    }
+
+    /// Queue the rest of the watchlist, nearest to the current symbol first.
+    ///
+    /// This is what makes arrowing down the list feel instant: by the time you
+    /// press the key, the next few are already cached, and the ones after them
+    /// are being fetched in the order you are most likely to reach them.
+    fn prefetch_neighbours(self: &Rc<Self>, current: &Instrument, timeframe: Timeframe) {
+        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else {
+            return;
+        };
+        let order = watchlist.flat_order();
+        let Some(position) = order
+            .iter()
+            .position(|i| i.symbol == current.symbol && i.suffix == current.suffix)
+        else {
+            return;
+        };
+
+        for (index, instrument) in order.iter().enumerate() {
+            if index == position {
+                continue;
+            }
+            let Some(symbol) = self.provider.symbol_for(instrument) else { continue };
+            let distance = index.abs_diff(position) as u32;
+            let key = format!("{}:{symbol}", self.provider.id());
+
+            // The chart you would see if you pressed an arrow, then the one
+            // after that. Priority 0 belongs to what is on screen.
+            self.loader.fetch(Request { key: key.clone(), symbol: symbol.clone(), timeframe }, distance);
+
+            // The watchlist's change column reads daily bars, so a symbol you
+            // never open still needs them — but only after the chart data.
+            if timeframe.native() != Timeframe::days(1) {
+                self.loader.fetch(
+                    Request { key, symbol, timeframe: Timeframe::days(1) },
+                    distance + order.len() as u32,
+                );
+            }
+        }
     }
 
     /// Apply bars that arrived for `key`, ignoring a reply for a chart the user
