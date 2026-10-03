@@ -257,7 +257,6 @@ pub struct Window {
     /// removes even the read, which is what makes arrowing back and forth over
     /// the same few symbols feel like nothing is happening at all.
     series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
-    symbol_button: gtk::Button,
     /// The split, so the keyboard can show and hide the rail.
     ///
     /// A GtkPaned rather than an AdwOverlaySplitView: the rail is a table of
@@ -266,8 +265,6 @@ pub struct Window {
     /// which takes the handle with it.
     split: gtk::Paned,
     /// The resolution strip and what is on it.
-    timeframe_strip: gtk::Box,
-    timeframe_buttons: RefCell<Vec<(Timeframe, gtk::ToggleButton)>>,
     timeframes: RefCell<Vec<Timeframe>>,
 }
 
@@ -285,10 +282,6 @@ impl Window {
         let window = adw::ApplicationWindow::new(app);
         window.set_title(Some("omacharts"));
         window.set_default_size(1280, 800);
-
-        let symbol_button = gtk::Button::new();
-        symbol_button.add_css_class("flat");
-        symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
         let split = gtk::Paned::new(gtk::Orientation::Horizontal);
         let chart_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -313,15 +306,7 @@ impl Window {
             provider: Rc::new(Yahoo::new()),
             loader,
             series: Rc::new(RefCell::new(HashMap::new())),
-            symbol_button,
             split: split.clone(),
-            timeframe_strip: {
-                let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                strip.add_css_class("linked");
-                strip.add_css_class("timeframe-strip");
-                strip
-            },
-            timeframe_buttons: RefCell::new(Vec::new()),
             timeframes: RefCell::new(parse_timeframes(
                 store.setting(SETTING_TIMEFRAMES).as_deref(),
             )),
@@ -428,6 +413,22 @@ impl Window {
             linker.set_pane_linked(id, toggle.is_active());
         });
 
+        // Right-clicking a strip offers to edit the list, rather than throwing
+        // a modal at you for a click you may not have meant. The list is one
+        // list for the window: every chart offers the same resolutions, and
+        // picks its own from them.
+        let editor = self.clone();
+        let strip_menu = gtk::GestureClick::new();
+        strip_menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let strip = pane.strip.clone();
+        strip_menu.connect_pressed(move |_, _, x, y| {
+            editor.focus(id);
+            let model = gio::Menu::new();
+            model.append(Some("Edit resolutions…"), Some("chart.edit-resolutions"));
+            popup_menu(&model, &strip, x, y);
+        });
+        pane.strip.add_controller(strip_menu);
+
         let menu_owner = self.clone();
         pane.view.set_context_menu_handler(move |x, y| {
             menu_owner.focus(id);
@@ -484,14 +485,8 @@ impl Window {
         pane.root.add_controller(click);
 
         self.panes.borrow_mut().push(pane.clone());
+        self.rebuild_strip_of(&pane);
         pane
-    }
-
-    /// The focused chart, or none while the window is still being built.
-    fn maybe_focused_pane(&self) -> Option<Rc<ChartPane>> {
-        let id = self.focused.get();
-        let panes = self.panes.borrow();
-        panes.iter().find(|p| p.id == id).or_else(|| panes.first()).cloned()
     }
 
     pub fn focused_pane(&self) -> Rc<ChartPane> {
@@ -518,8 +513,8 @@ impl Window {
         for pane in self.panes.borrow().iter() {
             pane.set_focused(pane.id == id);
         }
-        // The header belongs to whichever chart is focused: the ticker, the
-        // resolution strip and the settings all describe that one.
+        // What is left in the header describes the focused chart, as do the
+        // chart menu's radio items.
         self.sync_header();
     }
 
@@ -546,9 +541,8 @@ impl Window {
             .as_ref()
             .map(|i| i.display_symbol())
             .unwrap_or_default();
-        self.symbol_button.set_label(&label);
         self.window.set_title(Some(&format!("{label} · omacharts")));
-        self.sync_timeframe_buttons(pane.timeframe.get());
+        self.sync_timeframe_buttons();
         self.sync_chart_actions(&pane);
         if let (Some(watchlist), Some(instrument)) =
             (self.watchlist.borrow().as_ref(), pane.instrument.borrow().as_ref())
@@ -797,21 +791,6 @@ impl Window {
     fn build_header(self: &Rc<Self>, split: &gtk::Paned) -> adw::HeaderBar {
         let header = adw::HeaderBar::new();
 
-        self.rebuild_timeframes();
-        header.set_title_widget(Some(&self.timeframe_strip));
-
-        // Right-clicking the strip offers to edit it, rather than throwing a
-        // modal at you for a click you may not have meant.
-        let menu = gtk::GestureClick::new();
-        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
-        let this = self.clone();
-        menu.connect_pressed(move |_, _, x, y| {
-            let model = gio::Menu::new();
-            model.append(Some("Edit resolutions…"), Some("chart.edit-resolutions"));
-            popup_menu(&model, &this.timeframe_strip, x, y);
-        });
-        self.timeframe_strip.add_controller(menu);
-
         let menu = gio::Menu::new();
         menu.append(Some("Preferences"), Some("win.preferences"));
         menu.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
@@ -848,16 +827,20 @@ impl Window {
     }
 
     /// Fill the resolution strip from the list.
+    /// Build every chart's resolution strip. Called when the list of
+    /// resolutions changes, which is the only time the buttons differ.
     fn rebuild_timeframes(self: &Rc<Self>) {
-        while let Some(child) = self.timeframe_strip.first_child() {
-            self.timeframe_strip.remove(&child);
+        let panes = self.panes.borrow().clone();
+        for pane in panes {
+            self.rebuild_strip_of(&pane);
         }
-        // The strip is built with the header, before there is a chart to ask,
-        // and again whenever the list changes after there is one.
-        let current = self
-            .maybe_focused_pane()
-            .map(|pane| pane.timeframe.get())
-            .unwrap_or_else(|| Timeframe::days(1));
+    }
+
+    fn rebuild_strip_of(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        while let Some(child) = pane.strip.first_child() {
+            pane.strip.remove(&child);
+        }
+        let current = pane.timeframe.get();
         let mut first: Option<gtk::ToggleButton> = None;
         let mut buttons = Vec::new();
 
@@ -871,16 +854,21 @@ impl Window {
             }
             button.set_active(timeframe == current);
 
+            // The strip belongs to its own chart, so clicking one focuses that
+            // chart first: changing a resolution is not a reason to leave the
+            // keyboard pointing somewhere else.
             let this = self.clone();
+            let owner = pane.id;
             button.connect_toggled(move |button| {
                 if button.is_active() {
+                    this.focus(owner);
                     this.set_timeframe(timeframe);
                 }
             });
-            self.timeframe_strip.append(&button);
+            pane.strip.append(&button);
             buttons.push((timeframe, button));
         }
-        *self.timeframe_buttons.borrow_mut() = buttons;
+        *pane.buttons.borrow_mut() = buttons;
     }
 
     /// Put a resolution on the strip, in the place its length earns it.
@@ -1329,11 +1317,12 @@ impl Window {
             }
         });
 
-        // Anchored to the resolution strip, which is what it is about. Hanging
-        // it off the symbol button put it under the wrong heading entirely.
+        // Anchored to the focused chart's own resolution strip, which is what
+        // it is about and where the answer will appear. Hanging it off the
+        // window would put it over whichever chart happened to be underneath.
         let popover = gtk::Popover::new();
         popover.set_child(Some(&content));
-        popover.set_parent(&self.timeframe_strip);
+        popover.set_parent(&self.focused_pane().strip);
         // Every number typed builds a fresh one, so each has to let go of the
         // strip when it closes or they pile up on it.
         popover.connect_closed(|popover| {
@@ -1539,13 +1528,11 @@ impl Window {
         // you will ask for it again.
         self.remember_timeframe(timeframe);
         self.set_timeframe(timeframe);
-        self.sync_timeframe_buttons(timeframe);
+        self.sync_timeframe_buttons();
     }
 
-    fn sync_timeframe_buttons(self: &Rc<Self>, timeframe: Timeframe) {
-        for (listed, button) in self.timeframe_buttons.borrow().iter() {
-            button.set_active(*listed == timeframe);
-        }
+    fn sync_timeframe_buttons(self: &Rc<Self>) {
+        self.focused_pane().sync_strip();
     }
 
     /// The resolution belongs to the focused chart. Splitting a chart to put
@@ -1604,7 +1591,6 @@ impl Window {
         *pane.instrument.borrow_mut() = Some(instrument.clone());
         pane.write_readout();
         if pane.id == self.focused.get() {
-            self.symbol_button.set_label(&instrument.display_symbol());
             self.window
                 .set_title(Some(&format!("{} · omacharts", instrument.display_symbol())));
             self.store.set_setting(LAST_SYMBOL, &instrument.symbol);

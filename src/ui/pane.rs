@@ -35,7 +35,14 @@ pub struct ChartPane {
     /// name of the thing you are looking at to change it is the shortest
     /// route there is.
     pub symbol_button: gtk::Button,
-    /// The resolution, after the link toggle.
+    /// This chart's resolutions, since the resolution is this chart's. One
+    /// strip in the header could only ever describe one of them.
+    ///
+    /// Shown on the focused chart only: four strips on screen is the same row
+    /// of buttons four times, and only one of them is the one you are about to
+    /// press. The others say their resolution in a word instead.
+    pub strip: gtk::Box,
+    pub buttons: RefCell<Vec<(Timeframe, gtk::ToggleButton)>>,
     pub timeframe_label: gtk::Label,
     /// One row per indicator, under the readout.
     pub indicator_legend: gtk::Box,
@@ -74,6 +81,12 @@ impl ChartPane {
         symbol_button.set_valign(gtk::Align::Center);
         symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
+        let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        strip.add_css_class("linked");
+        strip.add_css_class("timeframe-strip");
+        strip.set_valign(gtk::Align::Center);
+        strip.set_visible(false);
+
         let timeframe_label = gtk::Label::new(None);
         timeframe_label.add_css_class("readout-symbol");
         timeframe_label.set_valign(gtk::Align::Center);
@@ -102,6 +115,7 @@ impl ChartPane {
         bar.append(&symbol_button);
         bar.append(&link);
         bar.append(&timeframe_label);
+        bar.append(&strip);
         bar.append(&gear);
 
         let indicator_legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -132,6 +146,8 @@ impl ChartPane {
             view,
             root,
             symbol_button,
+            strip,
+            buttons: RefCell::new(Vec::new()),
             timeframe_label,
             indicator_legend,
             gear,
@@ -151,12 +167,22 @@ impl ChartPane {
     /// A ring rather than anything louder: with four charts on screen the
     /// focused one has to be obvious at a glance and invisible the moment you
     /// stop looking for it.
+    /// Point this chart's strip at the resolution it is showing.
+    pub fn sync_strip(&self) {
+        let current = self.timeframe.get();
+        for (listed, button) in self.buttons.borrow().iter() {
+            button.set_active(*listed == current);
+        }
+    }
+
     pub fn set_focused(&self, focused: bool) {
         if focused {
             self.root.add_css_class("focused");
         } else {
             self.root.remove_css_class("focused");
         }
+        self.strip.set_visible(focused);
+        self.timeframe_label.set_visible(!focused);
     }
 
     pub fn set_linked(&self, linked: bool) {
@@ -185,13 +211,8 @@ impl ChartPane {
             .as_ref()
             .map(|i| i.display_symbol())
             .unwrap_or_default();
-        let resolution = if symbol.is_empty() {
-            String::new()
-        } else {
-            format!("·  {}", self.timeframe.get().label())
-        };
         self.symbol_button.set_label(&symbol);
-        self.timeframe_label.set_text(&resolution);
+        self.timeframe_label.set_text(&format!("·  {}", self.timeframe.get().label()));
     }
 }
 
