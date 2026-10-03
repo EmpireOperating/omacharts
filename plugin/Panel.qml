@@ -328,7 +328,7 @@ Panel {
 
           Text {
             anchors.centerIn: parent
-            text: "Open omacharts"
+            text: "Open Omacharts"
             font.family: root.fontFamily
             font.pixelSize: Style.space(12)
             color: root.foreground
