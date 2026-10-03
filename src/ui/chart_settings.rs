@@ -70,6 +70,14 @@ impl ChartSettings {
         indicators_page.set_icon_name(Some("view-list-symbolic"));
         dialog.add(&indicators_page);
         let list = IndicatorList::new(&indicators_page);
+        // Wired once here rather than on every rebuild: the button outlives
+        // the rows, and reconnecting it each time would stack up handlers.
+        let window_for_add = window.clone();
+        let dialog_for_add = dialog.clone();
+        let list_for_add = list.clone();
+        list.add.connect_clicked(move |button| {
+            pick_indicator(button, &window_for_add, &dialog_for_add, &list_for_add);
+        });
         rebuild_indicators(window, &dialog, &list);
 
         dialog.present(Some(&window.window));
@@ -78,14 +86,15 @@ impl ChartSettings {
             Focus::Indicators => dialog.set_visible_page(&indicators_page),
             Focus::AddIndicator => {
                 dialog.set_visible_page(&indicators_page);
-                // After the dialog has laid out: the picker hangs off the list
-                // and a popover over a widget with no allocation yet lands in
-                // the corner of the window.
+                // Off the + button, the same place clicking it puts the picker,
+                // and only once the dialog has laid out: a popover over a
+                // widget with no allocation yet lands in the corner.
                 let window = window.clone();
                 let dialog_for_pick = dialog.clone();
                 let list = list.clone();
                 glib::idle_add_local_once(move || {
-                    pick_indicator(&list.group.clone(), &window, &dialog_for_pick, &list);
+                    let anchor = list.add.clone();
+                    pick_indicator(&anchor, &window, &dialog_for_pick, &list);
                 });
             }
             Focus::Indicator(id) => {
@@ -175,6 +184,10 @@ fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGrou
 pub struct IndicatorList {
     group: adw::PreferencesGroup,
     rows: Rc<RefCell<Vec<gtk::Widget>>>,
+    /// The + in the group's header. Kept so the hotkey can hang the picker off
+    /// the same button the pointer would have used: a popover that appears
+    /// somewhere else depending on how you asked for it is two features.
+    add: gtk::Button,
 }
 
 impl IndicatorList {
@@ -182,7 +195,14 @@ impl IndicatorList {
         let group = adw::PreferencesGroup::new();
         group.set_title("On the chart");
         page.add(&group);
-        IndicatorList { group, rows: Rc::new(RefCell::new(Vec::new())) }
+
+        let add = gtk::Button::from_icon_name("list-add-symbolic");
+        add.add_css_class("flat");
+        add.set_tooltip_text(Some("Add an indicator (Ctrl+Shift+I)"));
+        add.set_valign(gtk::Align::Center);
+        group.set_header_suffix(Some(&add));
+
+        IndicatorList { group, rows: Rc::new(RefCell::new(Vec::new())), add }
     }
 
     fn clear(&self) {
@@ -214,23 +234,12 @@ fn rebuild_indicators(
     list.group.set_description(Some(if indicators.is_empty() {
         "Nothing yet."
     } else {
-        "Stacked and drawn in order. Colours come from the theme's palette."
+        "Drag to reorder. Panes stack in the same order; colours come from the theme."
     }));
 
-    let add = gtk::Button::from_icon_name("list-add-symbolic");
-    add.add_css_class("flat");
-    add.set_tooltip_text(Some("Add an indicator"));
-    add.set_valign(gtk::Align::Center);
-    let window_for_add = window.clone();
-    let dialog_for_add = dialog.clone();
-    let list_for_add = list.clone();
-    add.connect_clicked(move |button| {
-        pick_indicator(button, &window_for_add, &dialog_for_add, &list_for_add);
-    });
-    list.group.set_header_suffix(Some(&add));
 
-    for (position, indicator) in indicators.iter().enumerate() {
-        list.push(&indicator_row(window, dialog, list, &indicators, position, indicator));
+    for indicator in indicators.iter() {
+        list.push(&indicator_row(window, dialog, list, &indicators, indicator));
     }
 
     if indicators.is_empty() {
@@ -254,7 +263,6 @@ fn indicator_row(
     dialog: &adw::PreferencesDialog,
     list: &IndicatorList,
     all: &[Indicator],
-    position: usize,
     indicator: &Indicator,
 ) -> adw::ActionRow {
     let id = indicator.id;
@@ -280,31 +288,15 @@ fn indicator_row(
     // Order is a property of the list, so its controls sit on the list side of
     // the row. It decides two things at once: which strip is stacked above
     // which under the chart, and which line is drawn over which on it.
-    //
-    // Added back to front because a prefix is prepended, not appended: the
-    // swatch goes on first so it ends up nearest the title, and down before up
-    // so the pair reads the way it points.
-    let last = all.len().saturating_sub(1);
-    row.add_prefix(&reorder_button(
-        window,
-        dialog,
-        list,
-        id,
-        "go-down-symbolic",
-        "Move down",
-        position < last,
-        1,
-    ));
-    row.add_prefix(&reorder_button(
-        window,
-        dialog,
-        list,
-        id,
-        "go-up-symbolic",
-        "Move up",
-        position > 0,
-        -1,
-    ));
+    // The handle is prepended rather than appended, so it ends up left of the
+    // swatch: order is a property of the list, and the list runs down the left
+    // edge. It is there to say the row can be dragged — the drag itself works
+    // anywhere on the row that a control is not already using.
+    let handle = gtk::Image::from_icon_name("list-drag-handle-symbolic");
+    handle.add_css_class("dim-label");
+    handle.set_tooltip_text(Some("Drag to reorder"));
+    row.add_prefix(&handle);
+    wire_reorder(window, dialog, list, &row, id);
 
     let visible = gtk::Switch::new();
     visible.set_active(indicator.visible);
@@ -342,38 +334,58 @@ fn indicator_row(
     row
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reorder_button(
+/// Let a row be picked up and dropped on another to change the order.
+///
+/// Dragging rather than a pair of arrows, which is what the watchlist already
+/// does and what a list of half a dozen things wants: moving the bottom one to
+/// the top is one gesture rather than five clicks.
+///
+/// The id travels as the payload rather than the position, because the list is
+/// rebuilt while the drag is in flight and a position would by then mean a
+/// different row.
+fn wire_reorder(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
     list: &IndicatorList,
+    row: &adw::ActionRow,
     id: u32,
-    icon: &str,
-    tooltip: &str,
-    enabled: bool,
-    delta: isize,
-) -> gtk::Button {
-    let button = gtk::Button::from_icon_name(icon);
-    button.add_css_class("flat");
-    button.set_valign(gtk::Align::Center);
-    button.set_tooltip_text(Some(tooltip));
-    button.set_sensitive(enabled);
+) {
+    let source = gtk::DragSource::new();
+    source.set_actions(gtk::gdk::DragAction::MOVE);
+    let payload = id.to_string();
+    source.connect_prepare(move |_, _, _| {
+        Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+    });
+    row.add_controller(source);
 
+    let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
     let window = window.clone();
     let dialog = dialog.clone();
     let list = list.clone();
-    button.connect_clicked(move |_| {
-        let mut indicators = window.indicators();
-        let Some(at) = indicators.iter().position(|i| i.id == id) else { return };
-        let to = at as isize + delta;
-        if to < 0 || to as usize >= indicators.len() {
-            return;
+    target.connect_drop(move |_, value, _, _| {
+        let Ok(moving) = value.get::<String>().unwrap_or_default().parse::<u32>() else {
+            return false;
+        };
+        if moving == id {
+            return false;
         }
-        indicators.swap(at, to as usize);
+        let mut indicators = window.indicators();
+        let (Some(from), Some(to)) = (
+            indicators.iter().position(|i| i.id == moving),
+            indicators.iter().position(|i| i.id == id),
+        ) else {
+            return false;
+        };
+        // Taken out before the destination is used, so dropping downwards
+        // lands after the row you dropped on and upwards lands in its place —
+        // which is what the pointer was over either way.
+        let dragged = indicators.remove(from);
+        indicators.insert(to, dragged);
         window.set_indicators(indicators);
         rebuild_indicators(&window, &dialog, &list);
+        true
     });
-    button
+    row.add_controller(target);
 }
 
 /// The indicator's own panel, pushed over the list.
