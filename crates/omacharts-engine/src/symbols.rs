@@ -151,6 +151,16 @@ impl SearchIndex {
         &self.items
     }
 
+    /// Exact lookup by canonical symbol and suffix.
+    ///
+    /// The watchlist stores what the user picked, not an index position, so it
+    /// survives the inventory growing or being regenerated.
+    pub fn find(&self, symbol: &str, suffix: Option<&str>) -> Option<&Instrument> {
+        self.items
+            .iter()
+            .find(|i| i.symbol == symbol && i.suffix.as_deref() == suffix)
+    }
+
     /// The curated majors, for an empty search field.
     pub fn featured(&self, limit: usize) -> Vec<SearchHit> {
         let mut hits: Vec<SearchHit> = self
@@ -341,6 +351,89 @@ mod tests {
         let hits = idx.search("", 10);
         assert_eq!(hits.len(), 10);
         assert!(hits.iter().all(|h| idx.get(h.index).unwrap().tier == 0));
+    }
+
+    #[test]
+    fn well_known_tickers_beat_obscure_ones() {
+        let idx = index();
+        // Each of these is typed constantly and must win its prefix outright.
+        for (query, expected) in [
+            ("gc", "GC"),     // gold futures, not a microcap sharing the letters
+            ("es", "ES"),     // E-mini S&P
+            ("nq", "NQ"),
+            ("cl", "CL"),
+            ("sp", "SPY"),    // the ETF people mean when they type "sp"
+            ("vi", "VIX"),
+            ("bt", "BTC"),
+            ("eur", "EURUSD"),
+        ] {
+            let hits = idx.search(query, 5);
+            assert!(!hits.is_empty(), "no hits for {query}");
+            assert_eq!(
+                idx.get(hits[0].index).unwrap().symbol,
+                expected,
+                "{query} should surface {expected}, got {:?}",
+                hits.iter().map(|h| &idx.get(h.index).unwrap().symbol).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn full_names_are_searchable_too() {
+        let idx = index();
+        for (query, expected) in [
+            ("gold", "GC"),
+            ("nvidia", "NVDA"),
+            ("bitcoin", "BTC"),
+            ("crude", "CL"),
+            ("santander", "SAN"),
+            ("nasdaq 100", "NDX"),
+            ("volatility", "VIX"),
+        ] {
+            let hits = idx.search(query, 8);
+            assert!(!hits.is_empty(), "no hits for {query}");
+            let symbols: Vec<&str> =
+                hits.iter().map(|h| idx.get(h.index).unwrap().symbol.as_str()).collect();
+            assert!(symbols.contains(&expected), "{query} -> {symbols:?}, wanted {expected}");
+        }
+    }
+
+    #[test]
+    fn a_tier_zero_match_outranks_a_better_textual_tier_two_match() {
+        // "micro" prefixes several tier-2 futures; the point is only that
+        // ranking never puts an obscure instrument above a curated major when
+        // the textual quality is comparable.
+        let idx = index();
+        let hits = idx.search("s", 10);
+        let top: Vec<u8> = hits.iter().take(3).map(|h| idx.get(h.index).unwrap().tier).collect();
+        assert!(top.iter().all(|&t| t <= 1), "top of 's' was tiers {top:?}");
+    }
+
+    #[test]
+    fn search_is_fast_enough_to_run_on_every_keystroke() {
+        let idx = index();
+        let queries = ["a", "ap", "app", "appl", "g", "gc", "gol", "e", "es", "spy"];
+        let start = std::time::Instant::now();
+        let rounds = 200;
+        for _ in 0..rounds {
+            for q in queries {
+                let _ = idx.search(q, 20);
+            }
+        }
+        let per_query = start.elapsed() / (rounds * queries.len() as u32);
+        // The budget is a millisecond; anything near it means the index
+        // regressed into a full scan.
+        assert!(per_query < std::time::Duration::from_micros(500), "{per_query:?} per query");
+    }
+
+    #[test]
+    fn exact_lookup_distinguishes_listings() {
+        let idx = index();
+        assert_eq!(idx.find("AAPL", None).unwrap().name, "Apple");
+        assert_eq!(idx.find("SAN", Some("MC")).unwrap().name, "Banco Santander");
+        // The Madrid listing must not answer a lookup for a US one.
+        assert!(idx.find("SAN", None).is_none());
+        assert!(idx.find("NOPE", None).is_none());
     }
 
     #[test]

@@ -16,5 +16,6 @@ pub use bars::{resample, Bar, Timeframe};
 pub use provider::{Capability, Provider, ProviderError};
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
 pub use theme::{
-    theme_bars, BarScheme, BarSlot, ColorChoice, Mode, Source, Swatch, Theme, UiColors, UiSlot,
+    theme_bars, BarScheme, BarSlot, ColorChoice, Direction, Mode, Source, Swatch, Theme,
+    UiColors, UiSlot,
 };

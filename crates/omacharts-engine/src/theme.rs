@@ -252,6 +252,47 @@ impl UiSlot {
 // Bar scheme
 // ---------------------------------------------------------------------------
 
+/// Which way a thing moved.
+///
+/// The single definition of up and down in the app. Everything that colours by
+/// direction — candles, volume, a watchlist's change column — asks a
+/// [`BarScheme`] for the colour of a `Direction` rather than comparing numbers
+/// and reaching for its own green. One definition, one palette, no drift.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    Up,
+    Down,
+    Flat,
+}
+
+impl Direction {
+    /// A bar's direction: a close above its open is up, equal is flat.
+    pub fn of_bar(open: f64, close: f64) -> Direction {
+        Direction::of_change(close - open)
+    }
+
+    /// A move's direction. Exact zero is flat; anything else commits.
+    pub fn of_change(delta: f64) -> Direction {
+        if delta > 0.0 {
+            Direction::Up
+        } else if delta < 0.0 {
+            Direction::Down
+        } else {
+            Direction::Flat
+        }
+    }
+
+    /// Stable CSS class, so widgets colour themselves the same way the chart
+    /// does.
+    pub fn css_class(self) -> &'static str {
+        match self {
+            Direction::Up => "change-up",
+            Direction::Down => "change-down",
+            Direction::Flat => "change-flat",
+        }
+    }
+}
+
 /// What candles look like, chosen independently of the theme.
 ///
 /// Outline and body are separate so a scheme can be hollow (body == chart
@@ -272,6 +313,33 @@ pub struct BarScheme {
 }
 
 impl BarScheme {
+    /// The outline colour for a direction.
+    pub fn outline(&self, direction: Direction) -> &str {
+        match direction {
+            Direction::Up => &self.up,
+            Direction::Down => &self.down,
+            Direction::Flat => &self.neutral,
+        }
+    }
+
+    /// The body colour for a direction. Fully transparent means hollow.
+    pub fn body(&self, direction: Direction) -> &str {
+        match direction {
+            Direction::Up => &self.up_fill,
+            Direction::Down => &self.down_fill,
+            Direction::Flat => &self.neutral,
+        }
+    }
+
+    /// The volume colour for a direction.
+    pub fn volume(&self, direction: Direction) -> &str {
+        match direction {
+            Direction::Up => &self.volume_up,
+            Direction::Down => &self.volume_down,
+            Direction::Flat => &self.neutral,
+        }
+    }
+
     pub fn duplicate(&self, id: impl Into<String>, name: impl Into<String>) -> BarScheme {
         BarScheme {
             id: id.into(),
@@ -693,6 +761,63 @@ mod tests {
         assert_eq!(mix("#000000", "#ffffff", 0.0), "#000000");
         assert_eq!(mix("#000000", "#ffffff", 1.0), "#ffffff");
         assert_eq!(mix("#000000", "#ffffff", 0.5), "#808080");
+    }
+
+    #[test]
+    fn direction_is_defined_once_and_agrees_with_itself() {
+        assert_eq!(Direction::of_bar(10.0, 11.0), Direction::Up);
+        assert_eq!(Direction::of_bar(11.0, 10.0), Direction::Down);
+        assert_eq!(Direction::of_bar(10.0, 10.0), Direction::Flat);
+        assert_eq!(Direction::of_change(0.01), Direction::Up);
+        assert_eq!(Direction::of_change(-0.01), Direction::Down);
+        assert_eq!(Direction::of_change(0.0), Direction::Flat);
+    }
+
+    #[test]
+    fn every_scheme_answers_for_every_direction() {
+        let mut schemes = builtin_bar_schemes();
+        schemes.push(theme_bars(&midnight()));
+        for scheme in schemes {
+            for direction in [Direction::Up, Direction::Down, Direction::Flat] {
+                assert!(!scheme.outline(direction).is_empty(), "{}", scheme.name);
+                assert!(!scheme.body(direction).is_empty(), "{}", scheme.name);
+                assert!(!scheme.volume(direction).is_empty(), "{}", scheme.name);
+            }
+        }
+    }
+
+    #[test]
+    fn up_and_down_are_never_the_same_colour() {
+        // Monochrome is the deliberate exception: it separates direction by
+        // whether the body is filled, not by hue.
+        for scheme in builtin_bar_schemes() {
+            if scheme.id == "monochrome" {
+                assert_ne!(scheme.body(Direction::Up), scheme.body(Direction::Down));
+                continue;
+            }
+            assert_ne!(
+                scheme.outline(Direction::Up),
+                scheme.outline(Direction::Down),
+                "{}",
+                scheme.name
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_scheme_is_green_up_red_down() {
+        // "Typically red/green" is what people expect, and the theme palette
+        // is where those two live.
+        let bars = theme_bars(&midnight());
+        assert_eq!(bars.outline(Direction::Up), midnight().swatch("Green").unwrap().hex);
+        assert_eq!(bars.outline(Direction::Down), midnight().swatch("Rose").unwrap().hex);
+    }
+
+    #[test]
+    fn css_classes_are_stable() {
+        assert_eq!(Direction::Up.css_class(), "change-up");
+        assert_eq!(Direction::Down.css_class(), "change-down");
+        assert_eq!(Direction::Flat.css_class(), "change-flat");
     }
 
     #[test]

@@ -11,6 +11,9 @@
 //! this layer's job is to ask for as little as possible and to report
 //! throttling clearly rather than retrying into a wall.
 
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
 use crate::bars::{Bar, Timeframe};
 use crate::provider::{Capability, Provider, ProviderError};
 use crate::symbols::{Instrument, InstrumentKind};
@@ -28,14 +31,80 @@ const CAPABILITIES: &[Capability] = &[
     Capability { timeframe: Timeframe::D1, history_days: None },
 ];
 
-#[derive(Default)]
+/// Smallest gap between two requests. Yahoo tolerates a steady trickle and
+/// punishes bursts, and nothing in this app needs to be fast about fetching —
+/// the cache is what makes it feel fast.
+const MIN_GAP: Duration = Duration::from_millis(350);
+
+/// How long to stop asking entirely after a 429, and the ceiling that repeated
+/// throttling climbs to.
+const COOLDOWN_START: Duration = Duration::from_secs(60);
+const COOLDOWN_MAX: Duration = Duration::from_secs(900);
+
+/// Transient failures worth one more try. Deliberately small: a chart that
+/// paints from cache has nothing to gain from a third attempt.
+const RETRIES: u32 = 2;
+
+/// Request pacing, shared across every call.
+struct Throttle {
+    last_request: Option<Instant>,
+    /// Set after a 429; until it passes we do not touch the network at all.
+    cooldown_until: Option<Instant>,
+    cooldown: Duration,
+}
+
+impl Throttle {
+    fn new() -> Throttle {
+        Throttle { last_request: None, cooldown_until: None, cooldown: COOLDOWN_START }
+    }
+
+    /// `Err` when we are still in a cooldown and must not ask.
+    fn admit(&mut self, now: Instant) -> Result<Option<Duration>, ()> {
+        if let Some(until) = self.cooldown_until {
+            if now < until {
+                return Err(());
+            }
+            self.cooldown_until = None;
+        }
+        let wait = self.last_request.and_then(|last| {
+            let since = now.saturating_duration_since(last);
+            (since < MIN_GAP).then(|| MIN_GAP - since)
+        });
+        Ok(wait)
+    }
+
+    fn record_request(&mut self, now: Instant) {
+        self.last_request = Some(now);
+    }
+
+    /// Back off harder each time Yahoo says no, and relax once it says yes.
+    fn record_throttled(&mut self, now: Instant) {
+        self.cooldown_until = Some(now + self.cooldown);
+        self.cooldown = (self.cooldown * 2).min(COOLDOWN_MAX);
+    }
+
+    fn record_success(&mut self) {
+        self.cooldown = COOLDOWN_START;
+    }
+}
+
 pub struct Yahoo {
-    timeout: Option<std::time::Duration>,
+    timeout: Option<Duration>,
+    throttle: Mutex<Throttle>,
+}
+
+impl Default for Yahoo {
+    fn default() -> Yahoo {
+        Yahoo::new()
+    }
 }
 
 impl Yahoo {
     pub fn new() -> Yahoo {
-        Yahoo { timeout: Some(std::time::Duration::from_secs(20)) }
+        Yahoo {
+            timeout: Some(Duration::from_secs(20)),
+            throttle: Mutex::new(Throttle::new()),
+        }
     }
 
     /// Yahoo's own spelling of a timeframe.
@@ -100,6 +169,36 @@ fn encode(symbol: &str) -> String {
     out
 }
 
+impl Yahoo {
+    /// One request, no pacing and no retries.
+    fn fetch(&self, url: &str) -> Result<serde_json::Value, ProviderError> {
+        let mut request = ureq::get(url).header("User-Agent", AGENT);
+        if let Some(timeout) = self.timeout {
+            request = request.config().timeout_global(Some(timeout)).build();
+        }
+
+        let mut response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::StatusCode(429)) => return Err(ProviderError::RateLimited),
+            Err(ureq::Error::StatusCode(404)) => return Err(ProviderError::NotFound),
+            // Yahoo's edge returns these transiently; the caller decides
+            // whether to try again.
+            Err(ureq::Error::StatusCode(code)) if (500..600).contains(&code) => {
+                return Err(ProviderError::Network(format!("HTTP {code}")))
+            }
+            Err(ureq::Error::StatusCode(code)) => {
+                return Err(ProviderError::Malformed(format!("HTTP {code}")))
+            }
+            Err(error) => return Err(ProviderError::Network(error.to_string())),
+        };
+
+        response
+            .body_mut()
+            .read_json()
+            .map_err(|e| ProviderError::Malformed(e.to_string()))
+    }
+}
+
 impl Provider for Yahoo {
     fn id(&self) -> &'static str {
         "yahoo"
@@ -143,6 +242,10 @@ impl Provider for Yahoo {
         CAPABILITIES
     }
 
+    /// Bars for `symbol`, paced and retried.
+    ///
+    /// Blocks: it sleeps to keep requests apart and between retries, so it
+    /// must be called from a worker thread, never the UI thread.
     fn bars(
         &self,
         symbol: &str,
@@ -151,24 +254,48 @@ impl Provider for Yahoo {
     ) -> Result<Vec<Bar>, ProviderError> {
         let url = Self::url(symbol, timeframe, since)?;
 
-        let mut request = ureq::get(&url).header("User-Agent", AGENT);
-        if let Some(timeout) = self.timeout {
-            request = request.config().timeout_global(Some(timeout)).build();
+        // Sitting out a cooldown is not a failure worth retrying — the caller
+        // shows what it already has.
+        let wait = {
+            let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
+            throttle.admit(Instant::now()).map_err(|()| ProviderError::RateLimited)?
+        };
+        if let Some(wait) = wait {
+            std::thread::sleep(wait);
         }
 
-        let mut response = match request.call() {
-            Ok(response) => response,
-            Err(ureq::Error::StatusCode(429)) => return Err(ProviderError::RateLimited),
-            Err(ureq::Error::StatusCode(404)) => return Err(ProviderError::NotFound),
-            Err(error) => return Err(ProviderError::Network(error.to_string())),
-        };
+        let mut attempt = 0;
+        loop {
+            {
+                let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
+                throttle.record_request(Instant::now());
+            }
 
-        let body: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .map_err(|e| ProviderError::Malformed(e.to_string()))?;
-
-        parse_chart(&body)
+            match self.fetch(&url) {
+                Ok(body) => {
+                    let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
+                    throttle.record_success();
+                    drop(throttle);
+                    return parse_chart(&body);
+                }
+                Err(ProviderError::RateLimited) => {
+                    let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
+                    throttle.record_throttled(Instant::now());
+                    return Err(ProviderError::RateLimited);
+                }
+                // A dropped connection or a 503 on the way through Yahoo's
+                // edge is common enough to be worth one more try.
+                Err(error @ (ProviderError::Network(_) | ProviderError::Malformed(_)))
+                    if attempt < RETRIES =>
+                {
+                    let backoff = Duration::from_millis(400 << attempt);
+                    attempt += 1;
+                    let _ = error;
+                    std::thread::sleep(backoff);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -332,6 +459,60 @@ mod tests {
             serde_json::from_str(r#"{"chart":{"error":{"code":"Not Found"},"result":null}}"#)
                 .unwrap();
         assert!(matches!(parse_chart(&body), Err(ProviderError::NotFound)));
+    }
+
+    #[test]
+    fn requests_are_kept_apart() {
+        let mut throttle = Throttle::new();
+        let t0 = Instant::now();
+
+        assert_eq!(throttle.admit(t0), Ok(None), "first request waits for nothing");
+        throttle.record_request(t0);
+
+        // Straight away: told to wait out the rest of the gap.
+        let wait = throttle.admit(t0).unwrap().expect("should wait");
+        assert!(wait <= MIN_GAP && wait > Duration::ZERO, "{wait:?}");
+
+        // Once the gap has passed: no wait.
+        assert_eq!(throttle.admit(t0 + MIN_GAP).unwrap(), None);
+    }
+
+    #[test]
+    fn a_429_stops_us_asking_at_all() {
+        let mut throttle = Throttle::new();
+        let t0 = Instant::now();
+        throttle.record_throttled(t0);
+
+        assert_eq!(throttle.admit(t0), Err(()), "inside the cooldown");
+        assert_eq!(
+            throttle.admit(t0 + COOLDOWN_START + Duration::from_secs(1)),
+            Ok(None),
+            "cooldown expired"
+        );
+    }
+
+    #[test]
+    fn repeated_throttling_backs_off_and_success_relaxes_it() {
+        let mut throttle = Throttle::new();
+        let t0 = Instant::now();
+
+        throttle.record_throttled(t0);
+        assert_eq!(throttle.cooldown, COOLDOWN_START * 2);
+        throttle.record_throttled(t0);
+        assert_eq!(throttle.cooldown, COOLDOWN_START * 4);
+
+        throttle.record_success();
+        assert_eq!(throttle.cooldown, COOLDOWN_START);
+    }
+
+    #[test]
+    fn the_backoff_has_a_ceiling() {
+        let mut throttle = Throttle::new();
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            throttle.record_throttled(t0);
+        }
+        assert_eq!(throttle.cooldown, COOLDOWN_MAX);
     }
 
     #[test]
