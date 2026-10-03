@@ -39,6 +39,7 @@ function rows(sections) {
       out.push({
         header: false,
         symbol: entry.symbol,
+        suffix: entry.suffix || "",
         display: entry.display,
         name: entry.name,
         last: entry.last,

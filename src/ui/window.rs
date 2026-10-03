@@ -1503,6 +1503,19 @@ impl Window {
         self.redraw_current();
     }
 
+    /// Show a symbol named on the command line, if we know it.
+    ///
+    /// Takes the canonical symbol and the exchange suffix separately, because
+    /// a display symbol cannot be split back apart: BRK.B is one symbol with a
+    /// dot in it, SAN.MC is a symbol and a suffix.
+    pub fn show_named(self: &Rc<Self>, symbol: &str, suffix: Option<&str>) -> bool {
+        let Some(instrument) = self.index.find(symbol, suffix).cloned() else {
+            return false;
+        };
+        self.show(instrument);
+        true
+    }
+
     pub fn indicators(&self) -> Vec<Indicator> {
         self.indicators.borrow().clone()
     }

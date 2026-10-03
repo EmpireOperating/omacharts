@@ -131,7 +131,12 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function (dx, dy) { if (dy !== 0) root.moveSelection(dy) }
-      onActivateRequested: { root.service.openApp(); root.close() }
+      onActivateRequested: {
+        var picked = root.rows[root.selectedIndex]
+        if (picked && !picked.header) root.service.openApp(picked.symbol, picked.suffix)
+        else root.service.openApp()
+        root.close()
+      }
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onTextKey: function (text) { if (text === "r" || text === "R") root.service.refresh() }
@@ -233,7 +238,10 @@ Panel {
 
             TapHandler {
               enabled: !modelData.header
-              onTapped: { root.service.openApp(); root.close() }
+              onTapped: {
+                root.service.openApp(modelData.symbol, modelData.suffix)
+                root.close()
+              }
             }
 
             RowLayout {

@@ -40,10 +40,16 @@ Item {
     if (Date.now() - updatedAt > 15000) refresh()
   }
 
-  function openApp() {
-    // The app is single-instance, so this focuses the window when one is
-    // already open rather than starting a second.
-    launchProcess.command = ["omacharts"]
+  // The app is single-instance and handles its command line, so this focuses
+  // the window that is already open — and switches it to the symbol asked for
+  // rather than leaving it wherever it was.
+  function openApp(symbol, suffix) {
+    var command = ["omacharts"]
+    if (symbol) {
+      command.push(symbol)
+      if (suffix) command.push(suffix)
+    }
+    launchProcess.command = command
     launchProcess.running = true
   }
 

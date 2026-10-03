@@ -151,8 +151,12 @@ fn colors_json() -> String {
 
 fn entry_json(store: &Store, provider: &Yahoo, instrument: &Instrument) -> String {
     let mut fields = format!(
-        "{{\"symbol\":{},\"display\":{},\"name\":{},\"kind\":{}",
+        "{{\"symbol\":{},\"suffix\":{},\"display\":{},\"name\":{},\"kind\":{}",
         json_string(&instrument.symbol),
+        match &instrument.suffix {
+            Some(suffix) => json_string(suffix),
+            None => "null".to_string(),
+        },
         json_string(&instrument.display_symbol()),
         json_string(&instrument.name),
         json_string(instrument.kind.label()),
@@ -201,6 +205,8 @@ pub const USAGE: &str = "\
 omacharts — market charts
 
     omacharts                      open the app
+    omacharts <SYMBOL> [SUFFIX]    open it on a symbol, or focus the window
+                                   that is already open and switch it
     omacharts watchlist [--refresh]
                                    print the watchlist as JSON
     omacharts --help               this
