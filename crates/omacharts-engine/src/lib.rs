@@ -6,6 +6,7 @@
 //! keeps the provider boundary honest.
 
 pub mod bars;
+pub mod indicators;
 pub mod omarchy;
 pub mod provider;
 pub mod providers;
@@ -13,6 +14,7 @@ pub mod symbols;
 pub mod theme;
 
 pub use bars::{resample, Bar, Timeframe};
+pub use indicators::{Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use provider::{Capability, Provider, ProviderError};
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
 pub use theme::{
