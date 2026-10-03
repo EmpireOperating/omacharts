@@ -4,6 +4,7 @@
 //! looking when you want them. Two pages: how the bars are read, and what is
 //! drawn on top of them.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -37,7 +38,8 @@ impl ChartSettings {
         indicators_page.set_title("Indicators");
         indicators_page.set_icon_name(Some("view-list-symbolic"));
         dialog.add(&indicators_page);
-        rebuild_indicators(window, &dialog, &indicators_page);
+        let list = IndicatorList::new(&indicators_page);
+        rebuild_indicators(window, &dialog, &list);
 
         dialog.present(Some(&window.window));
     }
@@ -100,6 +102,38 @@ fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGrou
     group
 }
 
+/// The one group the indicator list lives in, and the rows currently in it.
+///
+/// Tracked explicitly because a preferences page does not hand back the groups
+/// you added — its own children are a scroller and a clamp — so walking them
+/// looking for things to remove finds nothing, and every rebuild quietly
+/// appends another copy of the list.
+#[derive(Clone)]
+pub struct IndicatorList {
+    group: adw::PreferencesGroup,
+    rows: Rc<RefCell<Vec<gtk::Widget>>>,
+}
+
+impl IndicatorList {
+    fn new(page: &adw::PreferencesPage) -> IndicatorList {
+        let group = adw::PreferencesGroup::new();
+        group.set_title("On the chart");
+        page.add(&group);
+        IndicatorList { group, rows: Rc::new(RefCell::new(Vec::new())) }
+    }
+
+    fn clear(&self) {
+        for row in self.rows.borrow_mut().drain(..) {
+            self.group.remove(&row);
+        }
+    }
+
+    fn push(&self, row: &impl IsA<gtk::Widget>) {
+        self.group.add(row);
+        self.rows.borrow_mut().push(row.clone().upcast());
+    }
+}
+
 /// Rebuild the list of indicators.
 ///
 /// A list, and only a list: each row says what the indicator is and lets you
@@ -109,22 +143,12 @@ fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGrou
 fn rebuild_indicators(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    page: &adw::PreferencesPage,
+    list: &IndicatorList,
 ) {
-    let mut child = page.first_child();
-    while let Some(widget) = child {
-        let next = widget.next_sibling();
-        if let Some(group) = widget.downcast_ref::<adw::PreferencesGroup>() {
-            page.remove(group);
-        }
-        child = next;
-    }
-
+    list.clear();
     let indicators = window.indicators();
 
-    let group = adw::PreferencesGroup::new();
-    group.set_title("On the chart");
-    group.set_description(Some(if indicators.is_empty() {
+    list.group.set_description(Some(if indicators.is_empty() {
         "Nothing yet."
     } else {
         "Drawn in order, each taking the next colour from the theme."
@@ -136,14 +160,14 @@ fn rebuild_indicators(
     add.set_valign(gtk::Align::Center);
     let window_for_add = window.clone();
     let dialog_for_add = dialog.clone();
-    let page_for_add = page.clone();
+    let list_for_add = list.clone();
     add.connect_clicked(move |button| {
-        pick_indicator(button, &window_for_add, &dialog_for_add, &page_for_add);
+        pick_indicator(button, &window_for_add, &dialog_for_add, &list_for_add);
     });
-    group.set_header_suffix(Some(&add));
+    list.group.set_header_suffix(Some(&add));
 
     for (slot, indicator) in indicators.iter().enumerate() {
-        group.add(&indicator_row(window, dialog, page, slot, indicator));
+        list.push(&indicator_row(window, dialog, list, slot, indicator));
     }
 
     if indicators.is_empty() {
@@ -153,21 +177,19 @@ fn rebuild_indicators(
         empty.set_activatable(true);
         let window_for_empty = window.clone();
         let dialog_for_empty = dialog.clone();
-        let page_for_empty = page.clone();
+        let list_for_empty = list.clone();
         empty.connect_activated(move |row| {
-            pick_indicator(row, &window_for_empty, &dialog_for_empty, &page_for_empty);
+            pick_indicator(row, &window_for_empty, &dialog_for_empty, &list_for_empty);
         });
-        group.add(&empty);
+        list.push(&empty);
     }
-
-    page.add(&group);
 }
 
 /// One line in the list: what it is, whether it is drawn, and a way in.
 fn indicator_row(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    page: &adw::PreferencesPage,
+    list: &IndicatorList,
     slot: usize,
     indicator: &Indicator,
 ) -> adw::ActionRow {
@@ -207,21 +229,21 @@ fn indicator_row(
     remove.set_tooltip_text(Some("Remove"));
     let window_for_remove = window.clone();
     let dialog_for_remove = dialog.clone();
-    let page_for_remove = page.clone();
+    let list_for_remove = list.clone();
     remove.connect_clicked(move |_| {
         let kept: Vec<Indicator> =
             window_for_remove.indicators().into_iter().filter(|i| i.id != id).collect();
         window_for_remove.set_indicators(kept);
-        rebuild_indicators(&window_for_remove, &dialog_for_remove, &page_for_remove);
+        rebuild_indicators(&window_for_remove, &dialog_for_remove, &list_for_remove);
     });
     row.add_suffix(&remove);
     row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
 
     let window_for_open = window.clone();
     let dialog_for_open = dialog.clone();
-    let page_for_open = page.clone();
+    let list_for_open = list.clone();
     row.connect_activated(move |_| {
-        open_indicator_panel(&window_for_open, &dialog_for_open, &page_for_open, id);
+        open_indicator_panel(&window_for_open, &dialog_for_open, &list_for_open, id);
     });
     row
 }
@@ -230,7 +252,7 @@ fn indicator_row(
 fn open_indicator_panel(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    list_page: &adw::PreferencesPage,
+    list: &IndicatorList,
     id: u32,
 ) {
     let indicators = window.indicators();
@@ -241,8 +263,8 @@ fn open_indicator_panel(
     };
 
     let page = adw::PreferencesPage::new();
-    page.add(&appearance_group(window, dialog, list_page, slot, &indicator));
-    page.add(&parameters_group(window, dialog, list_page, &indicator));
+    page.add(&appearance_group(window, dialog, list, slot, &indicator));
+    page.add(&parameters_group(window, dialog, list, &indicator));
 
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&adw::HeaderBar::new());
@@ -255,7 +277,7 @@ fn open_indicator_panel(
 fn appearance_group(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    list_page: &adw::PreferencesPage,
+    list: &IndicatorList,
     slot: usize,
     indicator: &Indicator,
 ) -> adw::PreferencesGroup {
@@ -282,7 +304,7 @@ fn appearance_group(
     button.add_css_class("swatch-button");
     let window_for_colour = window.clone();
     let dialog_for_colour = dialog.clone();
-    let list_for_colour = list_page.clone();
+    let list_for_colour = list.clone();
     button.connect_rgba_notify(move |button| {
         let hex = colors::to_hex(&button.rgba());
         update(&window_for_colour, id, |i| {
@@ -299,7 +321,7 @@ fn appearance_group(
     reset.set_sensitive(indicator.color.is_some());
     let window_for_reset = window.clone();
     let dialog_for_reset = dialog.clone();
-    let list_for_reset = list_page.clone();
+    let list_for_reset = list.clone();
     reset.connect_clicked(move |_| {
         update(&window_for_reset, id, |i| i.color = None);
         rebuild_indicators(&window_for_reset, &dialog_for_reset, &list_for_reset);
@@ -312,7 +334,7 @@ fn appearance_group(
 fn parameters_group(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    list_page: &adw::PreferencesPage,
+    list: &IndicatorList,
     indicator: &Indicator,
 ) -> adw::PreferencesGroup {
     let id = indicator.id;
@@ -324,7 +346,7 @@ fn parameters_group(
             group.add(&spin_row(
                 window,
                 dialog,
-                list_page,
+                list,
                 id,
                 "Period",
                 *period as f64,
@@ -337,12 +359,12 @@ fn parameters_group(
             ));
         }
         Params::Vwap { reset, deviations } => {
-            group.add(&reset_row(window, dialog, list_page, id, *reset));
+            group.add(&reset_row(window, dialog, list, id, *reset));
             for (band, multiple) in deviations.iter().enumerate() {
                 group.add(&spin_row(
                     window,
                     dialog,
-                    list_page,
+                    list,
                     id,
                     &format!("Band {}", band + 1),
                     *multiple,
@@ -361,11 +383,11 @@ fn parameters_group(
             }
         }
         Params::VolumeProfile { reset, rows, value_area } => {
-            group.add(&reset_row(window, dialog, list_page, id, *reset));
+            group.add(&reset_row(window, dialog, list, id, *reset));
             group.add(&spin_row(
                 window,
                 dialog,
-                list_page,
+                list,
                 id,
                 "Rows",
                 *rows as f64,
@@ -381,7 +403,7 @@ fn parameters_group(
             group.add(&spin_row(
                 window,
                 dialog,
-                list_page,
+                list,
                 id,
                 "Value area %",
                 *value_area * 100.0,
@@ -402,7 +424,7 @@ fn parameters_group(
 fn reset_row(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    list_page: &adw::PreferencesPage,
+    list: &IndicatorList,
     id: u32,
     current: Reset,
 ) -> adw::ComboRow {
@@ -415,7 +437,7 @@ fn reset_row(
 
     let window = window.clone();
     let dialog = dialog.clone();
-    let list_page = list_page.clone();
+    let list = list.clone();
     row.connect_selected_notify(move |row| {
         let Some(chosen) = Reset::ALL.get(row.selected() as usize).copied() else { return };
         update(&window, id, |indicator| match &mut indicator.params {
@@ -423,7 +445,7 @@ fn reset_row(
             Params::VolumeProfile { reset, .. } => *reset = chosen,
             Params::MovingAverage { .. } => {}
         });
-        rebuild_indicators(&window, &dialog, &list_page);
+        rebuild_indicators(&window, &dialog, &list);
     });
     row
 }
@@ -432,7 +454,7 @@ fn reset_row(
 fn spin_row(
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    list_page: &adw::PreferencesPage,
+    list: &IndicatorList,
     id: u32,
     title: &str,
     value: f64,
@@ -450,12 +472,12 @@ fn spin_row(
 
     let window = window.clone();
     let dialog = dialog.clone();
-    let list_page = list_page.clone();
+    let list = list.clone();
     row.connect_value_notify(move |row| {
         let value = row.value();
         update(&window, id, |indicator| apply(indicator, value));
         // The list behind this panel shows the period in its title.
-        rebuild_indicators(&window, &dialog, &list_page);
+        rebuild_indicators(&window, &dialog, &list);
     });
     row
 }
@@ -473,17 +495,17 @@ fn pick_indicator(
     anchor: &impl IsA<gtk::Widget>,
     window: &Rc<Window>,
     dialog: &adw::PreferencesDialog,
-    page: &adw::PreferencesPage,
+    list: &IndicatorList,
 ) {
     let entry = gtk::SearchEntry::new();
     entry.set_placeholder_text(Some("Indicator"));
 
-    let list = gtk::ListBox::new();
-    list.set_selection_mode(gtk::SelectionMode::Browse);
-    list.add_css_class("navigation-sidebar");
+    let rows = gtk::ListBox::new();
+    rows.set_selection_mode(gtk::SelectionMode::Browse);
+    rows.add_css_class("navigation-sidebar");
 
     let scroller = gtk::ScrolledWindow::new();
-    scroller.set_child(Some(&list));
+    scroller.set_child(Some(&rows));
     scroller.set_min_content_height(220);
     scroller.set_min_content_width(300);
     scroller.set_hscrollbar_policy(gtk::PolicyType::Never);
@@ -499,11 +521,11 @@ fn pick_indicator(
     let shown: Rc<std::cell::RefCell<Vec<Kind>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
 
     let fill = {
-        let list = list.clone();
+        let rows = rows.clone();
         let shown = shown.clone();
         move |query: &str| {
-            while let Some(child) = list.first_child() {
-                list.remove(&child);
+            while let Some(child) = rows.first_child() {
+                rows.remove(&child);
             }
             let kinds = indicators::search(query);
             for kind in &kinds {
@@ -524,11 +546,11 @@ fn pick_indicator(
 
                 let row = gtk::ListBoxRow::new();
                 row.set_child(Some(&row_box));
-                list.append(&row);
+                rows.append(&row);
             }
             *shown.borrow_mut() = kinds;
-            if let Some(first) = list.row_at_index(0) {
-                list.select_row(Some(&first));
+            if let Some(first) = rows.row_at_index(0) {
+                rows.select_row(Some(&first));
             }
         }
     };
@@ -537,30 +559,30 @@ fn pick_indicator(
     let fill_on_type = fill.clone();
     entry.connect_search_changed(move |entry| fill_on_type(&entry.text()));
 
-    let list_for_enter = list.clone();
+    let rows_for_enter = rows.clone();
     entry.connect_activate(move |_| {
-        if let Some(row) = list_for_enter.selected_row() {
+        if let Some(row) = rows_for_enter.selected_row() {
             row.activate();
         }
     });
 
     let window = window.clone();
     let dialog = dialog.clone();
-    let page = page.clone();
+    let indicator_list = list.clone();
     let popover_weak = popover.downgrade();
-    list.connect_row_activated(move |_, row| {
+    rows.connect_row_activated(move |_, row| {
         let at = row.index().max(0) as usize;
         let Some(kind) = shown.borrow().get(at).copied() else { return };
         let id = window.next_indicator_id();
         let mut indicators = window.indicators();
         indicators.push(Indicator::new(id, kind));
         window.set_indicators(indicators);
-        rebuild_indicators(&window, &dialog, &page);
+        rebuild_indicators(&window, &dialog, &indicator_list);
         if let Some(popover) = popover_weak.upgrade() {
             popover.popdown();
         }
         // Straight into its settings: you added it to set it up.
-        open_indicator_panel(&window, &dialog, &page, id);
+        open_indicator_panel(&window, &dialog, &indicator_list, id);
     });
 
     popover.popup();
