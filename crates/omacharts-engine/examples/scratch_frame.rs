@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use omacharts_engine::omarchy;
-use omacharts_engine::theme::{builtin_themes, contrast_ratio, delta_e, mix, theme_bars, Direction, Oklch, Theme};
+use omacharts_engine::theme::{builtin_themes, contrast_ratio, delta_e, theme_bars, Direction, Oklch, Theme};
 
 fn main() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omarchy");
@@ -20,29 +20,19 @@ fn main() {
     for t in builtin_themes() {
         themes.push((t.name.clone(), t));
     }
-    println!("{:<18} {:>5} {:>6} {:>6} | accent L C   | ring@.55: dBg  ctr  dAx  dGr  dBo  dCr  dUp  dDn | ring@.7: dBg ctr  dUp dDn | text ring@.3 dBg ctr dAx dUp dDn", "theme", "bgL", "dSurf", "dSVar");
+    println!("{:<18} bg      gutter  dBg   lifted | ring    L    C   ctr  dAx   dGr   dBo   dCr   dUp   dDn  | hover", "theme");
     for (name, t) in &themes {
         let ui = &t.ui;
         let bars = theme_bars(t);
         let (up, down) = (bars.outline(Direction::Up), bars.outline(Direction::Down));
-        let bg = Oklch::of(&ui.background).unwrap();
-        let acc = Oklch::of(&ui.accent).unwrap();
-        let ring = |alpha: f64| mix(&ui.accent, &ui.background, 1.0 - alpha);
-        let r55 = ring(0.55);
-        let r70 = ring(0.7);
-        let tr = mix(&ui.text, &ui.background, 0.7);
+        let f = t.frame(&bars);
+        let r = Oklch::of(&f.focus).unwrap();
         println!(
-            "{:<18} {:>5.2} {:>6.3} {:>6.3} | {:.2} {:.3} | {:>4.3} {:>4.2} {:>4.3} {:>4.3} {:>4.3} {:>4.3} {:>4.3} {:>4.3} | {:>4.3} {:>4.2} {:>4.3} {:>4.3} | {:>4.3} {:>4.2} {:>4.3} {:>4.3} {:>4.3}",
-            name,
-            bg.l,
-            delta_e(&ui.surface, &ui.background),
-            delta_e(&ui.surface_variant, &ui.background),
-            acc.l, acc.c,
-            delta_e(&r55, &ui.background), contrast_ratio(&r55, &ui.background),
-            delta_e(&r55, &ui.axis), delta_e(&r55, &ui.grid), delta_e(&r55, &ui.border), delta_e(&r55, &ui.crosshair),
-            delta_e(&r55, up), delta_e(&r55, down),
-            delta_e(&r70, &ui.background), contrast_ratio(&r70, &ui.background), delta_e(&r70, up), delta_e(&r70, down),
-            delta_e(&tr, &ui.background), contrast_ratio(&tr, &ui.background), delta_e(&tr, &ui.axis), delta_e(&tr, up), delta_e(&tr, down),
+            "{:<18} {} {} {:.3} {:<6} | {} {:.2} {:.3} {:.2} {:.3} {:.3} {:.3} {:.3} {:.3} {:.3} | {}",
+            name, ui.background, f.gutter, delta_e(&f.gutter, &ui.background), f.gutter != ui.surface,
+            f.focus, r.l, r.c, contrast_ratio(&f.focus, &ui.background),
+            delta_e(&f.focus, &ui.axis), delta_e(&f.focus, &ui.grid), delta_e(&f.focus, &ui.border), delta_e(&f.focus, &ui.crosshair),
+            delta_e(&f.focus, up), delta_e(&f.focus, down), f.gutter_hover,
         );
     }
 }

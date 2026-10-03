@@ -32,6 +32,8 @@ const PANE_GAP: f64 = 6.0;
 const MIN_PRICE_SHARE: f64 = 0.45;
 /// How near a pane's top edge the pointer has to be to grab it.
 const EDGE_GRAB: f64 = 4.0;
+/// The close box in a pane's top right corner.
+const PANE_CLOSE: f64 = 13.0;
 
 /// Fewest bars we will zoom into, and the most we will draw at once.
 const MIN_VISIBLE: usize = 12;
@@ -64,6 +66,10 @@ pub struct Hover {
 
 struct State {
     bars: Vec<Bar>,
+    /// A time another chart's pointer is on, drawn here as a crosshair with
+    /// no price line: the pointer is not over this chart, so there is no
+    /// price under it to report.
+    echo: Option<i64>,
     theme: Theme,
     scheme: BarScheme,
     instrument: Option<Instrument>,
@@ -128,6 +134,30 @@ struct Layout {
 }
 
 impl Layout {
+    /// Where a pane's close box sits: its top right corner, inside the plot
+    /// rather than out over the price axis, which belongs to the price.
+    fn close_box(&self, pane: &PaneBox) -> (f64, f64) {
+        (self.plot_x + self.plot_w - PANE_CLOSE - 4.0, pane.top + 4.0)
+    }
+
+    /// The pane whose close box is under this point, if the pointer is over
+    /// that pane at all. The box only exists while you are in the strip it
+    /// belongs to, so it cannot be clicked by accident from elsewhere.
+    fn close_at(&self, x: f64, y: f64) -> Option<u32> {
+        self.panes.iter().find_map(|pane| {
+            if y < pane.top || y > pane.top + pane.height {
+                return None;
+            }
+            let (bx, by) = self.close_box(pane);
+            (x >= bx && x <= bx + PANE_CLOSE && y >= by && y <= by + PANE_CLOSE).then_some(pane.id)
+        })
+    }
+
+    /// Is the pointer anywhere in this pane's strip?
+    fn covers(pane: &PaneBox, y: f64) -> bool {
+        y >= pane.top && y <= pane.top + pane.height
+    }
+
     /// The separator above a pane, which is also what you grab to resize it.
     fn edge(pane: &PaneBox) -> f64 {
         pane.top - PANE_GAP / 2.0
@@ -277,6 +307,8 @@ pub struct ChartView {
     /// Told when a pane's edge has been dragged, so the indicator it belongs
     /// to can be stored at its new height.
     on_pane_resize: Handler<dyn Fn(u32, f64)>,
+    /// Told when a strip's close box was clicked.
+    on_pane_close: Handler<dyn Fn(u32)>,
 }
 
 impl ChartView {
@@ -288,6 +320,7 @@ impl ChartView {
 
         let state = Rc::new(RefCell::new(State {
             bars: Vec::new(),
+            echo: None,
             theme,
             scheme,
             instrument: None,
@@ -314,6 +347,7 @@ impl ChartView {
             on_hover,
             on_context_menu: Rc::new(RefCell::new(None)),
             on_pane_resize: Rc::new(RefCell::new(None)),
+            on_pane_close: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
         view.wire_pointer();
@@ -321,6 +355,23 @@ impl ChartView {
         view.wire_drag();
         view.wire_axis_menu();
         view
+    }
+
+    /// Show where another chart's pointer is, by time.
+    ///
+    /// Two charts of the same symbol at different resolutions do not share bar
+    /// indices, and two charts of different symbols do not share a price — but
+    /// they always share a clock, so the time is the only thing worth echoing.
+    pub fn set_echo(&self, ts: Option<i64>) {
+        let changed = {
+            let mut state = self.state.borrow_mut();
+            let changed = state.echo != ts;
+            state.echo = ts;
+            changed
+        };
+        if changed {
+            self.area.queue_draw();
+        }
     }
 
     pub fn set_hover_handler(&self, handler: impl Fn(Option<Hover>) + 'static) {
@@ -364,6 +415,10 @@ impl ChartView {
     /// own menu.
     pub fn set_pane_resize_handler(&self, handler: impl Fn(u32, f64) + 'static) {
         *self.on_pane_resize.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn set_pane_close_handler(&self, handler: impl Fn(u32) + 'static) {
+        *self.on_pane_close.borrow_mut() = Some(Box::new(handler));
     }
 
     pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
@@ -457,7 +512,15 @@ impl ChartView {
                 let s = state.borrow();
                 layout(&s, area.width() as f64, area.height() as f64).edge_at(y).is_some()
             };
-            area.set_cursor_from_name(Some(if over_edge { "ns-resize" } else { "default" }));
+            let over_close = {
+                let s = state.borrow();
+                layout(&s, area.width() as f64, area.height() as f64).close_at(x, y).is_some()
+            };
+            area.set_cursor_from_name(Some(match (over_edge, over_close) {
+                (true, _) => "ns-resize",
+                (_, true) => "pointer",
+                _ => "default",
+            }));
             notify_hover(&state, &on_hover, &area);
             area.queue_draw();
         });
@@ -533,6 +596,27 @@ impl ChartView {
     }
 
     fn wire_drag(&self) {
+        // Before the drag gesture, so clicking a strip's close box closes it
+        // rather than starting a pan under the pointer.
+        let close = gtk::GestureClick::new();
+        close.set_button(gtk::gdk::BUTTON_PRIMARY);
+        close.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let state = self.state.clone();
+        let area = self.area.clone();
+        let on_close = self.on_pane_close.clone();
+        close.connect_pressed(move |gesture, _, x, y| {
+            let hit = {
+                let s = state.borrow();
+                layout(&s, area.width() as f64, area.height() as f64).close_at(x, y)
+            };
+            let Some(id) = hit else { return };
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+            if let Some(handler) = on_close.borrow().as_ref() {
+                handler(id);
+            }
+        });
+        self.area.add_controller(close);
+
         let drag = gtk::GestureDrag::new();
 
         let state = self.state.clone();
@@ -841,6 +925,12 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
             continue;
         };
         draw_pane_edge(cr, state, &plan, pane_box);
+        // The way out of a strip, offered only while the pointer is in it:
+        // four panes each wearing a permanent close button is four things
+        // competing with the chart.
+        if state.pointer.map(|(_, y)| Layout::covers(pane_box, y)).unwrap_or(false) {
+            draw_pane_close(cr, state, &plan, pane_box);
+        }
         match &drawn.output {
             Output::Volume { .. } => {
                 if max_volume > 0.0 {
@@ -877,6 +967,15 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
             cr, state, px, py, plot_x, plot_w, plot_y, price_h, width, height, bar_w, first, low,
             high, &to_y,
         );
+    }
+
+    // Another chart's pointer, if nothing is pointing at this one. The real
+    // crosshair wins: an echo under your own pointer is a second line saying
+    // the same thing.
+    if state.pointer.is_none() {
+        if let Some(ts) = state.echo {
+            draw_echo(cr, state, bars, plot_x, bar_w, plot_y, height, ts);
+        }
     }
 
     if state.stale {
@@ -1168,6 +1267,22 @@ fn draw_pane_edge(cr: &cairo::Context, state: &State, plan: &Layout, pane: &Pane
     cr.restore().ok();
 }
 
+/// The × that takes a strip off the chart.
+fn draw_pane_close(cr: &cairo::Context, state: &State, plan: &Layout, pane: &PaneBox) {
+    let (x, y) = plan.close_box(pane);
+    let inset = 3.5;
+    cr.save().ok();
+    cr.set_line_width(1.2);
+    cr.set_line_cap(cairo::LineCap::Round);
+    colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.75);
+    cr.move_to(x + inset, y + inset);
+    cr.line_to(x + PANE_CLOSE - inset, y + PANE_CLOSE - inset);
+    cr.move_to(x + PANE_CLOSE - inset, y + inset);
+    cr.line_to(x + inset, y + PANE_CLOSE - inset);
+    let _ = cr.stroke();
+    cr.restore().ok();
+}
+
 /// What a strip is, written in its own top-left corner.
 fn draw_pane_name(cr: &cairo::Context, state: &State, drawn: &Drawn, plot_x: f64, top: f64) {
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
@@ -1431,6 +1546,50 @@ fn label_on_axis(
     cr.move_to(axis_x + 6.0, y + 3.5);
     let _ = cr.show_text(text);
     let _ = state;
+}
+
+/// Where another chart is pointing: the same dashes as the crosshair, but
+/// only the time line, and quieter — it is somebody else's pointer.
+#[allow(clippy::too_many_arguments)]
+fn draw_echo(
+    cr: &cairo::Context,
+    state: &State,
+    bars: &[Bar],
+    plot_x: f64,
+    bar_w: f64,
+    plot_y: f64,
+    height: f64,
+    ts: i64,
+) {
+    let Some(index) = nearest_bar(bars, ts) else { return };
+    let x = (plot_x + (index as f64 + 0.5) * bar_w).round() + 0.5;
+    cr.save().ok();
+    cr.set_dash(&[2.0, 3.0], 0.0);
+    cr.set_line_width(1.0);
+    colors::set_source_alpha(cr, &state.theme.ui.crosshair, 0.3);
+    cr.move_to(x, plot_y);
+    cr.line_to(x, height - TIME_AXIS_H);
+    let _ = cr.stroke();
+    cr.restore().ok();
+}
+
+/// The visible bar closest in time to `ts`, if any is near enough to mean it.
+fn nearest_bar(bars: &[Bar], ts: i64) -> Option<usize> {
+    if bars.is_empty() {
+        return None;
+    }
+    let (mut best, mut gap) = (0usize, i64::MAX);
+    for (i, bar) in bars.iter().enumerate() {
+        let delta = (bar.ts - ts).abs();
+        if delta < gap {
+            best = i;
+            gap = delta;
+        }
+    }
+    // Past a couple of bars' worth the echo is pointing at a time this chart
+    // is not showing, and a line at the nearest edge would be a lie.
+    let step = if bars.len() > 1 { (bars[1].ts - bars[0].ts).abs().max(1) } else { 1 };
+    (gap <= step * 2).then_some(best)
 }
 
 fn draw_stale_marker(cr: &cairo::Context, state: &State, width: f64) {

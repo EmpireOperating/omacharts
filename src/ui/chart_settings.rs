@@ -53,7 +53,7 @@ impl ChartSettings {
         let chart_page = adw::PreferencesPage::new();
         chart_page.set_title("Chart");
         chart_page.set_icon_name(Some("preferences-system-symbolic"));
-        chart_page.add(&bars_group(window));
+        chart_page.add(&bars_group(window, &store));
         chart_page.add(&session_group(window, &store));
         dialog.add(&chart_page);
 
@@ -90,7 +90,7 @@ impl ChartSettings {
 
 }
 
-fn bars_group(window: &Rc<Window>) -> adw::PreferencesGroup {
+fn bars_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title("Bars");
 
@@ -123,6 +123,27 @@ fn bars_group(window: &Rc<Window>) -> adw::PreferencesGroup {
     });
     grid.add_suffix(&switch);
     group.add(&grid);
+
+    // One switch for the window rather than one per chart: it is about how the
+    // charts behave towards each other, which is not a property of any one of
+    // them.
+    let sync = adw::ActionRow::new();
+    sync.set_title("Crosshair across linked charts");
+    sync.set_subtitle("The pointer on one draws the same moment on the others");
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(store.setting_bool(crate::ui::window::SETTING_SYNC_CROSSHAIR, true));
+    let window_for_sync = window.clone();
+    let store_for_sync = store.clone();
+    switch.connect_state_set(move |_, on| {
+        store_for_sync.set_setting_bool(crate::ui::window::SETTING_SYNC_CROSSHAIR, on);
+        if !on {
+            window_for_sync.clear_echoes();
+        }
+        glib::Propagation::Proceed
+    });
+    sync.add_suffix(&switch);
+    group.add(&sync);
 
     group
 }

@@ -159,12 +159,15 @@ Panel {
 
           Item { Layout.fillWidth: true }
 
-          Text {
+          // A spinner rather than the word "updating": the refresh takes a
+          // moment and a word that long, appearing and disappearing beside the
+          // title, is more movement than the thing it is reporting.
+          BusyIndicator {
             visible: root.service.refreshing
-            text: "updating…"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(11)
-            color: root.dim
+            running: visible
+            implicitWidth: Style.space(14)
+            implicitHeight: Style.space(14)
+            opacity: 0.45
           }
         }
 

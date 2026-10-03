@@ -6,6 +6,7 @@
 //! keeps the provider boundary honest.
 
 pub mod bars;
+pub mod frame;
 pub mod indicators;
 pub mod omarchy;
 pub mod palette;
@@ -22,6 +23,7 @@ pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, P
 pub use provider::{Capability, Provider, ProviderError};
 pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
+pub use frame::Frame;
 pub use theme::{
     theme_bars, BarScheme, BarSlot, ColorChoice, Direction, Mode, Source, Swatch, Theme,
     UiColors, UiSlot,

@@ -31,8 +31,10 @@ pub struct ChartPane {
     pub view: Rc<ChartView>,
     /// What goes in the layout: the chart, its legend, and the focus ring.
     pub root: gtk::Box,
-    /// Symbol and resolution, over the top left of the chart.
-    pub readout: gtk::Label,
+    /// The symbol, over the top left of the chart.
+    pub symbol_label: gtk::Label,
+    /// The resolution, after the link toggle.
+    pub timeframe_label: gtk::Label,
     /// One row per indicator, under the readout.
     pub indicator_legend: gtk::Box,
     pub gear: gtk::Button,
@@ -61,12 +63,21 @@ impl ChartPane {
     ) -> Rc<ChartPane> {
         let view = ChartView::new(theme, scheme);
 
-        let readout = gtk::Label::new(None);
-        readout.add_css_class("readout-symbol");
-        readout.set_valign(gtk::Align::Center);
-        readout.set_can_target(false);
+        let symbol_label = gtk::Label::new(None);
+        symbol_label.add_css_class("readout-symbol");
+        symbol_label.set_valign(gtk::Align::Center);
+        symbol_label.set_can_target(false);
 
+        let timeframe_label = gtk::Label::new(None);
+        timeframe_label.add_css_class("readout-symbol");
+        timeframe_label.set_valign(gtk::Align::Center);
+        timeframe_label.set_can_target(false);
+
+        // One icon, and the toggle's own pressed state says whether it is on.
+        // Adwaita has a chain but no broken chain, so a second icon for the
+        // off state was a missing-image placeholder.
         let link = gtk::ToggleButton::new();
+        link.set_icon_name("insert-link-symbolic");
         link.add_css_class("flat");
         link.add_css_class("legend-gear");
         link.set_valign(gtk::Align::Center);
@@ -79,9 +90,12 @@ impl ChartPane {
         gear.set_tooltip_text(Some("Chart settings"));
         gear.set_valign(gtk::Align::Center);
 
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        bar.append(&readout);
+        // The link belongs beside the symbol, because that is what it is about:
+        // whether this chart follows the rail's symbol or keeps its own.
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        bar.append(&symbol_label);
         bar.append(&link);
+        bar.append(&timeframe_label);
         bar.append(&gear);
 
         let indicator_legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -111,7 +125,8 @@ impl ChartPane {
             id,
             view,
             root,
-            readout,
+            symbol_label,
+            timeframe_label,
             indicator_legend,
             gear,
             link,
@@ -158,17 +173,29 @@ impl ChartPane {
     }
 
     pub fn write_readout(&self) {
-        self.readout.set_text(&self.label());
+        let symbol = self
+            .instrument
+            .borrow()
+            .as_ref()
+            .map(|i| i.display_symbol())
+            .unwrap_or_default();
+        let resolution = if symbol.is_empty() {
+            String::new()
+        } else {
+            format!("·  {}", self.timeframe.get().label())
+        };
+        self.symbol_label.set_text(&symbol);
+        self.timeframe_label.set_text(&resolution);
     }
 }
 
 fn set_link_look(link: &gtk::ToggleButton, linked: bool) {
-    link.set_icon_name(if linked {
-        "insert-link-symbolic"
-    } else {
-        "link-broken-symbolic"
-    });
     link.set_tooltip_text(Some(if linked { LINK_ON } else { LINK_OFF }));
+    if linked {
+        link.remove_css_class("link-off");
+    } else {
+        link.add_css_class("link-off");
+    }
 }
 
 /// How the panes are arranged.
@@ -275,6 +302,34 @@ mod tests {
     #[test]
     fn the_last_pane_cannot_be_removed() {
         assert_eq!(Node::leaf(1).remove(1), None);
+    }
+
+    /// Four panes from two splits of a split, the way tmux does it: every
+    /// leaf is splittable, including ones that came from a split.
+    #[test]
+    fn splitting_a_split_pane_gives_four() {
+        let layout = Node::leaf(1)
+            .split(1, 2, true)
+            .split(1, 3, false)
+            .split(2, 4, false);
+        assert_eq!(layout.leaves().len(), 4);
+        // And the shape is a pair of columns, each divided in two.
+        let Node::Split { horizontal, first, second } = &layout else { panic!("{layout:?}") };
+        assert!(*horizontal);
+        assert!(matches!(**first, Node::Split { horizontal: false, .. }));
+        assert!(matches!(**second, Node::Split { horizontal: false, .. }));
+    }
+
+    /// Closing one of four leaves three, and only the split that held it
+    /// collapses — the other column keeps its own division.
+    #[test]
+    fn closing_one_of_four_leaves_the_rest_alone() {
+        let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
+        let left = layout.remove(3).unwrap();
+        assert_eq!(left.leaves(), vec![1, 2, 4]);
+        let Node::Split { first, second, .. } = &left else { panic!("{left:?}") };
+        assert_eq!(**first, Node::Leaf(1));
+        assert!(matches!(**second, Node::Split { .. }));
     }
 
     #[test]

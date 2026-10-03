@@ -184,6 +184,8 @@ pub const SETTING_SHOW_GRID: &str = "show_grid";
 const SETTING_TIMEFRAMES: &str = "timeframes";
 /// The whole arrangement of charts, as one stored value.
 const SETTING_WORKSPACE: &str = "workspace";
+/// Whether a pointer on one chart draws a line on the linked ones.
+pub const SETTING_SYNC_CROSSHAIR: &str = "sync_crosshair";
 
 /// One chart, as it is written down.
 ///
@@ -441,6 +443,29 @@ impl Window {
                 }
                 resizer.set_indicators_of(&pane, indicators);
             }
+        });
+
+        // The × in a strip's corner takes that indicator off this chart.
+        let closer = self.clone();
+        pane.view.set_pane_close_handler(move |indicator_id| {
+            let Some(pane) = closer.pane(id) else { return };
+            let kept: Vec<Indicator> = pane
+                .indicators
+                .borrow()
+                .iter()
+                .filter(|i| i.id != indicator_id)
+                .cloned()
+                .collect();
+            closer.set_indicators_of(&pane, kept);
+        });
+
+        // The pointer on one chart draws a line on the charts linked with it,
+        // so you can read the same moment on all of them at once. Only the
+        // time travels: two charts at different resolutions share no bar
+        // index, and two symbols share no price.
+        let echoer = self.clone();
+        pane.view.set_hover_handler(move |hover| {
+            echoer.echo_crosshair(id, hover.map(|h| h.bar.ts));
         });
 
         // Clicking anywhere on a chart focuses it, which is what makes the
@@ -728,6 +753,30 @@ impl Window {
         }
         self.sync_header();
         true
+    }
+
+    /// Draw `ts` on every chart linked with `from`, and on none when it is
+    /// unlinked: an unlinked chart is deliberately somewhere else.
+    fn echo_crosshair(self: &Rc<Self>, from: u32, ts: Option<i64>) {
+        if !self.store.setting_bool(SETTING_SYNC_CROSSHAIR, true) {
+            return;
+        }
+        let source_linked = self.pane(from).map(|p| p.linked.get()).unwrap_or(false);
+        for pane in self.panes.borrow().iter() {
+            if pane.id == from {
+                continue;
+            }
+            let show = source_linked && pane.linked.get();
+            pane.view.set_echo(if show { ts } else { None });
+        }
+    }
+
+    /// Stop every echo, for when the setting is switched off or the panes
+    /// change under it.
+    pub fn clear_echoes(self: &Rc<Self>) {
+        for pane in self.panes.borrow().iter() {
+            pane.view.set_echo(None);
+        }
     }
 
     /// What the linked charts are showing, ignoring `except`.
