@@ -369,6 +369,10 @@ fn stroke_rows(
 }
 
 /// A colour row: a quiet way back to the default, then the swatch.
+///
+/// Reset is enabled whenever a colour is pinned — not only when the hex
+/// differs from the theme's. Pinning the same colour still stops the indicator
+/// following the theme, so there is still something to undo.
 #[allow(clippy::too_many_arguments)]
 fn colour_row(
     window: &Rc<Window>,
@@ -383,36 +387,59 @@ fn colour_row(
     let row = adw::ActionRow::new();
     row.set_title(title);
 
+    let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
+    button.set_rgba(&colors::parse(current));
+    button.set_valign(gtk::Align::Center);
+    button.add_css_class("swatch-button");
+
     let default = gtk::Button::with_label("Reset");
     default.add_css_class("flat");
     default.add_css_class("subtle-link");
     default.set_valign(gtk::Align::Center);
     default.set_tooltip_text(Some("Back to the colour the theme gives it"));
     default.set_sensitive(!is_default);
-    let window_for_default = window.clone();
-    let dialog_for_default = dialog.clone();
-    let list_for_default = list.clone();
-    let apply_for_default = apply.clone();
-    default.connect_clicked(move |_| {
-        let apply = apply_for_default.clone();
-        update(&window_for_default, id, move |indicator| apply(indicator, None));
-        rebuild_indicators(&window_for_default, &dialog_for_default, &list_for_default);
-    });
-    row.add_suffix(&default);
 
-    let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-    button.set_rgba(&colors::parse(current));
-    button.set_valign(gtk::Align::Center);
-    button.add_css_class("swatch-button");
+    // Only the list behind this panel is rebuilt when a colour changes, so
+    // these two have to keep each other up to date — otherwise Reset stays
+    // greyed out until the panel is reopened, right after the one action that
+    // gives it something to undo.
     let window_for_colour = window.clone();
     let dialog_for_colour = dialog.clone();
     let list_for_colour = list.clone();
+    let apply_for_colour = apply.clone();
+    let default_weak = default.downgrade();
     button.connect_rgba_notify(move |button| {
         let hex = colors::to_hex(&button.rgba());
-        let apply = apply.clone();
+        let apply = apply_for_colour.clone();
         update(&window_for_colour, id, move |indicator| apply(indicator, Some(hex.clone())));
+        if let Some(default) = default_weak.upgrade() {
+            default.set_sensitive(true);
+        }
         rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
     });
+
+    let window_for_default = window.clone();
+    let dialog_for_default = dialog.clone();
+    let list_for_default = list.clone();
+    let button_weak = button.downgrade();
+    default.connect_clicked(move |default| {
+        let apply = apply.clone();
+        update(&window_for_default, id, move |indicator| apply(indicator, None));
+        default.set_sensitive(false);
+
+        // Show the colour it reverted to, so the swatch is not left displaying
+        // the one that was just discarded.
+        if let Some(button) = button_weak.upgrade() {
+            let indicators = window_for_default.indicators();
+            if let Some(slot) = indicators.iter().position(|i| i.id == id) {
+                let reverted = indicators[slot].color(&window_for_default.theme(), slot);
+                button.set_rgba(&colors::parse(&reverted));
+            }
+        }
+        rebuild_indicators(&window_for_default, &dialog_for_default, &list_for_default);
+    });
+
+    row.add_suffix(&default);
     row.add_suffix(&button);
     row
 }
