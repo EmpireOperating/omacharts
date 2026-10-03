@@ -1,9 +1,9 @@
 //! The data provider boundary.
 //!
 //! Everything that knows how to talk to a market data source lives behind this
-//! trait. v0 ships Yahoo alone, but Sierra, IBKR and the rest arrive as new
-//! implementations and nothing above this line changes — which is the whole
-//! reason the boundary exists.
+//! trait. v0 ships Yahoo alone, but a broker feed or a paid vendor arrives as
+//! another implementation and nothing above this line changes — which is the
+//! whole reason the boundary exists.
 
 use std::fmt;
 
