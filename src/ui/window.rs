@@ -411,6 +411,12 @@ impl Window {
         pane.view.set_bar_style(bar_style);
         pane.view.set_show_grid(show_grid);
 
+        let searcher = self.clone();
+        pane.symbol_button.connect_clicked(move |_| {
+            searcher.focus(id);
+            searcher.open_search();
+        });
+
         let opener = self.clone();
         pane.gear.connect_clicked(move |_| {
             opener.focus(id);
@@ -791,9 +797,6 @@ impl Window {
     fn build_header(self: &Rc<Self>, split: &gtk::Paned) -> adw::HeaderBar {
         let header = adw::HeaderBar::new();
 
-        let this = self.clone();
-        self.symbol_button.connect_clicked(move |_| this.open_search());
-        header.pack_start(&self.symbol_button);
         self.rebuild_timeframes();
         header.set_title_widget(Some(&self.timeframe_strip));
 
@@ -1052,16 +1055,6 @@ impl Window {
                     this.toggle_watchlist();
                     return glib::Propagation::Stop;
                 }
-                // Splitting and walking the layout, the way a tiling window
-                // manager spells them.
-                Key::h | Key::H if ctrl => {
-                    this.split_focused(true);
-                    return glib::Propagation::Stop;
-                }
-                Key::v | Key::V if ctrl => {
-                    this.split_focused(false);
-                    return glib::Propagation::Stop;
-                }
                 Key::Left | Key::Up if alt && !ctrl => {
                     this.step_focus(-1);
                     return glib::Propagation::Stop;
@@ -1197,6 +1190,29 @@ impl Window {
             }
         });
         self.window.add_controller(keys);
+
+        // Ctrl+V is paste, and GTK claims it before a controller on the window
+        // ever sees it — which is why the vertical split did nothing while the
+        // horizontal one worked. Splitting has to be caught on the way down.
+        //
+        // Only when the focus is not in something you can type into, or
+        // pasting a symbol into a box would split the window instead.
+        let capture = gtk::EventControllerKey::new();
+        capture.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = self.clone();
+        capture.connect_key_pressed(move |_, key, _, state| {
+            use gtk::gdk::Key;
+            if !state.contains(gtk::gdk::ModifierType::CONTROL_MASK) || this.is_typing() {
+                return glib::Propagation::Proceed;
+            }
+            match key {
+                Key::h | Key::H => this.split_focused(true),
+                Key::v | Key::V => this.split_focused(false),
+                _ => return glib::Propagation::Proceed,
+            }
+            glib::Propagation::Stop
+        });
+        self.window.add_controller(capture);
     }
 
     /// Fold arriving bars into the chart. Runs on the main thread.
@@ -2034,7 +2050,14 @@ impl Window {
         rest.append(Some("Chart settings…"), Some("chart.settings"));
         menu.append_section(None, &rest);
 
-        popup_menu(&menu, &self.focused_pane().view.area, x, y);
+        // Hung off the window rather than the chart it was opened on: a menu
+        // parented to one pane of a split has only that pane's height to fit
+        // in, and GTK answers a menu that does not fit by making it scroll.
+        let area = self.focused_pane().view.area.clone();
+        let (wx, wy) = area
+            .translate_coordinates(&self.window, x, y)
+            .unwrap_or((x, y));
+        popup_menu(&menu, &self.window, wx, wy);
     }
 
     /// The actions the chart's menus drive.
@@ -2129,6 +2152,13 @@ impl Window {
     /// Closed, open it and put the keyboard on it — the reason to open a
     /// watchlist is almost always to move through it. Open but not focused,
     /// focus it. Open and focused, you are done with it, so close it.
+    /// Is the keyboard going into a box somebody is typing in?
+    fn is_typing(&self) -> bool {
+        gtk::prelude::GtkWindowExt::focus(&self.window)
+            .map(|widget| widget.is::<gtk::Editable>() || widget.is::<gtk::TextView>())
+            .unwrap_or(false)
+    }
+
     fn shows_sidebar(&self) -> bool {
         self.split.end_child().map(|rail| rail.is_visible()).unwrap_or(false)
     }

@@ -31,8 +31,10 @@ pub struct ChartPane {
     pub view: Rc<ChartView>,
     /// What goes in the layout: the chart, its legend, and the focus ring.
     pub root: gtk::Box,
-    /// The symbol, over the top left of the chart.
-    pub symbol_label: gtk::Label,
+    /// The symbol, over the top left of the chart. A button: clicking the
+    /// name of the thing you are looking at to change it is the shortest
+    /// route there is.
+    pub symbol_button: gtk::Button,
     /// The resolution, after the link toggle.
     pub timeframe_label: gtk::Label,
     /// One row per indicator, under the readout.
@@ -63,10 +65,11 @@ impl ChartPane {
     ) -> Rc<ChartPane> {
         let view = ChartView::new(theme, scheme);
 
-        let symbol_label = gtk::Label::new(None);
-        symbol_label.add_css_class("readout-symbol");
-        symbol_label.set_valign(gtk::Align::Center);
-        symbol_label.set_can_target(false);
+        let symbol_button = gtk::Button::new();
+        symbol_button.add_css_class("flat");
+        symbol_button.add_css_class("legend-symbol");
+        symbol_button.set_valign(gtk::Align::Center);
+        symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
         let timeframe_label = gtk::Label::new(None);
         timeframe_label.add_css_class("readout-symbol");
@@ -79,7 +82,7 @@ impl ChartPane {
         let link = gtk::ToggleButton::new();
         link.set_icon_name("insert-link-symbolic");
         link.add_css_class("flat");
-        link.add_css_class("legend-gear");
+        link.add_css_class("legend-link");
         link.set_valign(gtk::Align::Center);
         link.set_active(linked);
         set_link_look(&link, linked);
@@ -90,11 +93,8 @@ impl ChartPane {
         gear.set_tooltip_text(Some("Chart settings"));
         gear.set_valign(gtk::Align::Center);
 
-        // The link belongs beside the symbol, because that is what it is about:
-        // whether this chart follows the rail's symbol or keeps its own.
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        bar.append(&symbol_label);
-        bar.append(&link);
+        bar.append(&symbol_button);
         bar.append(&timeframe_label);
         bar.append(&gear);
 
@@ -109,9 +109,20 @@ impl ChartPane {
         legend.append(&bar);
         legend.append(&indicator_legend);
 
+        // The link lives in the opposite corner from the legend, on its own.
+        // It is the one thing on a chart that is about the other charts, and
+        // putting it in the stack of names made it read as another indicator.
+        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        corner.set_halign(gtk::Align::End);
+        corner.set_valign(gtk::Align::Start);
+        corner.set_margin_end(10);
+        corner.set_margin_top(6);
+        corner.append(&link);
+
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&view.area));
         overlay.add_overlay(&legend);
+        overlay.add_overlay(&corner);
 
         // A box rather than the overlay itself, so the focus ring is drawn on
         // something that is not also the drawing surface.
@@ -125,7 +136,7 @@ impl ChartPane {
             id,
             view,
             root,
-            symbol_label,
+            symbol_button,
             timeframe_label,
             indicator_legend,
             gear,
@@ -184,17 +195,25 @@ impl ChartPane {
         } else {
             format!("·  {}", self.timeframe.get().label())
         };
-        self.symbol_label.set_text(&symbol);
+        self.symbol_button.set_label(&symbol);
         self.timeframe_label.set_text(&resolution);
     }
 }
 
+/// The legend stays out of the way, so an unlinked chart's toggle is nearly
+/// invisible. A linked one is not: following the rail is the state worth being
+/// able to see across four charts without looking for it.
 fn set_link_look(link: &gtk::ToggleButton, linked: bool) {
     link.set_tooltip_text(Some(if linked { LINK_ON } else { LINK_OFF }));
+    // Two states that cannot be confused, from one icon: Adwaita has a chain
+    // and no broken chain, so the difference has to be carried by weight
+    // rather than by a second glyph. A linked chart says so plainly; an
+    // unlinked one keeps a faint handle you can find when you want it.
+    link.set_opacity(if linked { 1.0 } else { 0.28 });
     if linked {
-        link.remove_css_class("link-off");
+        link.add_css_class("accent");
     } else {
-        link.add_css_class("link-off");
+        link.remove_css_class("accent");
     }
 }
 

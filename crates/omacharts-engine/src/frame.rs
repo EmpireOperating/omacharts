@@ -21,15 +21,18 @@
 
 use crate::theme::{contrast_ratio, delta_e, mix, BarScheme, Direction, Oklch, Theme};
 
-/// The gap between two panes, in CSS pixels. Wide enough to aim at with a
-/// pointer, narrow enough that four charts still read as one surface. The
-/// drag handle extends past it invisibly, so the visible band can be this
-/// thin without being hard to catch.
-pub const GUTTER_WIDTH: u32 = 4;
+/// The gap between two panes, in CSS pixels. The whole band is the drag
+/// handle, so it has to be wide enough to aim at with a pointer; it is also
+/// the gap Omarchy leaves between two windows, so four charts on it look
+/// like four windows on the desktop.
+pub const GUTTER_WIDTH: u32 = 5;
 
-/// The focus ring's width, in CSS pixels. One: a hairline is a mark, two is
-/// a frame, and a frame around a chart is decoration.
-pub const RING_WIDTH: u32 = 1;
+/// The focus ring's width, in CSS pixels. Two, not one: a hairline at the
+/// contrast the ring is held to is findable, and findable is not enough
+/// when four panes are open and the question is which one the keyboard will
+/// act on. Two pixels at that contrast are seen at a glance; the same thing
+/// in a louder colour would compete with the candles.
+pub const RING_WIDTH: u32 = 2;
 
 /// How far off the chart the gutter must sit to read as a gap. Lumon's and
 /// Miasma's surfaces, at about 0.04, are the quietest panels the app has

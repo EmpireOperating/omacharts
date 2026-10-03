@@ -153,7 +153,7 @@ fn intro(html: &mut String, count: usize) {
 <p>The <strong>focus ring</strong> is a {ring}px border inside the edge of the focused pane, between the chart and the gutter. It keeps the accent's hue, but its lightness is chosen rather than taken: walked away from the chart background until the ring has <b>{contrast}:1</b> contrast on every theme, where the accent as-is would be 1.8:1 on Rose Pine and 5:1 on Hackerman. It then walks on, only as far as it must, to be at least <b>{furniture}</b> ΔE from the axis, the grid, the border and the crosshair, and at least <b>{candle}</b> from either candle colour, so that it can never be read as a line the chart drew. Solitude's accent at ring lightness is its axis line to the pixel; Lumon's is the blue its candles wear; the ring moves off both. Chroma is capped at 0.14, which is what keeps Lupine's and Catppuccin Latte's vivid accents from vibrating as a hairline.</p>
 <p>Unfocused panes get nothing at all. A lone chart, in a window that has not been split, gets nothing either.</p>
 <h2>How to read the pictures</h2>
-<p>Each theme is drawn as a tiled layout at one CSS pixel per pixel: a header, one tall pane and two stacked beside it, so both a vertical and a horizontal gutter appear. The left pane has focus and shows the crosshair; the gutter between the two right-hand panes is shown as it looks under the pointer. Candles, the grid, the axes, the labels and the overlay are the theme's own, drawn the way the chart draws them. The <button type="button" onclick="document.body.classList.toggle('zoom')">2× button</button> doubles everything, which is roughly what a HiDPI screen does.</p>
+<p>Each theme is drawn as a tiled layout at one CSS pixel per pixel: a header, one tall pane and two stacked beside it, so both a vertical and a horizontal gutter appear. The left pane has focus and shows the crosshair; the gutter between the two right-hand panes is shown as it looks under the pointer. Candles, the grid, the axes, the labels, the overlay and the volume strip are the theme's own, drawn the way the chart draws them, including the hairline the chart rules above every indicator strip, which is the line a gutter must not be confused with. The <button type="button" onclick="document.body.classList.toggle('zoom')">2× button</button> doubles everything, which is roughly what a HiDPI screen does.</p>
 <p><strong>ΔE</strong> is the distance between two colours in OKLab, where black to white is 1.0 and about 0.02 is the least an eye can see. <strong>Contrast</strong> is the WCAG ratio against the chart background. Numbers below a guarantee are marked <span class="bad">like this</span>.</p>
 </section>
 "#,
@@ -225,8 +225,8 @@ fn section(html: &mut String, row: &Row) {
         html,
         r#"</div>
 <div class="scroll"><table class="metrics">
-<tr><th>chart</th><th>surface</th><th>gutter</th><th>ΔE from chart</th><th>hover</th><th>accent</th><th>ring</th><th>L</th><th>C</th><th>H</th><th>contrast</th><th>ΔE axis</th><th>ΔE grid</th><th>ΔE border</th><th>ΔE crosshair</th><th>ΔE up</th><th>ΔE down</th></tr>
-<tr><td>{}</td><td>{}</td><td>{}</td>{}<td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{:.0}</td>{}{}{}{}{}{}{}</tr>
+<tr><th>chart</th><th>surface</th><th>gutter</th><th>ΔE from chart</th><th>ΔE from strip rule</th><th>hover</th><th>accent</th><th>ring</th><th>L</th><th>C</th><th>H</th><th>contrast</th><th>ΔE axis</th><th>ΔE grid</th><th>ΔE border</th><th>ΔE crosshair</th><th>ΔE up</th><th>ΔE down</th></tr>
+<tr><td>{}</td><td>{}</td><td>{}</td>{}<td>{:.3}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2}</td><td>{:.3}</td><td>{:.0}</td>{}{}{}{}{}{}{}</tr>
 </table></div>
 </section>
 "#,
@@ -234,6 +234,7 @@ fn section(html: &mut String, row: &Row) {
         chip(&ui.surface),
         chip(&row.frame.gutter),
         mark(row.gutter_from_chart, MIN_GUTTER, 3),
+        delta_e(&row.frame.gutter, &mix(&ui.border, &ui.background, 0.1)),
         chip(&row.frame.gutter_hover),
         chip(&ui.accent),
         chip(&row.frame.focus),
@@ -367,6 +368,18 @@ fn pane(html: &mut String, row: &Row, x: f64, y: f64, w: f64, h: f64, label: &st
     let _ = write!(html, r#"<rect x="{}" y="{cy}" width="1" height="{plot_h}" fill="{}"/>"#, cx + plot_w, ui.axis);
     let _ = write!(html, r#"<rect x="{cx}" y="{}" width="{plot_w}" height="1" fill="{}"/>"#, cy + plot_h, ui.axis);
 
+    // The volume strip, with the rule the chart draws above every indicator
+    // strip: the border colour at 0.9. A gutter has to look like something
+    // else than this, or a split reads as one more indicator.
+    let strip_h = 52.0;
+    let strip_y = cy + plot_h - strip_h;
+    let _ = write!(
+        html,
+        r#"<rect x="{cx}" y="{strip_y}" width="{plot_w}" height="1" fill="{}"/>"#,
+        mix(&ui.border, &ui.background, 0.1)
+    );
+    let price_h = plot_h - strip_h - 4.0;
+
     // Candles: a deterministic random walk, so the page is stable between runs.
     let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     let mut next = || {
@@ -377,20 +390,20 @@ fn pane(html: &mut String, row: &Row, x: f64, y: f64, w: f64, h: f64, label: &st
     };
     let bar_w = 9.0;
     let count = ((plot_w - 20.0) / bar_w) as usize;
-    let mut price = plot_h * 0.55;
+    let mut price = price_h * 0.55;
     let mut closes = Vec::with_capacity(count);
     for i in 0..count {
         let open = price;
-        let close = (open + (next() - 0.5) * plot_h * 0.12).clamp(plot_h * 0.15, plot_h * 0.9);
-        let hi = close.max(open) + next() * plot_h * 0.04;
-        let lo = close.min(open) - next() * plot_h * 0.04;
+        let close = (open + (next() - 0.5) * price_h * 0.12).clamp(price_h * 0.15, price_h * 0.9);
+        let hi = close.max(open) + next() * price_h * 0.04;
+        let lo = close.min(open) - next() * price_h * 0.04;
         let dir = Direction::of_bar(open, close);
         let bx = cx + 10.0 + i as f64 * bar_w;
         let _ = write!(
             html,
             r#"<rect x="{}" y="{}" width="1" height="{}" fill="{}"/>"#,
             bx + 4.0,
-            cy + plot_h - hi,
+            cy + price_h - hi,
             hi - lo,
             row.bars.outline(dir)
         );
@@ -401,10 +414,18 @@ fn pane(html: &mut String, row: &Row, x: f64, y: f64, w: f64, h: f64, label: &st
                 html,
                 r#"<rect x="{}" y="{}" width="7" height="{height}" fill="{body}"/>"#,
                 bx + 1.0,
-                cy + plot_h - top
+                cy + price_h - top
             );
         }
-        closes.push((bx + 4.5, cy + plot_h - close));
+        let volume = 6.0 + next() * (strip_h - 12.0);
+        let _ = write!(
+            html,
+            r#"<rect x="{}" y="{}" width="7" height="{volume}" fill="{}"/>"#,
+            bx + 1.0,
+            cy + plot_h - volume,
+            row.bars.volume(dir)
+        );
+        closes.push((bx + 4.5, cy + price_h - close));
         price = close;
     }
 
@@ -424,7 +445,7 @@ fn pane(html: &mut String, row: &Row, x: f64, y: f64, w: f64, h: f64, label: &st
 
     // The crosshair, in the focused pane only.
     if focused {
-        let (hx, hy) = (cx + plot_w * 0.62, cy + plot_h * 0.42);
+        let (hx, hy) = (cx + plot_w * 0.62, cy + price_h * 0.42);
         let _ = write!(
             html,
             r#"<line x1="{hx}" y1="{cy}" x2="{hx}" y2="{}" stroke="{}" stroke-dasharray="3 3"/><line x1="{cx}" y1="{hy}" x2="{}" y2="{hy}" stroke="{}" stroke-dasharray="3 3"/>"#,

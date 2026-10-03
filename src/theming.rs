@@ -12,6 +12,9 @@
 
 use std::path::PathBuf;
 
+use std::fmt::Write as _;
+
+use omacharts_engine::frame::{GUTTER_WIDTH, RING_WIDTH};
 use omacharts_engine::theme::{
     builtin_bar_schemes, builtin_themes, theme_bars, BarScheme, Mode, Theme,
     FALLBACK_THEME_ID, OMARCHY_ID, THEME_BARS_ID,
@@ -173,9 +176,10 @@ impl Theming {
 
 /// The app's CSS: libadwaita's named colours, redefined from the theme, plus
 /// the few classes we add ourselves.
-fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
+pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
     let ui = &theme.ui;
     let accent_fg = colors::readable_on(&ui.accent);
+    let frame = theme.frame(scheme);
 
     let mut css = String::with_capacity(2048);
     let mut define = |name: &str, value: &str| {
@@ -215,6 +219,13 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
     // with the candles beside it.
     define("omacharts_up", &scheme.up);
     define("omacharts_down", &scheme.down);
+
+    // The frame around tiled charts. Derived, not taken: the engine explains
+    // why in `frame.rs`, and `doc/themes/frames.html` shows the result on
+    // every theme.
+    define("omacharts_gutter", &frame.gutter);
+    define("omacharts_gutter_hover", &frame.gutter_hover);
+    define("omacharts_focus", &frame.focus);
 
     css.push_str(
         "
@@ -259,11 +270,18 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    is still a dozen pixels short of its own contents: it scrolls, and the last
    item sits on the rounded corner with nothing under it.
 
-   Zeroing that padding takes the slack away, and the breathing room goes on
-   the items as margins instead, which every level does count: measured through
-   the tree, requested and allocated heights now match exactly, so there is
-   nothing left to scroll. */
-popover.menu contents { padding-top: 0; padding-bottom: 0; }
+   The padding is one part of it and the one-pixel border above and below is
+   the other; neither is counted. Zeroing both takes the slack away, and the
+   breathing room goes on the items as margins instead, which every level does
+   count. Measured through the live widget tree with the real menu — two
+   submenus and three sections — requested and allocated heights now match
+   exactly, so there is nothing left to scroll. */
+popover.menu contents {
+  padding-top: 0;
+  padding-bottom: 0;
+  border-top-width: 0;
+  border-bottom-width: 0;
+}
 popover.menu modelbutton:first-child { margin-top: 6px; }
 popover.menu modelbutton:last-child { margin-bottom: 6px; }
 
@@ -306,6 +324,52 @@ popover.menu modelbutton:last-child { margin-bottom: 6px; }
 .legend-button:hover { opacity: 1; }
 ",
     );
+
+    // Tiled charts borrow the window manager's idiom, since an Omarchy user
+    // reads it without thinking: panes sit on a gap, the focused one wears a
+    // thin border in the accent, and nothing else is drawn.
+    let _ = write!(
+        css,
+        "
+/* The gap between two charts is the window surface showing through, the way
+   the gap between two windows shows the desktop, and it is also the handle
+   that resizes them. libadwaita gives a wide handle a hairline along each of
+   its edges, as inset shadows in its own border colour, which under a
+   chart's time axis reads as a hairline, a band and a second hairline: a
+   double separator. The shadows go, so the handle is one band of one colour.
+   It stays wide because the band is then the whole hit area; the narrow
+   handle is grabbed through an invisible extension over the first pixels of
+   the charts beside it, which is exactly where the focus ring is. */
+paned.chart-split > separator {{
+  min-width: {gutter}px;
+  min-height: {gutter}px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  box-shadow: none;
+  background: @omacharts_gutter;
+  transition: background-color 120ms ease-out;
+}}
+paned.chart-split > separator:hover,
+paned.chart-split > separator:active {{ background-color: @omacharts_gutter_hover; }}
+
+/* The focused pane is the one keys, menus and the symbol search act on, so
+   with four charts open it has to be told apart at a glance: a ring inside
+   its edge, in the accent's hue at a lightness the engine chooses so that it
+   is seen the same amount on every theme and is never the colour of the
+   axis, the crosshair or a candle. Every pane carries the border, in the
+   chart's own colour when unfocused, so focus moving between panes changes a
+   colour and not a layout. Only inside a split: a chart on its own has
+   nothing to be told apart from. */
+.chart-pane {{
+  background-color: @view_bg_color;
+  border: {ring}px solid transparent;
+}}
+.chart-split .chart-pane.focused {{ border-color: @omacharts_focus; }}
+",
+        gutter = GUTTER_WIDTH,
+        ring = RING_WIDTH,
+    );
     css
 }
 
@@ -332,6 +396,27 @@ mod tests {
         assert!(css.contains(&theme.ui.accent));
         assert!(css.contains("@define-color omacharts_up "));
         assert!(css.contains("@define-color omacharts_down "));
+    }
+
+    #[test]
+    fn the_frame_is_styled_from_the_engines_colours_and_widths() {
+        let theme = &builtin_themes()[0];
+        let scheme = builtin_bar_schemes()[0].clone();
+        let css = stylesheet(theme, &scheme);
+        let frame = theme.frame(&scheme);
+        for (name, value) in [
+            ("omacharts_gutter", &frame.gutter),
+            ("omacharts_gutter_hover", &frame.gutter_hover),
+            ("omacharts_focus", &frame.focus),
+        ] {
+            assert!(css.contains(&format!("@define-color {name} {value};")), "missing {name}");
+        }
+        assert!(css.contains(&format!("min-width: {GUTTER_WIDTH}px;")));
+        assert!(css.contains(&format!("border: {RING_WIDTH}px solid transparent;")));
+        // Only a split shows focus; a lone chart has nothing to be told from.
+        assert!(css.contains(".chart-split .chart-pane.focused { border-color: @omacharts_focus; }"));
+        // And the wide handle's two hairlines are gone.
+        assert!(css.contains("box-shadow: none;"));
     }
 
     #[test]
