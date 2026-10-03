@@ -9,7 +9,8 @@
 //! close would make the profile a histogram of closes, which is a different
 //! and less useful picture.
 
-use crate::bars::Bar;
+use crate::bars::{price_decimals, Bar};
+use crate::symbols::InstrumentKind;
 
 use super::periods::Reset;
 
@@ -50,30 +51,86 @@ impl Profile {
     }
 }
 
+/// The fewest and most rows a period is ever divided into.
+///
+/// The floor keeps a motionless period from collapsing to a single block; the
+/// ceiling keeps a profile from becoming a smear of hairlines on a chart only
+/// a few hundred pixels tall.
+const MIN_ROWS: usize = 4;
+const MAX_ROWS: usize = 400;
+
+/// How many rows the typical period should get when the count is automatic.
+///
+/// Not a target to hit exactly — the row height is snapped to a round price
+/// step and the count falls out of that, so the realised count lands anywhere
+/// from about a hundred to this. It is a ceiling the snapping stays under.
+///
+/// Set where it is because of what it has to beat. Forty-eight rows across an
+/// Apple session is nine cents a row, which hides exactly the shelf a profile
+/// is read for; a nickel a row is the increment the stock actually trades on,
+/// and that comes out near a hundred and sixty.
+const TARGET_ROWS: f64 = 250.0;
+
 pub fn compute(
     bars: &[Bar],
     reset: Reset,
     session_origin: i64,
-    rows: usize,
+    rows: Option<usize>,
     value_area: f64,
+    kind: Option<InstrumentKind>,
 ) -> Vec<Profile> {
-    let rows = rows.clamp(4, 400);
     let mut out = Vec::new();
     if bars.is_empty() {
         return out;
     }
 
+    let periods = periods(bars, reset, session_origin);
+    // One price step for the whole chart rather than one per period, so a
+    // quiet session is drawn as a short profile next to a busy one rather than
+    // being stretched to the same height. Comparing two sessions is most of
+    // what a volume profile is for.
+    let step = rows.is_none().then(|| auto_step(bars, &periods, kind));
+
+    let grid = match step {
+        Some(step) => Grid::Step(step),
+        None => Grid::Rows(rows.unwrap_or(MIN_ROWS).clamp(MIN_ROWS, MAX_ROWS)),
+    };
+
+    for (start, end) in periods {
+        let slice = &bars[start..end];
+        if let Some(profile) =
+            one(slice, start, reset.bucket(bars[start].ts, session_origin), grid, value_area)
+        {
+            out.push(profile);
+        }
+    }
+    out
+}
+
+/// How a period is divided up.
+///
+/// A fixed count stretches to whatever the period happened to cover, so two
+/// sessions drawn side by side have rows of different heights and cannot be
+/// read against each other. A fixed step does the opposite: every row on the
+/// chart is the same slice of price, and a session that moved half as far is
+/// drawn half as tall, which is the comparison the profile is read for.
+#[derive(Clone, Copy)]
+enum Grid {
+    Rows(usize),
+    Step(f64),
+}
+
+/// Where each reset period starts and ends, as indices into `bars`.
+fn periods(bars: &[Bar], reset: Reset, session_origin: i64) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
     let mut start = 0usize;
     let mut bucket = reset.bucket(bars[0].ts, session_origin);
-
     for i in 1..=bars.len() {
         let next = bars.get(i).map(|b| reset.bucket(b.ts, session_origin));
         if next == Some(bucket) {
             continue;
         }
-        if let Some(profile) = one(&bars[start..i], start, bucket, rows, value_area) {
-            out.push(profile);
-        }
+        out.push((start, i));
         if let Some(next) = next {
             bucket = next;
             start = i;
@@ -82,11 +139,64 @@ pub fn compute(
     out
 }
 
+fn span(bars: &[Bar]) -> f64 {
+    let (mut low, mut high) = (f64::MAX, f64::MIN);
+    for bar in bars {
+        low = low.min(bar.low);
+        high = high.max(bar.high);
+    }
+    if low.is_finite() && high.is_finite() {
+        high - low
+    } else {
+        0.0
+    }
+}
+
+/// The height of one row, in price, when the count is left automatic.
+///
+/// A row boundary at 182.3617 is a boundary nobody can read off an axis, so
+/// the height is snapped to a round multiple of the instrument's own quote
+/// increment: five cents on a share, a tenth of a pip on a currency major,
+/// twenty-five dollars on bitcoin. The multiple is the smallest one that keeps
+/// the typical period near [`TARGET_ROWS`], so a quiet instrument gets fine
+/// rows and a volatile one coarse ones without anybody choosing a number.
+///
+/// This is what the user means by rows that suit the price: forty-odd rows
+/// across an Apple session is nine cents a row, which hides exactly the shelf
+/// a profile is read for.
+fn auto_step(bars: &[Bar], periods: &[(usize, usize)], kind: Option<InstrumentKind>) -> f64 {
+    let price = bars[bars.len() / 2].close.abs().max(f64::MIN_POSITIVE);
+    let tick = 10f64.powi(-(price_decimals(0.0, price, kind) as i32));
+
+    // The median period, not the mean: one opening gap or one holiday session
+    // should not set the scale for every other day on the chart.
+    let mut spans: Vec<f64> =
+        periods.iter().map(|&(a, b)| span(&bars[a..b])).filter(|s| *s > 0.0).collect();
+    if spans.is_empty() {
+        return tick;
+    }
+    spans.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let typical = spans[spans.len() / 2];
+
+    // 1, 2 and 5 ticks, then the same at every power of ten — the increments
+    // an exchange and a trader both think in.
+    let mut multiple = 1.0f64;
+    for decade in 0..12 {
+        for base in [1.0, 2.0, 5.0] {
+            multiple = base * 10f64.powi(decade);
+            if typical / (multiple * tick) <= TARGET_ROWS {
+                return multiple * tick;
+            }
+        }
+    }
+    multiple * tick
+}
+
 fn one(
     bars: &[Bar],
     offset: usize,
     start_ts: i64,
-    rows: usize,
+    grid: Grid,
     value_area: f64,
 ) -> Option<Profile> {
     let (mut low, mut high) = (f64::MAX, f64::MIN);
@@ -97,12 +207,26 @@ fn one(
     if !low.is_finite() || !high.is_finite() {
         return None;
     }
-    // A period that never moved still has a profile; give it a row to live in.
-    if (high - low).abs() < f64::EPSILON {
-        high = low + 1.0;
-    }
 
-    let step = (high - low) / rows as f64;
+    let (low, step, rows) = match grid {
+        Grid::Rows(rows) => {
+            // A period that never moved still has a profile; give it somewhere
+            // to live rather than dividing by a zero range.
+            if (high - low).abs() < f64::EPSILON {
+                high = low + 1.0;
+            }
+            (low, (high - low) / rows as f64, rows)
+        }
+        // Boundaries on multiples of the step, not on wherever the period's
+        // low happened to fall. A row that runs from 182.35 to 182.40 is one
+        // you can find on the axis; the same row starting at 182.3617 is not.
+        Grid::Step(step) => {
+            let base = (low / step).floor() * step;
+            let rows = ((high - base) / step).ceil().max(1.0);
+            let rows = if rows.is_finite() { rows as usize } else { MIN_ROWS };
+            (base, step, rows.clamp(MIN_ROWS, MAX_ROWS))
+        }
+    };
     let mut volumes = vec![0.0f64; rows];
 
     for bar in bars {
@@ -207,7 +331,7 @@ mod tests {
             bar(DAY, 20.0, 21.0, 100.0),
             bar(DAY + 3600, 20.0, 21.0, 100.0),
         ];
-        let profiles = compute(&bars, Reset::Session, 0, 10, 0.7);
+        let profiles = compute(&bars, Reset::Session, 0, Some(10), 0.7, None);
         assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].first_bar, 0);
         assert_eq!(profiles[0].last_bar, 1);
@@ -220,7 +344,7 @@ mod tests {
         // Lots of trade at 10, a little at 20.
         let mut bars = vec![bar(0, 10.0, 10.1, 1000.0); 1];
         bars.push(bar(60, 20.0, 20.1, 1.0));
-        let profile = &compute(&bars, Reset::Session, 0, 20, 0.7)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(20), 0.7, None)[0];
         assert!(profile.poc_price() < 11.0, "poc at {}", profile.poc_price());
     }
 
@@ -229,7 +353,7 @@ mod tests {
         // One bar spanning the whole range: every row gets a share, and they
         // sum back to the bar's volume.
         let bars = vec![bar(0, 0.0, 10.0, 100.0)];
-        let profile = &compute(&bars, Reset::Session, 0, 10, 0.7)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(10), 0.7, None)[0];
         let total: f64 = profile.rows.iter().map(|r| r.volume).sum();
         assert!((total - 100.0).abs() < 1e-6, "{total}");
         assert!(profile.rows.iter().all(|r| r.volume > 0.0), "every row touched");
@@ -244,7 +368,7 @@ mod tests {
             bar(120, 10.0, 10.1, 100.0),
             bar(180, 11.0, 11.1, 10.0),
         ];
-        let profile = &compute(&bars, Reset::Session, 0, 24, 0.70)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(24), 0.70, None)[0];
         let (lo, hi) = profile.value_area;
         let covered: f64 = profile.rows[lo..=hi].iter().map(|r| r.volume).sum();
         assert!(covered >= profile.total_volume * 0.70 - 1e-6, "{covered}");
@@ -254,14 +378,14 @@ mod tests {
     #[test]
     fn a_full_value_area_is_the_whole_profile() {
         let bars = vec![bar(0, 9.0, 11.0, 50.0), bar(60, 9.5, 10.5, 50.0)];
-        let profile = &compute(&bars, Reset::Session, 0, 12, 1.0)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(12), 1.0, None)[0];
         assert_eq!(profile.value_area, (0, profile.rows.len() - 1));
     }
 
     #[test]
     fn value_area_bounds_bracket_the_poc_price() {
         let bars = vec![bar(0, 9.0, 11.0, 50.0), bar(60, 9.5, 10.5, 80.0)];
-        let profile = &compute(&bars, Reset::Session, 0, 20, 0.7)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(20), 0.7, None)[0];
         let (low, high) = profile.value_area_bounds();
         let poc = profile.poc_price();
         assert!(low <= poc && poc <= high, "{low} <= {poc} <= {high}");
@@ -270,7 +394,7 @@ mod tests {
     #[test]
     fn a_motionless_period_still_produces_a_profile() {
         let bars = vec![bar(0, 10.0, 10.0, 5.0), bar(60, 10.0, 10.0, 5.0)];
-        let profiles = compute(&bars, Reset::Session, 0, 10, 0.7);
+        let profiles = compute(&bars, Reset::Session, 0, Some(10), 0.7, None);
         assert_eq!(profiles.len(), 1);
         assert!(profiles[0].max_volume > 0.0);
         assert!(profiles[0].poc_price().is_finite());
@@ -279,19 +403,102 @@ mod tests {
     #[test]
     fn a_volumeless_instrument_still_profiles() {
         let bars = vec![bar(0, 9.0, 10.0, 0.0), bar(60, 9.5, 10.5, 0.0)];
-        let profile = &compute(&bars, Reset::Session, 0, 10, 0.7)[0];
+        let profile = &compute(&bars, Reset::Session, 0, Some(10), 0.7, None)[0];
         assert!(profile.total_volume > 0.0, "bars count even without volume");
     }
 
     #[test]
     fn empty_input_produces_nothing() {
-        assert!(compute(&[], Reset::Session, 0, 10, 0.7).is_empty());
+        assert!(compute(&[], Reset::Session, 0, Some(10), 0.7, None).is_empty());
+    }
+
+    /// A session of one-minute bars wandering over `span` around `price`.
+    fn session(day: i64, price: f64, span: f64) -> Vec<Bar> {
+        (0..390)
+            .map(|i| {
+                let t = i as f64 / 389.0;
+                let low = price + span * (t * std::f64::consts::TAU).sin() * 0.5;
+                Bar {
+                    ts: day * DAY + i * 60,
+                    open: low,
+                    high: low + span * 0.02,
+                    low,
+                    close: low,
+                    volume: 1000.0,
+                }
+            })
+            .collect()
+    }
+
+    fn row_height(p: &Profile) -> f64 {
+        p.rows[0].high - p.rows[0].low
+    }
+
+    #[test]
+    fn automatic_rows_follow_the_price_increment_not_a_fixed_count() {
+        // Apple: a session that travels about eight dollars around $333. Rows
+        // of nine cents — which is what forty-eight of them gives — hide the
+        // shelves the profile exists to show.
+        let bars = session(0, 333.0, 8.0);
+        let auto = &compute(&bars, Reset::Session, 0, None, 0.7, Some(InstrumentKind::Equity))[0];
+        let height = row_height(auto);
+        assert!(
+            (0.009..0.051).contains(&height),
+            "a share should get rows of a few cents, got {height}"
+        );
+        // And a round number of cents, not 0.0417: the boundaries have to be
+        // prices you can find on the axis.
+        let cents = height * 100.0;
+        assert!((cents - cents.round()).abs() < 1e-6, "{height} is not a round number of cents");
+        assert!(auto.rows.len() > 100, "and enough of them to show a shelf: {}", auto.rows.len());
+    }
+
+    #[test]
+    fn a_currency_major_gets_rows_a_pip_can_fit_in() {
+        // EURUSD moves eighty pips in a session and is quoted to five places.
+        // Cent-sized rows would put the whole day in one block.
+        let bars = session(0, 1.1250, 0.0080);
+        let auto = &compute(&bars, Reset::Session, 0, None, 0.7, Some(InstrumentKind::Fx))[0];
+        let height = row_height(auto);
+        assert!(height < 0.00021, "a pair wants sub-pip rows, got {height}");
+        assert!(height >= 0.00001, "and not finer than it is quoted, got {height}");
+    }
+
+    #[test]
+    fn automatic_rows_are_the_same_height_across_periods() {
+        // A busy day and a quiet one. The quiet day should be a shorter
+        // profile, not the same profile stretched: comparing two sessions is
+        // most of what the thing is for.
+        let mut bars = session(0, 333.0, 8.0);
+        bars.extend(session(1, 333.0, 2.0));
+        let profiles = compute(&bars, Reset::Session, 0, None, 0.7, Some(InstrumentKind::Equity));
+        assert_eq!(profiles.len(), 2);
+        let (busy, quiet) = (&profiles[0], &profiles[1]);
+        assert!(
+            (row_height(busy) - row_height(quiet)).abs() < 1e-9,
+            "{} vs {}",
+            row_height(busy),
+            row_height(quiet)
+        );
+        assert!(
+            quiet.rows.len() < busy.rows.len(),
+            "the quiet session should be shorter: {} vs {}",
+            quiet.rows.len(),
+            busy.rows.len()
+        );
+    }
+
+    #[test]
+    fn a_chosen_row_count_is_still_obeyed() {
+        let bars = session(0, 333.0, 8.0);
+        let fixed = &compute(&bars, Reset::Session, 0, Some(182), 0.7, Some(InstrumentKind::Equity))[0];
+        assert_eq!(fixed.rows.len(), 182);
     }
 
     #[test]
     fn row_counts_are_clamped_to_something_drawable() {
         let bars = vec![bar(0, 9.0, 11.0, 50.0)];
-        assert_eq!(compute(&bars, Reset::Session, 0, 0, 0.7)[0].rows.len(), 4);
-        assert_eq!(compute(&bars, Reset::Session, 0, 10_000, 0.7)[0].rows.len(), 400);
+        assert_eq!(compute(&bars, Reset::Session, 0, Some(0), 0.7, None)[0].rows.len(), 4);
+        assert_eq!(compute(&bars, Reset::Session, 0, Some(10_000), 0.7, None)[0].rows.len(), 400);
     }
 }

@@ -319,6 +319,20 @@ impl ChartView {
         self.state.borrow().timeframe
     }
 
+    /// How many rows the volume profile with this id is actually drawing.
+    ///
+    /// The settings panel shows this when the count is automatic, so the
+    /// number on screen is the number being drawn rather than a placeholder.
+    pub fn profile_rows(&self, id: u32) -> Option<usize> {
+        let state = self.state.borrow();
+        state.indicators.iter().find(|drawn| drawn.indicator.id == id).and_then(|drawn| {
+            match &drawn.output {
+                Output::Profiles(profiles) => profiles.first().map(|p| p.rows.len()),
+                _ => None,
+            }
+        })
+    }
+
     pub fn bar_count(&self) -> usize {
         self.state.borrow().bars.len()
     }

@@ -1251,6 +1251,7 @@ impl Window {
                     bars,
                     instrument.session_origin,
                     timeframe,
+                    Some(instrument.kind),
                 ),
                 indicator: indicator.clone(),
             })
@@ -1391,6 +1392,11 @@ impl Window {
     pub fn set_show_grid(self: &Rc<Self>, show: bool) {
         self.store.set_setting_bool(SETTING_SHOW_GRID, show);
         self.chart.set_show_grid(show);
+    }
+
+    /// How many rows the profile with this id is drawing right now.
+    pub fn profile_rows(&self, id: u32) -> Option<usize> {
+        self.chart.profile_rows(id)
     }
 
     pub fn bar_style(&self) -> BarStyle {

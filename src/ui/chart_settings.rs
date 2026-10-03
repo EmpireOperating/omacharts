@@ -557,22 +557,9 @@ fn parameters_group(
         }
         Params::VolumeProfile { reset, rows, value_area } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
-            group.add(&spin_row(
-                window,
-                dialog,
-                list,
-                id,
-                "Rows",
-                *rows as f64,
-                4.0,
-                400.0,
-                1.0,
-                move |indicator, value| {
-                    if let Params::VolumeProfile { rows, .. } = &mut indicator.params {
-                        *rows = value as usize;
-                    }
-                },
-            ));
+            for row in rows_rows(window, dialog, list, id, *rows) {
+                group.add(&row);
+            }
             group.add(&spin_row(
                 window,
                 dialog,
@@ -772,6 +759,78 @@ fn spin_row(
         rebuild_indicators(&window, &dialog, &list);
     });
     row
+}
+
+/// How a volume profile is divided up: automatically, or by a number.
+///
+/// Two rows rather than one control, because they answer different questions.
+/// The switch decides whether the instrument's own price increment sets the
+/// row height — a nickel on a share, half a pip on a currency major — and the
+/// spin is for the rare chart where you want a specific count instead. While
+/// the switch is on the spin still shows the count being drawn, so automatic
+/// is something you can see rather than take on faith.
+fn rows_rows(
+    window: &Rc<Window>,
+    dialog: &adw::PreferencesDialog,
+    list: &IndicatorList,
+    id: u32,
+    rows: Option<usize>,
+) -> Vec<adw::PreferencesRow> {
+    let drawn = window.profile_rows(id);
+
+    let spin = adw::SpinRow::with_range(4.0, 400.0, 1.0);
+    spin.set_title("Rows");
+    spin.set_value(rows.or(drawn).unwrap_or(48) as f64);
+    spin.set_sensitive(rows.is_some());
+
+    let automatic = adw::ActionRow::new();
+    automatic.set_title("Automatic");
+    automatic.set_subtitle("Rows as tall as the instrument's own price steps");
+    let switch = gtk::Switch::new();
+    switch.set_active(rows.is_none());
+    switch.set_valign(gtk::Align::Center);
+    automatic.add_suffix(&switch);
+    automatic.set_activatable_widget(Some(&switch));
+
+    let window_for_switch = window.clone();
+    let dialog_for_switch = dialog.clone();
+    let list_for_switch = list.clone();
+    let spin_weak = spin.downgrade();
+    switch.connect_active_notify(move |switch| {
+        let on = switch.is_active();
+        // Turning it off hands over the count that was on screen a moment ago,
+        // so taking control does not also change the chart.
+        let taken = spin_weak.upgrade().map(|spin| spin.value() as usize).unwrap_or(48);
+        update(&window_for_switch, id, move |indicator| {
+            if let Params::VolumeProfile { rows, .. } = &mut indicator.params {
+                *rows = if on { None } else { Some(taken) };
+            }
+        });
+        if let Some(spin) = spin_weak.upgrade() {
+            spin.set_sensitive(!on);
+            if on {
+                if let Some(drawn) = window_for_switch.profile_rows(id) {
+                    spin.set_value(drawn as f64);
+                }
+            }
+        }
+        rebuild_indicators(&window_for_switch, &dialog_for_switch, &list_for_switch);
+    });
+
+    let window_for_spin = window.clone();
+    let dialog_for_spin = dialog.clone();
+    let list_for_spin = list.clone();
+    spin.connect_value_notify(move |spin| {
+        let value = spin.value() as usize;
+        update(&window_for_spin, id, move |indicator| {
+            if let Params::VolumeProfile { rows, .. } = &mut indicator.params {
+                *rows = Some(value);
+            }
+        });
+        rebuild_indicators(&window_for_spin, &dialog_for_spin, &list_for_spin);
+    });
+
+    vec![automatic.upcast(), spin.upcast()]
 }
 
 /// Change one indicator in place and redraw.

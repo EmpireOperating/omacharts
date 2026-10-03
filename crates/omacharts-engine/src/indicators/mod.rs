@@ -146,7 +146,7 @@ impl Kind {
             Kind::Vwap => Params::Vwap { reset: Reset::Session, bands: vwap::default_bands() },
             Kind::VolumeProfile => Params::VolumeProfile {
                 reset: Reset::Session,
-                rows: 48,
+                rows: None,
                 value_area: 0.70,
             },
             Kind::Volume => Params::Volume { height: 0.18 },
@@ -167,7 +167,12 @@ pub enum Params {
     },
     VolumeProfile {
         reset: Reset,
-        rows: usize,
+        /// How many rows each period is divided into, or `None` to let the
+        /// instrument decide: a row height snapped to a round multiple of its
+        /// own quote increment. A stored number is honoured as it always was,
+        /// so a profile somebody tuned by hand stays tuned.
+        #[serde(default)]
+        rows: Option<usize>,
         /// Fraction of volume the value area covers.
         value_area: f64,
     },
@@ -271,6 +276,7 @@ pub fn compute(
     bars: &[Bar],
     session_origin: i64,
     timeframe: Timeframe,
+    kind: Option<crate::symbols::InstrumentKind>,
 ) -> Output {
     match (&indicator.kind, &indicator.params) {
         (Kind::Sma, Params::MovingAverage { period }) => Output::Line(sma(bars, *period)),
@@ -292,6 +298,7 @@ pub fn compute(
                 session_origin,
                 *rows,
                 *value_area,
+                kind,
             ))
         }
         // Params and kind are set together; a mismatch means a stored
@@ -447,7 +454,7 @@ mod tests {
         assert!(volume.visible);
 
         let series = bars(&[1.0, 2.0, 3.0]);
-        match compute(&volume, &series, 0, Timeframe::days(1)) {
+        match compute(&volume, &series, 0, Timeframe::days(1), None) {
             Output::Volume { values, height } => {
                 assert_eq!(values, vec![100.0, 100.0, 100.0]);
                 assert!((0.05..=0.6).contains(&height));
@@ -460,7 +467,7 @@ mod tests {
     fn an_absurd_pane_height_is_brought_back_into_range() {
         let mut volume = Indicator::new(1, Kind::Volume);
         volume.params = Params::Volume { height: 5.0 };
-        match compute(&volume, &bars(&[1.0, 2.0]), 0, Timeframe::days(1)) {
+        match compute(&volume, &bars(&[1.0, 2.0]), 0, Timeframe::days(1), None) {
             Output::Volume { height, .. } => assert_eq!(height, 0.6),
             other => panic!("{other:?}"),
         }
@@ -546,7 +553,7 @@ mod tests {
         let rounds = 20;
         for _ in 0..rounds {
             for indicator in &indicators {
-                let _ = compute(indicator, &series, 0, Timeframe::hours(1));
+                let _ = compute(indicator, &series, 0, Timeframe::hours(1), None);
             }
         }
         let per_repaint = start.elapsed() / rounds;
