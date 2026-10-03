@@ -89,10 +89,12 @@ pub enum Kind {
     Ema,
     Vwap,
     VolumeProfile,
+    Volume,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [Kind::Sma, Kind::Ema, Kind::Vwap, Kind::VolumeProfile];
+    pub const ALL: [Kind; 5] =
+        [Kind::Volume, Kind::Sma, Kind::Ema, Kind::Vwap, Kind::VolumeProfile];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -100,6 +102,7 @@ impl Kind {
             Kind::Ema => "Exponential Moving Average",
             Kind::Vwap => "VWAP",
             Kind::VolumeProfile => "Volume Profile",
+            Kind::Volume => "Volume",
         }
     }
 
@@ -110,6 +113,7 @@ impl Kind {
             Kind::Ema => "EMA",
             Kind::Vwap => "VWAP",
             Kind::VolumeProfile => "VP",
+            Kind::Volume => "Vol",
         }
     }
 
@@ -121,6 +125,7 @@ impl Kind {
             Kind::Ema => &["ema", "ma", "moving average", "exponential"],
             Kind::Vwap => &["vwap", "volume weighted", "average price", "bands"],
             Kind::VolumeProfile => &["volume profile", "vp", "poc", "value area", "tpo"],
+            Kind::Volume => &["volume", "vol", "turnover"],
         }
     }
 
@@ -130,6 +135,7 @@ impl Kind {
             Kind::Ema => "ema",
             Kind::Vwap => "vwap",
             Kind::VolumeProfile => "volume_profile",
+            Kind::Volume => "volume",
         }
     }
 
@@ -143,6 +149,7 @@ impl Kind {
                 rows: 48,
                 value_area: 0.70,
             },
+            Kind::Volume => Params::Volume { height: 0.18 },
         }
     }
 }
@@ -163,6 +170,10 @@ pub enum Params {
         rows: usize,
         /// Fraction of volume the value area covers.
         value_area: f64,
+    },
+    Volume {
+        /// How much of the chart's height the pane takes.
+        height: f64,
     },
 }
 
@@ -219,6 +230,7 @@ impl Indicator {
             Params::MovingAverage { period } => format!("{} {period}", self.kind.short_name()),
             Params::Vwap { reset, .. } => format!("VWAP · {}", effective(*reset).label()),
             Params::VolumeProfile { reset, .. } => format!("VP · {}", effective(*reset).label()),
+            Params::Volume { .. } => "Volume".to_string(),
         }
     }
 
@@ -244,6 +256,8 @@ pub enum Output {
     Bands(Bands),
     /// One profile per reset period.
     Profiles(Vec<Profile>),
+    /// Volume per bar, with the share of the chart its pane takes.
+    Volume { values: Vec<f64>, height: f64 },
 }
 
 /// Compute an indicator over `bars`.
@@ -267,6 +281,10 @@ pub fn compute(
             session_origin,
             bands,
         )),
+        (Kind::Volume, Params::Volume { height }) => Output::Volume {
+            values: bars.iter().map(|bar| bar.volume).collect(),
+            height: height.clamp(0.05, 0.6),
+        },
         (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area }) => {
             Output::Profiles(profile::compute(
                 bars,
@@ -419,6 +437,40 @@ mod tests {
         let fast = ema(&series, 10).last().unwrap().unwrap();
         let slow = sma(&series, 10).last().unwrap().unwrap();
         assert!(fast > slow, "ema {fast} should lead sma {slow}");
+    }
+
+    #[test]
+    fn volume_is_an_indicator_like_any_other() {
+        let volume = Indicator::new(1, Kind::Volume);
+        assert_eq!(volume.label(), "Volume");
+        assert_eq!(volume.kind.short_name(), "Vol");
+        assert!(volume.visible);
+
+        let series = bars(&[1.0, 2.0, 3.0]);
+        match compute(&volume, &series, 0, Timeframe::days(1)) {
+            Output::Volume { values, height } => {
+                assert_eq!(values, vec![100.0, 100.0, 100.0]);
+                assert!((0.05..=0.6).contains(&height));
+            }
+            other => panic!("expected a volume pane, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_absurd_pane_height_is_brought_back_into_range() {
+        let mut volume = Indicator::new(1, Kind::Volume);
+        volume.params = Params::Volume { height: 5.0 };
+        match compute(&volume, &bars(&[1.0, 2.0]), 0, Timeframe::days(1)) {
+            Output::Volume { height, .. } => assert_eq!(height, 0.6),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_picker_offers_volume_first() {
+        // It is the one almost every chart wants, so it leads the list.
+        assert_eq!(Kind::ALL[0], Kind::Volume);
+        assert_eq!(search("vol")[0], Kind::Volume);
     }
 
     #[test]

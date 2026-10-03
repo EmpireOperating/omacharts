@@ -25,7 +25,6 @@ use gtk::glib;
 
 const PRICE_AXIS_W: f64 = 64.0;
 const TIME_AXIS_H: f64 = 24.0;
-const VOLUME_FRACTION: f64 = 0.18;
 const PAD: f64 = 10.0;
 
 /// Fewest bars we will zoom into, and the most we will draw at once.
@@ -659,8 +658,14 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
     let plot_y = PAD;
     let total_h = (height - TIME_AXIS_H - PAD).max(1.0);
-    let volume_h = (total_h * VOLUME_FRACTION).min(120.0);
-    let price_h = (total_h - volume_h - 6.0).max(1.0);
+    // Volume is an indicator now, so the pane exists only while one is on the
+    // chart, and it is that indicator that says how tall it is.
+    let volume_share = state.indicators.iter().find_map(|drawn| match &drawn.output {
+        Output::Volume { height, .. } if drawn.indicator.visible => Some(*height),
+        _ => None,
+    });
+    let volume_h = volume_share.map(|share| (total_h * share).min(220.0)).unwrap_or(0.0);
+    let price_h = (total_h - volume_h - if volume_h > 0.0 { 6.0 } else { 0.0 }).max(1.0);
 
     // Price scale over what is visible, padded so candles never touch the
     // edges.
@@ -702,7 +707,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     draw_candles(cr, state, bars, plot_x, bar_w, &to_y);
     draw_indicator_lines(cr, state, first, visible, plot_x, bar_w, &to_y);
 
-    if max_volume > 0.0 {
+    if volume_h > 0.0 && max_volume > 0.0 {
         draw_volume(cr, state, bars, plot_x, bar_w, plot_y + price_h + 6.0, volume_h, max_volume);
     }
 
@@ -1172,7 +1177,8 @@ fn draw_indicator_fills(
             Output::Profiles(profiles) => {
                 draw_profiles(cr, state, drawn, profiles, first, visible, plot_x, bar_w, to_y);
             }
-            Output::Line(_) => {}
+            // Drawn as its own pane, after the price plot.
+            Output::Volume { .. } | Output::Line(_) => {}
         }
     }
 }
@@ -1228,7 +1234,7 @@ fn draw_indicator_lines(
                     cr.restore().ok();
                 }
             }
-            Output::Profiles(_) => {}
+            Output::Profiles(_) | Output::Volume { .. } => {}
         }
     }
 }

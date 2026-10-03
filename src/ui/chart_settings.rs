@@ -551,6 +551,22 @@ fn parameters_group(
         Params::Vwap { reset, .. } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
         }
+        Params::Volume { height } => {
+            group.add(&spin_row(
+                window,
+                dialog,
+                list,
+                id,
+                "Pane height %",
+                height * 100.0,
+                5.0,
+                60.0,
+                1.0,
+                move |indicator, value| {
+                    indicator.params = Params::Volume { height: value / 100.0 };
+                },
+            ));
+        }
         Params::VolumeProfile { reset, rows, value_area } => {
             group.add(&reset_row(window, dialog, list, id, *reset));
             group.add(&spin_row(
@@ -731,7 +747,7 @@ fn reset_row(
         update(&window, id, |indicator| match &mut indicator.params {
             Params::Vwap { reset, .. } => *reset = chosen,
             Params::VolumeProfile { reset, .. } => *reset = chosen,
-            Params::MovingAverage { .. } => {}
+            Params::MovingAverage { .. } | Params::Volume { .. } => {}
         });
         rebuild_indicators(&window, &dialog, &list);
     });

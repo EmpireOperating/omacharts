@@ -129,6 +129,7 @@ impl Store {
             [],
         )?;
         self.invalidate_stale_cache()?;
+        self.adopt_volume_indicator();
         Ok(())
     }
 
@@ -158,6 +159,30 @@ impl Store {
             params![CACHE_VERSION.to_string()],
         )?;
         Ok(())
+    }
+
+    /// Give charts configured before volume became an indicator one.
+    ///
+    /// Volume used to be drawn unconditionally. Turning it into something you
+    /// can remove would otherwise remove it from every chart that had ever
+    /// been touched. Done once and remembered, so taking it off afterwards
+    /// sticks.
+    fn adopt_volume_indicator(&self) {
+        const FLAG: &str = "volume_indicator_adopted";
+        if self.setting(FLAG).is_some() {
+            return;
+        }
+        self.set_setting(FLAG, "1");
+
+        // Never configured at all: the default already includes volume.
+        let Some(json) = self.setting("indicators") else { return };
+        let Ok(mut indicators) = serde_json::from_str::<Vec<Indicator>>(&json) else { return };
+        if indicators.iter().any(|i| i.kind == omacharts_engine::IndicatorKind::Volume) {
+            return;
+        }
+        let id = indicators.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+        indicators.insert(0, Indicator::new(id, omacharts_engine::IndicatorKind::Volume));
+        self.set_indicators(&indicators);
     }
 
     // -- settings ----------------------------------------------------------
@@ -565,9 +590,14 @@ impl Store {
     /// down a watchlist to compare setups only works if the chart keeps its
     /// shape.
     pub fn indicators(&self) -> Vec<Indicator> {
-        self.setting("indicators")
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
+        match self.setting("indicators") {
+            // Volume used to be drawn unconditionally. Now that it is an
+            // indicator, a chart that has never been configured still gets
+            // one — otherwise making it removable would remove it from
+            // everybody at once.
+            None => vec![Indicator::new(1, omacharts_engine::IndicatorKind::Volume)],
+            Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+        }
     }
 
     pub fn set_indicators(&self, indicators: &[Indicator]) {
@@ -999,10 +1029,55 @@ mod tests {
     }
 
     #[test]
+    fn a_chart_that_was_never_configured_still_has_volume() {
+        use omacharts_engine::IndicatorKind;
+        let store = Store::memory().unwrap();
+        let indicators = store.indicators();
+        assert_eq!(indicators.len(), 1);
+        assert_eq!(indicators[0].kind, IndicatorKind::Volume);
+
+        // But removing it is allowed to stick: an empty list is a choice.
+        store.set_indicators(&[]);
+        assert!(store.indicators().is_empty());
+    }
+
+    #[test]
+    fn a_chart_configured_before_volume_was_an_indicator_keeps_its_volume() {
+        use omacharts_engine::IndicatorKind;
+        let file =
+            std::env::temp_dir().join(format!("omacharts-volume-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+
+        {
+            // A list from before volume existed as an indicator.
+            let store = Store::open_at(&file).unwrap();
+            store.set_indicators(&[Indicator::new(7, IndicatorKind::Sma)]);
+            store
+                .conn
+                .execute("DELETE FROM settings WHERE key = 'volume_indicator_adopted'", [])
+                .unwrap();
+        }
+
+        let store = Store::open_at(&file).unwrap();
+        let kinds: Vec<IndicatorKind> = store.indicators().iter().map(|i| i.kind).collect();
+        assert_eq!(kinds, vec![IndicatorKind::Volume, IndicatorKind::Sma]);
+        // And the ids do not collide.
+        let ids: Vec<u32> = store.indicators().iter().map(|i| i.id).collect();
+        assert_ne!(ids[0], ids[1]);
+
+        // Taking it off afterwards sticks.
+        store.set_indicators(&[Indicator::new(7, IndicatorKind::Sma)]);
+        drop(store);
+        let store = Store::open_at(&file).unwrap();
+        assert_eq!(store.indicators().len(), 1);
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
     fn indicators_round_trip() {
         use omacharts_engine::IndicatorKind;
         let store = Store::memory().unwrap();
-        assert!(store.indicators().is_empty());
 
         let set = vec![Indicator::new(1, IndicatorKind::Sma), Indicator::new(2, IndicatorKind::Vwap)];
         store.set_indicators(&set);
