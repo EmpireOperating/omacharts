@@ -1075,10 +1075,24 @@ impl Window {
     }
 
     /// Show or hide the rail.
+    ///
+    /// Opening it puts the keyboard on the selected symbol, because the reason
+    /// to open a watchlist is almost always to move through it — having to
+    /// click a row first to make the arrows work is a step nobody wants.
     pub fn toggle_watchlist(self: &Rc<Self>) {
         let showing = !self.split.shows_sidebar();
         self.split.set_show_sidebar(showing);
         self.store.set_setting_bool(SHOW_WATCHLIST, showing);
+
+        if showing {
+            if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
+                // The sidebar is not realised until the frame after it is
+                // revealed, so focus has to wait for it.
+                glib::idle_add_local_once(move || watchlist.grab_focus());
+            }
+        } else {
+            self.chart.area.grab_focus();
+        }
     }
 
     /// Move the keyboard between the chart and the rail, the way F6 does
