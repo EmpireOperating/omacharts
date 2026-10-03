@@ -15,7 +15,8 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::theme::{
-    BarScheme, BarSlot, Source, Theme, UiSlot, SWATCH_NAMES, THEME_BARS_ID,
+    BarScheme, BarSlot, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
+    THEME_BARS_ID,
 };
 
 use crate::store::Store;
@@ -211,7 +212,11 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
     let row = adw::ActionRow::new();
     if source.is_editable() {
         row.set_title("This is yours to edit");
-        row.set_subtitle("Colours below are saved as you change them.");
+        row.set_subtitle(if is_theme {
+            "Colours below are saved as you change them. Deleting goes back to System."
+        } else {
+            "Candle colours below are saved as you change them."
+        });
 
         let delete = gtk::Button::with_label("Delete");
         delete.add_css_class("destructive-action");
@@ -223,10 +228,15 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
                 let id = theming.theme().id;
                 ctx.store.delete_theme(&id);
                 theming.reload_custom(&ctx.store);
-                let fallback = theming.themes().first().map(|t| t.id.clone());
-                if let Some(id) = fallback {
-                    theming.select_theme(&id, &ctx.store);
-                }
+                // Back to System, which is where every copy came from. Handing
+                // over to whichever preset happens to sort first would leave
+                // the app on a theme nobody chose.
+                let back = if theming.omarchy_available() {
+                    OMARCHY_ID
+                } else {
+                    FALLBACK_THEME_ID
+                };
+                theming.select_theme(back, &ctx.store);
             } else {
                 let id = theming.bar_scheme().id;
                 ctx.store.delete_bar_scheme(&id);
@@ -240,7 +250,13 @@ fn duplicate_row(context: &Rc<Context>, source: Source, is_theme: bool) -> adw::
         row.add_suffix(&delete);
     } else {
         row.set_title("Make it yours");
-        row.set_subtitle("Edit the theme colours.");
+        // Said in terms of what this group is about. Both rows claiming to edit
+        // "the theme colours" is wrong for the one that edits candles.
+        row.set_subtitle(if is_theme {
+            "Copy the theme and edit its colours. The copy stays put when the desktop changes."
+        } else {
+            "Copy this scheme and edit its candle colours."
+        });
 
         let button = gtk::Button::with_label("Customize");
         button.set_valign(gtk::Align::Center);
