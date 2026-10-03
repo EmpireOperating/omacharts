@@ -140,9 +140,14 @@ fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 
     let row = adw::ComboRow::new();
     row.set_title("Theme");
-    if is_system {
-        row.set_subtitle(&format!("Following {following}"));
-    }
+    // Both states say what they are, not just the tracking one. A fixed theme
+    // looks exactly like a tracking one until the desktop changes and nothing
+    // happens — which is a confusing way to find out you picked a copy.
+    row.set_subtitle(&if is_system {
+        format!("Following {following}")
+    } else {
+        format!("{following} · fixed, the desktop will not change it")
+    });
     row.set_model(Some(&string_list(&names)));
     row.set_selected(selected as u32);
 
