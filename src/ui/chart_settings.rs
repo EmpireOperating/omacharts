@@ -142,13 +142,13 @@ fn session_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGrou
     row.set_title("Hours");
     row.set_subtitle("Ignored for FX, crypto and foreign listings, which have no cash session.");
     row.set_model(Some(&gtk::StringList::new(&names)));
-    row.set_selected(Session::ALL.iter().position(|s| *s == *session.borrow()).unwrap_or(0) as u32);
+    row.set_selected(Session::ALL.iter().position(|s| *s == session).unwrap_or(0) as u32);
 
     let window = window.clone();
     let store = store.clone();
     row.connect_selected_notify(move |row| {
         let Some(chosen) = Session::ALL.get(row.selected() as usize).copied() else { return };
-        *window.session().borrow_mut() = chosen;
+        window.set_session(chosen);
         store.set_setting(SETTING_SESSION, chosen.key());
         window.refresh();
     });

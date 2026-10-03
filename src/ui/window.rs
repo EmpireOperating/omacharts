@@ -8,7 +8,7 @@
 //! cache holds immediately, asks a worker for the gap, and repaints when the
 //! answer arrives.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -22,7 +22,8 @@ use omacharts_engine::{
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
-use crate::ui::chart::{ChartView, Drawn};
+use crate::ui::chart::Drawn;
+use crate::ui::pane::{ChartPane, Node};
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
@@ -175,13 +176,71 @@ const LAST_SYMBOL: &str = "last_symbol";
 const LAST_SUFFIX: &str = "last_suffix";
 const LAST_TIMEFRAME: &str = "last_timeframe";
 const SHOW_WATCHLIST: &str = "show_watchlist";
+/// How wide the rail was left, in pixels.
+const SETTING_SIDEBAR_WIDTH: &str = "sidebar_width";
+const DEFAULT_SIDEBAR_WIDTH: i32 = 280;
 pub const SETTING_BAR_STYLE: &str = "bar_style";
 pub const SETTING_SHOW_GRID: &str = "show_grid";
 const SETTING_TIMEFRAMES: &str = "timeframes";
+/// The whole arrangement of charts, as one stored value.
+const SETTING_WORKSPACE: &str = "workspace";
+
+/// One chart, as it is written down.
+///
+/// Stored together with the layout rather than as separate settings, because
+/// they only mean anything together: a tree of pane ids and a list of panes
+/// that disagree is a window that cannot be rebuilt.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredPane {
+    id: u32,
+    symbol: String,
+    #[serde(default)]
+    suffix: Option<String>,
+    timeframe: String,
+    indicators: Vec<Indicator>,
+    bar_style: String,
+    session: String,
+    show_grid: bool,
+    linked: bool,
+}
+
+/// Point a leaf at a different pane id, leaving the shape alone.
+fn rename_leaf(node: &Node, from: u32, to: u32) -> Node {
+    match node {
+        Node::Leaf(id) if *id == from => Node::Leaf(to),
+        Node::Leaf(id) => Node::Leaf(*id),
+        Node::Split { horizontal, first, second } => Node::Split {
+            horizontal: *horizontal,
+            first: Box::new(rename_leaf(first, from, to)),
+            second: Box::new(rename_leaf(second, from, to)),
+        },
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Workspace {
+    layout: Node,
+    focused: u32,
+    panes: Vec<StoredPane>,
+}
 
 pub struct Window {
     pub window: adw::ApplicationWindow,
-    chart: Rc<ChartView>,
+    /// Every chart on screen. One of them is focused, and that is the one the
+    /// keyboard, the menus and the symbol search act on.
+    panes: RefCell<Vec<Rc<ChartPane>>>,
+    /// How they are arranged. Splitting divides the focused pane; closing one
+    /// hands its space to its sibling.
+    layout: RefCell<Node>,
+    focused: Cell<u32>,
+    next_pane: Cell<u32>,
+    /// The chart menu's stateful actions, so they can be re-pointed at
+    /// whichever chart is focused.
+    linked_action: RefCell<Option<gio::SimpleAction>>,
+    bar_style_action: RefCell<Option<gio::SimpleAction>>,
+    session_action: RefCell<Option<gio::SimpleAction>>,
+    /// Where the tree of charts is mounted, rebuilt whenever it changes.
+    chart_host: gtk::Box,
     store: Rc<Store>,
     index: Rc<SearchIndex>,
     theming: Rc<RefCell<Theming>>,
@@ -189,7 +248,6 @@ pub struct Window {
     watchlist: RefCell<Option<Rc<Watchlist>>>,
     provider: Rc<Yahoo>,
     loader: Loader,
-    current: Rc<RefCell<Option<Instrument>>>,
     /// Folded series, keyed by cache key and the resolution shown.
     ///
     /// The bars are the chart — there is nothing else to preload — so once a
@@ -197,19 +255,14 @@ pub struct Window {
     /// removes even the read, which is what makes arrowing back and forth over
     /// the same few symbols feel like nothing is happening at all.
     series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
-    timeframe: Rc<RefCell<Timeframe>>,
     symbol_button: gtk::Button,
-    /// The chart's legend: what this is, and at what resolution.
-    legend: gtk::Label,
-    /// One row per indicator, under the legend.
-    indicator_legend: gtk::Box,
-    /// Regular or extended hours.
-    session: Rc<RefCell<Session>>,
-    /// One set of indicators, shared by every symbol.
-    indicators: Rc<RefCell<Vec<Indicator>>>,
-    bar_style: Rc<RefCell<BarStyle>>,
     /// The split, so the keyboard can show and hide the rail.
-    split: adw::OverlaySplitView,
+    ///
+    /// A GtkPaned rather than an AdwOverlaySplitView: the rail is a table of
+    /// numbers whose useful width depends on how many columns you have shown,
+    /// and a split view has no handle to drag. Hiding it is hiding the child,
+    /// which takes the handle with it.
+    split: gtk::Paned,
     /// The resolution strip and what is on it.
     timeframe_strip: gtk::Box,
     timeframe_buttons: RefCell<Vec<(Timeframe, gtk::ToggleButton)>>,
@@ -224,11 +277,6 @@ impl Window {
         let theming = Rc::new(RefCell::new(Theming::load(&store)));
         theming.borrow_mut().apply();
 
-        let (theme, scheme) = {
-            let t = theming.borrow();
-            (t.theme(), t.bar_scheme())
-        };
-        let chart = ChartView::new(theme, scheme);
         let (sender, receiver) = async_channel::unbounded::<Response>();
         let loader = Loader::new(Yahoo::new(), sender.clone());
 
@@ -240,22 +288,21 @@ impl Window {
         symbol_button.add_css_class("flat");
         symbol_button.set_tooltip_text(Some("Find a symbol (Ctrl+K)"));
 
-        let readout = gtk::Label::new(None);
-        readout.add_css_class("readout-symbol");
-        readout.set_valign(gtk::Align::Center);
-        readout.set_can_target(false);
-
-        let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
-        gear.add_css_class("flat");
-        gear.add_css_class("legend-gear");
-        gear.set_tooltip_text(Some("Chart settings"));
-        gear.set_valign(gtk::Align::Center);
-
-        let split = adw::OverlaySplitView::new();
+        let split = gtk::Paned::new(gtk::Orientation::Horizontal);
+        let chart_host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chart_host.set_hexpand(true);
+        chart_host.set_vexpand(true);
 
         let this = Rc::new(Window {
             window: window.clone(),
-            chart: chart.clone(),
+            panes: RefCell::new(Vec::new()),
+            layout: RefCell::new(Node::leaf(1)),
+            focused: Cell::new(1),
+            next_pane: Cell::new(1),
+            linked_action: RefCell::new(None),
+            bar_style_action: RefCell::new(None),
+            session_action: RefCell::new(None),
+            chart_host: chart_host.clone(),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -263,35 +310,9 @@ impl Window {
             watchlist: RefCell::new(None),
             provider: Rc::new(Yahoo::new()),
             loader,
-            current: Rc::new(RefCell::new(None)),
             series: Rc::new(RefCell::new(HashMap::new())),
-            timeframe: Rc::new(RefCell::new(
-                store
-                    .setting(LAST_TIMEFRAME)
-                    .and_then(|k| Timeframe::parse(&k))
-                    .unwrap_or(Timeframe::days(1)),
-            )),
             symbol_button,
-            legend: readout.clone(),
-            indicator_legend: {
-                let rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
-                rows.set_halign(gtk::Align::Start);
-                rows
-            },
-            indicators: Rc::new(RefCell::new(store.indicators())),
-            bar_style: Rc::new(RefCell::new(
-                store
-                    .setting(SETTING_BAR_STYLE)
-                    .and_then(|k| BarStyle::from_key(&k))
-                    .unwrap_or_default(),
-            )),
             split: split.clone(),
-            session: Rc::new(RefCell::new(
-                store
-                    .setting(crate::ui::chart_settings::SETTING_SESSION)
-                    .and_then(|k| Session::from_key(&k))
-                    .unwrap_or_default(),
-            )),
             timeframe_strip: {
                 let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
                 strip.add_css_class("linked");
@@ -308,69 +329,417 @@ impl Window {
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
 
         let split = &this.split;
-        split.set_sidebar_position(gtk::PackType::End);
-        split.set_sidebar(Some(&watchlist.widget));
-        split.set_collapsed(false);
-        split.set_show_sidebar(store.setting_bool(SHOW_WATCHLIST, true));
+        split.set_end_child(Some(&watchlist.widget));
+        // The chart takes the room a wider window gives; the rail keeps the
+        // width it was left at, because its columns do not get more useful.
+        split.set_resize_start_child(true);
+        split.set_resize_end_child(false);
+        split.set_shrink_end_child(false);
+        watchlist.widget.set_visible(store.setting_bool(SHOW_WATCHLIST, true));
 
-        let legend_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        legend_bar.append(&readout);
-        legend_bar.append(&gear);
+        split.set_start_child(Some(&chart_host));
 
-        // The legend stack: what you are looking at, then what is drawn on it.
-        let legend = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        legend.set_halign(gtk::Align::Start);
-        legend.set_valign(gtk::Align::Start);
-        legend.set_margin_start(12);
-        legend.set_margin_top(6);
-        legend.append(&legend_bar);
-        legend.append(&this.indicator_legend);
-
-        let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&chart.area));
-        overlay.add_overlay(&legend);
-        split.set_content(Some(&overlay));
-
-        let opener = this.clone();
-        gear.connect_clicked(move |_| opener.open_chart_settings());
-
-        let header = this.build_header(&split);
+        let header = this.build_header(&this.split);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(split));
+        this.restore_sidebar_width();
         window.set_content(Some(&toolbar));
 
+        // The first chart. Everything else is a split of this one.
+        let first = this.new_pane(
+            store
+                .setting(LAST_TIMEFRAME)
+                .and_then(|k| Timeframe::parse(&k))
+                .unwrap_or(Timeframe::days(1)),
+            store.indicators(),
+            store
+                .setting(SETTING_BAR_STYLE)
+                .and_then(|k| BarStyle::from_key(&k))
+                .unwrap_or_default(),
+            store
+                .setting(crate::ui::chart_settings::SETTING_SESSION)
+                .and_then(|k| Session::from_key(&k))
+                .unwrap_or_default(),
+            store.setting_bool(SETTING_SHOW_GRID, true),
+            true,
+        );
+        *this.layout.borrow_mut() = Node::leaf(first.id);
+        this.focused.set(first.id);
+        this.rebuild_layout();
+        // After the first pane: the chart menu's radio items are built from
+        // the focused chart, and until now there was not one.
         this.install_chart_actions();
-        this.chart.set_bar_style(*this.bar_style.borrow());
-        this.chart.set_show_grid(this.show_grid());
-        let menu_owner = this.clone();
-        this.chart.set_context_menu_handler(move |x, y| menu_owner.chart_menu(x, y));
+
+        this.wire_shortcuts();
+        this.wire_responses(receiver);
+        this.wire_theme_polling();
+
+        if !this.restore_workspace() {
+            this.rebuild_indicator_legend();
+            this.restore_last_symbol();
+        }
+        this
+    }
+
+    // -- panes -------------------------------------------------------------
+
+    /// Build a chart and wire it to this window. Not placed in the layout:
+    /// the caller decides where it goes.
+    #[allow(clippy::too_many_arguments)]
+    fn new_pane(
+        self: &Rc<Self>,
+        timeframe: Timeframe,
+        indicators: Vec<Indicator>,
+        bar_style: BarStyle,
+        session: Session,
+        show_grid: bool,
+        linked: bool,
+    ) -> Rc<ChartPane> {
+        let id = self.next_pane.get();
+        self.next_pane.set(id + 1);
+
+        let (theme, scheme) = {
+            let t = self.theming.borrow();
+            (t.theme(), t.bar_scheme())
+        };
+        let pane = ChartPane::new(
+            id, theme, scheme, timeframe, indicators, bar_style, session, show_grid, linked,
+        );
+        pane.view.set_bar_style(bar_style);
+        pane.view.set_show_grid(show_grid);
+
+        let opener = self.clone();
+        pane.gear.connect_clicked(move |_| {
+            opener.focus(id);
+            opener.open_chart_settings();
+        });
+
+        let linker = self.clone();
+        pane.link.connect_toggled(move |toggle| {
+            linker.set_pane_linked(id, toggle.is_active());
+        });
+
+        let menu_owner = self.clone();
+        pane.view.set_context_menu_handler(move |x, y| {
+            menu_owner.focus(id);
+            menu_owner.chart_menu(x, y);
+        });
 
         // Dragging a pane's edge changes the indicator, not just the drawing,
         // so the new height is stored the way any other setting of its would be.
-        let resizer = this.clone();
-        this.chart.set_pane_resize_handler(move |id, share| {
-            let mut indicators = resizer.indicators();
-            if let Some(indicator) = indicators.iter_mut().find(|i| i.id == id) {
+        let resizer = self.clone();
+        pane.view.set_pane_resize_handler(move |indicator_id, share| {
+            let Some(pane) = resizer.pane(id) else { return };
+            let mut indicators = pane.indicators.borrow().clone();
+            if let Some(indicator) = indicators.iter_mut().find(|i| i.id == indicator_id) {
                 match &mut indicator.params {
                     omacharts_engine::Params::Volume { height }
                     | omacharts_engine::Params::Rsi { height, .. }
                     | omacharts_engine::Params::Atr { height, .. } => *height = share,
                     _ => return,
                 }
-                resizer.set_indicators(indicators);
+                resizer.set_indicators_of(&pane, indicators);
             }
         });
-        this.wire_shortcuts();
-        this.wire_responses(receiver);
-        this.wire_theme_polling();
 
-        this.rebuild_indicator_legend();
-        this.restore_last_symbol();
-        this
+        // Clicking anywhere on a chart focuses it, which is what makes the
+        // next keystroke land where you are looking.
+        let focuser = self.clone();
+        let click = gtk::GestureClick::new();
+        click.set_button(0);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        click.connect_pressed(move |_, _, _, _| focuser.focus(id));
+        pane.root.add_controller(click);
+
+        self.panes.borrow_mut().push(pane.clone());
+        pane
     }
 
-    fn build_header(self: &Rc<Self>, split: &adw::OverlaySplitView) -> adw::HeaderBar {
+    /// The focused chart, or none while the window is still being built.
+    fn maybe_focused_pane(&self) -> Option<Rc<ChartPane>> {
+        let id = self.focused.get();
+        let panes = self.panes.borrow();
+        panes.iter().find(|p| p.id == id).or_else(|| panes.first()).cloned()
+    }
+
+    pub fn focused_pane(&self) -> Rc<ChartPane> {
+        let id = self.focused.get();
+        let panes = self.panes.borrow();
+        panes
+            .iter()
+            .find(|p| p.id == id)
+            .or_else(|| panes.first())
+            .cloned()
+            .expect("at least one chart")
+    }
+
+    fn pane(&self, id: u32) -> Option<Rc<ChartPane>> {
+        self.panes.borrow().iter().find(|p| p.id == id).cloned()
+    }
+
+    /// Make `id` the chart the keyboard and the menus act on.
+    pub fn focus(self: &Rc<Self>, id: u32) {
+        if self.focused.get() == id && self.panes.borrow().iter().any(|p| p.id == id) {
+            return;
+        }
+        self.focused.set(id);
+        for pane in self.panes.borrow().iter() {
+            pane.set_focused(pane.id == id);
+        }
+        // The header belongs to whichever chart is focused: the ticker, the
+        // resolution strip and the settings all describe that one.
+        self.sync_header();
+    }
+
+    /// The chart menu's radio items describe the focused chart, so they have
+    /// to be re-pointed when the focus moves.
+    fn sync_chart_actions(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        if let Some(action) = self.linked_action.borrow().as_ref() {
+            action.set_state(&pane.linked.get().to_variant());
+        }
+        if let Some(action) = self.bar_style_action.borrow().as_ref() {
+            action.set_state(&pane.bar_style.get().key().to_variant());
+        }
+        if let Some(action) = self.session_action.borrow().as_ref() {
+            action.set_state(&pane.session.get().key().to_variant());
+        }
+    }
+
+    /// Point the header and the rail at the focused chart.
+    fn sync_header(self: &Rc<Self>) {
+        let pane = self.focused_pane();
+        let label = pane
+            .instrument
+            .borrow()
+            .as_ref()
+            .map(|i| i.display_symbol())
+            .unwrap_or_default();
+        self.symbol_button.set_label(&label);
+        self.window.set_title(Some(&format!("{label} · omacharts")));
+        self.sync_timeframe_buttons(pane.timeframe.get());
+        self.sync_chart_actions(&pane);
+        if let (Some(watchlist), Some(instrument)) =
+            (self.watchlist.borrow().as_ref(), pane.instrument.borrow().as_ref())
+        {
+            watchlist.highlight(instrument);
+        }
+    }
+
+    /// Divide the focused chart in two, the new one showing the same thing.
+    ///
+    /// Copying the chart you split is what makes splitting useful: you get two
+    /// of what you were looking at and change one of them.
+    pub fn split_focused(self: &Rc<Self>, horizontal: bool) {
+        let from = self.focused_pane();
+        let added = self.new_pane(
+            from.timeframe.get(),
+            from.indicators.borrow().clone(),
+            from.bar_style.get(),
+            from.session.get(),
+            from.show_grid.get(),
+            from.linked.get(),
+        );
+        let next = self.layout.borrow().split(from.id, added.id, horizontal);
+        *self.layout.borrow_mut() = next;
+        self.rebuild_layout();
+        if let Some(instrument) = from.instrument.borrow().clone() {
+            self.show_in(&added, instrument);
+        }
+        self.focus(added.id);
+        self.save_workspace();
+    }
+
+    /// Close the focused chart. The last one stays: a window with no chart in
+    /// it is not a state worth being able to reach.
+    pub fn close_focused(self: &Rc<Self>) {
+        let id = self.focused.get();
+        let Some(next) = self.layout.borrow().remove(id) else { return };
+        let leaves = next.leaves();
+        *self.layout.borrow_mut() = next;
+        self.panes.borrow_mut().retain(|p| p.id != id);
+        self.rebuild_layout();
+        if let Some(first) = leaves.first() {
+            self.focus(*first);
+        }
+        self.save_workspace();
+    }
+
+    /// Walk the focus to the next or previous chart in layout order.
+    pub fn step_focus(self: &Rc<Self>, delta: i32) {
+        let leaves = self.layout.borrow().leaves();
+        if leaves.len() < 2 {
+            return;
+        }
+        let at = leaves.iter().position(|id| *id == self.focused.get()).unwrap_or(0) as i32;
+        let next = (at + delta).rem_euclid(leaves.len() as i32) as usize;
+        self.focus(leaves[next]);
+    }
+
+    /// Mount the tree. Rebuilt whole rather than patched: a handful of panes,
+    /// and a tree that is half old and half new is a bug nobody can see.
+    fn rebuild_layout(self: &Rc<Self>) {
+        while let Some(child) = self.chart_host.first_child() {
+            self.chart_host.remove(&child);
+        }
+        for pane in self.panes.borrow().iter() {
+            if let Some(parent) = pane.root.parent() {
+                if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
+                    if paned.start_child().as_ref() == Some(pane.root.upcast_ref()) {
+                        paned.set_start_child(None::<&gtk::Widget>);
+                    } else {
+                        paned.set_end_child(None::<&gtk::Widget>);
+                    }
+                }
+            }
+        }
+        let layout = self.layout.borrow().clone();
+        let widget = self.build_node(&layout);
+        self.chart_host.append(&widget);
+        let focused = self.focused.get();
+        for pane in self.panes.borrow().iter() {
+            pane.set_focused(pane.id == focused);
+        }
+    }
+
+    fn build_node(self: &Rc<Self>, node: &Node) -> gtk::Widget {
+        match node {
+            Node::Leaf(id) => match self.pane(*id) {
+                Some(pane) => pane.root.clone().upcast(),
+                None => gtk::Box::new(gtk::Orientation::Vertical, 0).upcast(),
+            },
+            Node::Split { horizontal, first, second } => {
+                let paned = gtk::Paned::new(if *horizontal {
+                    gtk::Orientation::Horizontal
+                } else {
+                    gtk::Orientation::Vertical
+                });
+                paned.add_css_class("chart-split");
+                paned.set_start_child(Some(&self.build_node(first)));
+                paned.set_end_child(Some(&self.build_node(second)));
+                // Both halves grow with the window, so a split stays the split
+                // you made rather than drifting as the window is resized.
+                paned.set_resize_start_child(true);
+                paned.set_resize_end_child(true);
+                paned.set_shrink_start_child(false);
+                paned.set_shrink_end_child(false);
+                paned.set_wide_handle(true);
+                paned.upcast()
+            }
+        }
+    }
+
+    pub fn set_pane_linked(self: &Rc<Self>, id: u32, linked: bool) {
+        let Some(pane) = self.pane(id) else { return };
+        pane.set_linked(linked);
+        // Joining the group adopts what the group is showing, which is what
+        // "linked" means — otherwise the toggle says linked and the chart is
+        // somewhere else.
+        if linked {
+            if let Some(instrument) = self.linked_instrument(id) {
+                self.show_in(&pane, instrument);
+            }
+        }
+        self.save_workspace();
+    }
+
+    /// Write the arrangement down, so a window comes back as it was left.
+    fn save_workspace(self: &Rc<Self>) {
+        let panes: Vec<StoredPane> = self
+            .panes
+            .borrow()
+            .iter()
+            .map(|pane| {
+                let instrument = pane.instrument.borrow();
+                StoredPane {
+                    id: pane.id,
+                    symbol: instrument.as_ref().map(|i| i.symbol.clone()).unwrap_or_default(),
+                    suffix: instrument.as_ref().and_then(|i| i.suffix.clone()),
+                    timeframe: pane.timeframe.get().key(),
+                    indicators: pane.indicators.borrow().clone(),
+                    bar_style: pane.bar_style.get().key().to_string(),
+                    session: pane.session.get().key().to_string(),
+                    show_grid: pane.show_grid.get(),
+                    linked: pane.linked.get(),
+                }
+            })
+            .collect();
+        let workspace = Workspace {
+            layout: self.layout.borrow().clone(),
+            focused: self.focused.get(),
+            panes,
+        };
+        if let Ok(json) = serde_json::to_string(&workspace) {
+            self.store.set_setting(SETTING_WORKSPACE, &json);
+        }
+    }
+
+    /// Put the charts back. `false` when there was nothing written down, or
+    /// when what was written cannot be rebuilt — a layout naming panes that
+    /// are not there is worse than starting over with one chart.
+    fn restore_workspace(self: &Rc<Self>) -> bool {
+        let Some(json) = self.store.setting(SETTING_WORKSPACE) else { return false };
+        let Ok(workspace) = serde_json::from_str::<Workspace>(&json) else { return false };
+        if workspace.panes.is_empty() {
+            return false;
+        }
+        let wanted = workspace.layout.leaves();
+        if wanted.is_empty() || wanted.iter().any(|id| !workspace.panes.iter().any(|p| p.id == *id))
+        {
+            return false;
+        }
+
+        self.panes.borrow_mut().clear();
+        self.next_pane.set(1);
+        let mut restored: Vec<(Rc<ChartPane>, StoredPane)> = Vec::new();
+        for stored in workspace.panes {
+            if !wanted.contains(&stored.id) {
+                continue;
+            }
+            let pane = self.new_pane(
+                Timeframe::parse(&stored.timeframe).unwrap_or(Timeframe::days(1)),
+                stored.indicators.clone(),
+                BarStyle::from_key(&stored.bar_style).unwrap_or_default(),
+                Session::from_key(&stored.session).unwrap_or_default(),
+                stored.show_grid,
+                stored.linked,
+            );
+            restored.push((pane, stored));
+        }
+
+        // Ids are handed out afresh in layout order, so the tree is rewritten
+        // to match rather than trusting ids from another run to still be free.
+        let mut layout = workspace.layout.clone();
+        let mut focused = restored.first().map(|(pane, _)| pane.id).unwrap_or(1);
+        for (pane, stored) in &restored {
+            layout = rename_leaf(&layout, stored.id, pane.id);
+            if stored.id == workspace.focused {
+                focused = pane.id;
+            }
+        }
+        *self.layout.borrow_mut() = layout;
+        self.focused.set(focused);
+        self.rebuild_layout();
+
+        for (pane, stored) in &restored {
+            if let Some(instrument) = self.index.find(&stored.symbol, stored.suffix.as_deref()) {
+                self.show_in(pane, instrument.clone());
+            }
+        }
+        self.sync_header();
+        true
+    }
+
+    /// What the linked charts are showing, ignoring `except`.
+    fn linked_instrument(&self, except: u32) -> Option<Instrument> {
+        self.panes
+            .borrow()
+            .iter()
+            .filter(|p| p.id != except && p.linked.get())
+            .find_map(|p| p.instrument.borrow().clone())
+    }
+
+    fn build_header(self: &Rc<Self>, split: &gtk::Paned) -> adw::HeaderBar {
         let header = adw::HeaderBar::new();
 
         let this = self.clone();
@@ -402,12 +771,12 @@ impl Window {
         let toggle = gtk::ToggleButton::new();
         toggle.set_icon_name("sidebar-show-right-symbolic");
         toggle.set_tooltip_text(Some("Watchlist (Ctrl+B)"));
-        toggle.set_active(split.shows_sidebar());
+        toggle.set_active(split.end_child().map(|rail| rail.is_visible()).unwrap_or(false));
         let split_weak = split.downgrade();
         let store = self.store.clone();
         toggle.connect_toggled(move |toggle| {
-            if let Some(split) = split_weak.upgrade() {
-                split.set_show_sidebar(toggle.is_active());
+            if let Some(rail) = split_weak.upgrade().and_then(|split| split.end_child()) {
+                rail.set_visible(toggle.is_active());
             }
             store.set_setting_bool(SHOW_WATCHLIST, toggle.is_active());
         });
@@ -431,7 +800,12 @@ impl Window {
         while let Some(child) = self.timeframe_strip.first_child() {
             self.timeframe_strip.remove(&child);
         }
-        let current = *self.timeframe.borrow();
+        // The strip is built with the header, before there is a chart to ask,
+        // and again whenever the list changes after there is one.
+        let current = self
+            .maybe_focused_pane()
+            .map(|pane| pane.timeframe.get())
+            .unwrap_or_else(|| Timeframe::days(1));
         let mut first: Option<gtk::ToggleButton> = None;
         let mut buttons = Vec::new();
 
@@ -629,6 +1003,24 @@ impl Window {
                     this.toggle_watchlist();
                     return glib::Propagation::Stop;
                 }
+                // Splitting and walking the layout, the way a tiling window
+                // manager spells them.
+                Key::h | Key::H if ctrl => {
+                    this.split_focused(true);
+                    return glib::Propagation::Stop;
+                }
+                Key::v | Key::V if ctrl => {
+                    this.split_focused(false);
+                    return glib::Propagation::Stop;
+                }
+                Key::Left | Key::Up if alt && !ctrl => {
+                    this.step_focus(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Right | Key::Down if alt && !ctrl => {
+                    this.step_focus(1);
+                    return glib::Propagation::Stop;
+                }
                 // Back to the chart, from wherever the keyboard ended up —
                 // but a dialog gets Escape first. Closing what is open is what
                 // Escape means, and this controller sits on the window, above
@@ -637,7 +1029,7 @@ impl Window {
                     if this.window.visible_dialog().is_some() {
                         return glib::Propagation::Proceed;
                     }
-                    this.chart.area.grab_focus();
+                    this.focused_pane().view.area.grab_focus();
                     return glib::Propagation::Stop;
                 }
                 // Ctrl+Shift+I skips the list and opens the picker, because
@@ -675,7 +1067,7 @@ impl Window {
                     return glib::Propagation::Stop;
                 }
                 Key::r | Key::R if alt => {
-                    this.chart.reset_view();
+                    this.focused_pane().view.reset_view();
                     return glib::Propagation::Stop;
                 }
                 // Walk the chart without leaving it: resolutions sideways,
@@ -717,23 +1109,23 @@ impl Window {
                     glib::Propagation::Stop
                 }
                 (Key::Left, false) if !on_watchlist => {
-                    this.chart.pan_bars(-5);
+                    this.focused_pane().view.pan_bars(-5);
                     glib::Propagation::Stop
                 }
                 (Key::Right, false) if !on_watchlist => {
-                    this.chart.pan_bars(5);
+                    this.focused_pane().view.pan_bars(5);
                     glib::Propagation::Stop
                 }
                 (Key::plus | Key::equal, false) => {
-                    this.chart.zoom(1.0 / 1.25);
+                    this.focused_pane().view.zoom(1.0 / 1.25);
                     glib::Propagation::Stop
                 }
                 (Key::minus, false) => {
-                    this.chart.zoom(1.25);
+                    this.focused_pane().view.zoom(1.25);
                     glib::Propagation::Stop
                 }
                 (Key::End, false) if !on_watchlist => {
-                    this.chart.go_to_latest();
+                    this.focused_pane().view.go_to_latest();
                     glib::Propagation::Stop
                 }
                 (_, true) => glib::Propagation::Proceed,
@@ -795,7 +1187,9 @@ impl Window {
             theming.apply();
             (theming.theme(), theming.bar_scheme())
         };
-        self.chart.restyle(theme, scheme);
+        for pane in self.panes.borrow().iter() {
+            pane.view.restyle(theme.clone(), scheme.clone());
+        }
         // Indicators without a colour of their own take one from the theme's
         // palette, and that answer just changed. Repainting without asking
         // again leaves them wearing the old theme's colours.
@@ -928,9 +1322,12 @@ impl Window {
     /// how the bars are read rather than which bars they are.
     fn redraw_current(self: &Rc<Self>) {
         self.series.borrow_mut().clear();
-        let instrument = self.current.borrow().clone();
-        if let Some(instrument) = instrument {
-            self.show(instrument);
+        let panes = self.panes.borrow().clone();
+        for pane in panes {
+            let instrument = pane.instrument.borrow().clone();
+            if let Some(instrument) = instrument {
+                self.show_in(&pane, instrument);
+            }
         }
     }
 
@@ -951,7 +1348,7 @@ impl Window {
     fn show_shortcuts(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();
 
-        let sections: [(&str, &[(&str, &str)]); 3] = [
+        let sections: [(&str, &[(&str, &str)]); 4] = [
             (
                 "Finding things",
                 &[
@@ -973,6 +1370,15 @@ impl Window {
                     ("↑ ↓", "Next or previous symbol"),
                     ("Ctrl+↑ ↓", "Next or previous section"),
                     ("Delete", "Remove the symbol"),
+                ],
+            ),
+            (
+                "Charts",
+                &[
+                    ("Ctrl+H", "Split horizontally"),
+                    ("Ctrl+V", "Split vertically"),
+                    ("Alt+← →", "Focus the next or previous chart"),
+                    ("Alt+↑ ↓", "The same, up and down"),
                 ],
             ),
             (
@@ -1022,7 +1428,7 @@ impl Window {
         if listed.is_empty() {
             return;
         }
-        let current = *self.timeframe.borrow();
+        let current = self.focused_pane().timeframe.get();
         // A resolution typed but not on the strip has no neighbours; start
         // from the nearest thing that is.
         let at = listed
@@ -1045,7 +1451,7 @@ impl Window {
         if order.is_empty() {
             return;
         }
-        let current = self.current.borrow().clone();
+        let current = self.focused_pane().instrument.borrow().clone();
         let at = current
             .and_then(|instrument| {
                 order
@@ -1065,81 +1471,119 @@ impl Window {
         // you will ask for it again.
         self.remember_timeframe(timeframe);
         self.set_timeframe(timeframe);
+        self.sync_timeframe_buttons(timeframe);
+    }
+
+    fn sync_timeframe_buttons(self: &Rc<Self>, timeframe: Timeframe) {
         for (listed, button) in self.timeframe_buttons.borrow().iter() {
             button.set_active(*listed == timeframe);
         }
     }
 
+    /// The resolution belongs to the focused chart. Splitting a chart to put
+    /// the same symbol on two resolutions is most of why you would split one.
     fn set_timeframe(self: &Rc<Self>, timeframe: Timeframe) {
-        *self.timeframe.borrow_mut() = timeframe;
+        let pane = self.focused_pane();
+        pane.timeframe.set(timeframe);
         self.store.set_setting(LAST_TIMEFRAME, &timeframe.key());
         // A promoted reset period changes with the resolution, so the legend
         // has to be rewritten when the resolution does.
         self.rebuild_indicator_legend();
-        let instrument = self.current.borrow().clone();
+        let instrument = pane.instrument.borrow().clone();
         if let Some(instrument) = instrument {
-            self.show(instrument);
+            self.show_in(&pane, instrument);
         }
+        self.save_workspace();
     }
 
     /// Chart an instrument: paint from cache now, fetch the gap in the
     /// background.
+    /// Chart an instrument on the focused chart, and on every chart linked
+    /// with it.
+    ///
+    /// Linked charts are one group showing one symbol: the watchlist drives
+    /// them, and a symbol picked on any of them moves the rest. An unlinked
+    /// chart is parked — leaving one showing something while you go looking
+    /// elsewhere is most of the reason to have split it.
     pub fn show(self: &Rc<Self>, instrument: Instrument) {
-        let timeframe = *self.timeframe.borrow();
+        let focused = self.focused_pane();
+        self.show_in(&focused, instrument.clone());
+        if focused.linked.get() {
+            let others: Vec<Rc<ChartPane>> = self
+                .panes
+                .borrow()
+                .iter()
+                .filter(|p| p.id != focused.id && p.linked.get())
+                .cloned()
+                .collect();
+            for pane in others {
+                self.show_in(&pane, instrument.clone());
+            }
+        }
+        self.save_workspace();
+    }
+
+    /// Chart an instrument on one chart: paint from cache now, fetch the gap
+    /// in the background.
+    fn show_in(self: &Rc<Self>, pane: &Rc<ChartPane>, instrument: Instrument) {
+        let timeframe = pane.timeframe.get();
         let Some(symbol) = self.provider.symbol_for(&instrument) else {
             return;
         };
         let key = format!("{}:{symbol}", self.provider.id());
         let native = timeframe.native();
 
-        self.symbol_button.set_label(&instrument.display_symbol());
-        self.legend
-            .set_text(&format!("{}  ·  {}", instrument.display_symbol(), timeframe.label()));
-        self.window
-            .set_title(Some(&format!("{} · omacharts", instrument.display_symbol())));
-        *self.current.borrow_mut() = Some(instrument.clone());
-        self.store.set_setting(LAST_SYMBOL, &instrument.symbol);
-        self.store
-            .set_setting(LAST_SUFFIX, instrument.suffix.as_deref().unwrap_or(""));
+        *pane.instrument.borrow_mut() = Some(instrument.clone());
+        pane.write_readout();
+        if pane.id == self.focused.get() {
+            self.symbol_button.set_label(&instrument.display_symbol());
+            self.window
+                .set_title(Some(&format!("{} · omacharts", instrument.display_symbol())));
+            self.store.set_setting(LAST_SYMBOL, &instrument.symbol);
+            self.store
+                .set_setting(LAST_SUFFIX, instrument.suffix.as_deref().unwrap_or(""));
+        }
 
         // Cache first, so the chart is on screen before any request leaves.
         let memo = self.series.borrow().get(&(key.clone(), timeframe)).cloned();
-        let shown = match memo {
+        let cached_was_empty = match memo {
             Some(bars) => {
                 let empty = bars.is_empty();
                 // Indicators have to be recomputed here too. Skipping it left
                 // the previous symbol's VWAP on screen until the network reply
                 // arrived and forced a repaint — which looked like a slow
                 // indicator and was a missing call.
-                self.recompute_indicators(&instrument, timeframe, &bars);
-                self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
+                self.recompute_indicators(pane, &instrument, timeframe, &bars);
+                pane.view.set_series(instrument.clone(), timeframe, (*bars).clone());
                 empty
             }
             None => {
                 let cached = self.store.load_bars(&key, native);
                 let empty = cached.is_empty();
-                self.paint(&key, &instrument, timeframe, cached);
+                self.paint(pane, &key, &instrument, timeframe, cached);
                 empty
             }
         };
-        let cached_was_empty = shown;
-        self.chart.set_stale(false);
+        pane.view.set_stale(false);
+        pane.view.set_loading(cached_was_empty);
 
-        // The chart on screen overtakes everything queued behind it, and the
-        // old neighbours stop being the nearest ones the moment we move.
-        if let Some(watchlist) = self.watchlist.borrow().as_ref() {
-            watchlist.highlight(&instrument);
+        // Only the focused chart drives the rail and the prefetch window: the
+        // others are not where the next keystroke is going.
+        if pane.id == self.focused.get() {
+            if let Some(watchlist) = self.watchlist.borrow().as_ref() {
+                watchlist.highlight(&instrument);
+            }
+            // The chart on screen overtakes everything queued behind it, and
+            // the old neighbourhood is forgotten: those symbols are no longer
+            // the ones a keypress away.
+            self.loader.drop_prefetches();
         }
-        // The chart on screen overtakes everything queued behind it, and the
-        // old neighbourhood is forgotten: those symbols are no longer the ones
-        // a keypress away.
-        self.chart.set_loading(cached_was_empty);
-        self.loader.drop_prefetches();
         self.loader
             .fetch(Request { key, symbol, timeframe, speculative: false }, FOREGROUND);
-        self.prefetch_neighbours(&instrument, timeframe);
+        if pane.id == self.focused.get() {
+            self.prefetch_neighbours(&instrument, timeframe);
+        }
     }
-
 
     /// Fetch ahead around the selection, nearest first.
     ///
@@ -1198,24 +1642,41 @@ impl Window {
     /// Apply bars that arrived for `key`, ignoring a reply for a chart the user
     /// has already navigated away from.
     fn present(self: &Rc<Self>, key: &str, native: Timeframe, bars: Vec<omacharts_engine::Bar>, stale: bool) {
-        let instrument = self.current.borrow().clone();
-        let Some(instrument) = instrument else { return };
-        let Some(symbol) = self.provider.symbol_for(&instrument) else { return };
-        if key != format!("{}:{symbol}", self.provider.id()) {
-            // Something we prefetched. Not our chart, but the rail's change
+        // One reply can belong to several charts: the same symbol at the same
+        // resolution in two panes is one fetch and two repaints.
+        let waiting: Vec<Rc<ChartPane>> = self
+            .panes
+            .borrow()
+            .iter()
+            .filter(|pane| {
+                pane.timeframe.get().native() == native
+                    && pane
+                        .instrument
+                        .borrow()
+                        .as_ref()
+                        .and_then(|i| self.provider.symbol_for(i))
+                        .map(|symbol| format!("{}:{symbol}", self.provider.id()) == key)
+                        .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        if waiting.is_empty() {
+            // Something we prefetched. Not on any chart, but the rail's change
             // column may now have numbers it did not have a moment ago.
             if let Some(watchlist) = self.watchlist.borrow().as_ref() {
                 watchlist.refresh_quotes();
             }
             return;
         }
-        let timeframe = *self.timeframe.borrow();
-        if timeframe.native() != native {
-            return;
+
+        for pane in waiting {
+            let instrument = pane.instrument.borrow().clone();
+            let Some(instrument) = instrument else { continue };
+            self.paint(&pane, key, &instrument, pane.timeframe.get(), bars.clone());
+            pane.view.set_stale(stale);
+            pane.view.set_loading(false);
         }
-        self.paint(key, &instrument, timeframe, bars);
-        self.chart.set_stale(stale);
-        self.chart.set_loading(false);
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.refresh_quotes();
         }
@@ -1224,6 +1685,7 @@ impl Window {
     /// Fold to the shown resolution, memoise, and draw.
     fn paint(
         self: &Rc<Self>,
+        pane: &Rc<ChartPane>,
         key: &str,
         instrument: &Instrument,
         timeframe: Timeframe,
@@ -1240,7 +1702,7 @@ impl Window {
         };
         let bars = omacharts_engine::session::filter(
             &bars,
-            *self.session.borrow(),
+            pane.session.get(),
             instrument,
             timeframe.is_intraday(),
         );
@@ -1249,7 +1711,7 @@ impl Window {
         } else {
             bars
         };
-        self.recompute_indicators(instrument, timeframe, &bars);
+        self.recompute_indicators(pane, instrument, timeframe, &bars);
         let bars = Rc::new(bars);
         {
             let mut series = self.series.borrow_mut();
@@ -1260,7 +1722,7 @@ impl Window {
             }
             series.insert((key.to_string(), timeframe), bars.clone());
         }
-        self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
+        pane.view.set_series(instrument.clone(), timeframe, (*bars).clone());
     }
 
     /// Run the indicators over the bars now on screen and hand them to the
@@ -1271,12 +1733,13 @@ impl Window {
     /// theme when it changes.
     fn recompute_indicators(
         self: &Rc<Self>,
+        pane: &Rc<ChartPane>,
         instrument: &Instrument,
         timeframe: Timeframe,
         bars: &[omacharts_engine::Bar],
     ) {
         let theme = self.theming.borrow().theme();
-        let all = self.indicators.borrow().clone();
+        let all = pane.indicators.borrow().clone();
         let colors = omacharts_engine::palette_colors(&all, &theme);
         let drawn: Vec<Drawn> = all
             .iter()
@@ -1293,15 +1756,29 @@ impl Window {
                 indicator: indicator.clone(),
             })
             .collect();
-        self.chart.set_indicators(drawn);
+        pane.view.set_indicators(drawn);
     }
 
     /// Replace the set of indicators and redraw.
+    /// Indicators belong to one chart, so this is the focused one's.
     pub fn set_indicators(self: &Rc<Self>, indicators: Vec<Indicator>) {
+        let pane = self.focused_pane();
+        self.set_indicators_of(&pane, indicators);
+    }
+
+    fn set_indicators_of(self: &Rc<Self>, pane: &Rc<ChartPane>, indicators: Vec<Indicator>) {
+        // Still written to the one stored set, which is what a brand new chart
+        // starts from: the next split should look like the last thing you set
+        // up rather than like the defaults.
         self.store.set_indicators(&indicators);
-        *self.indicators.borrow_mut() = indicators;
-        self.rebuild_indicator_legend();
-        self.redraw_current();
+        *pane.indicators.borrow_mut() = indicators;
+        self.rebuild_legend_of(pane);
+        let instrument = pane.instrument.borrow().clone();
+        if let Some(instrument) = instrument {
+            self.series.borrow_mut().clear();
+            self.show_in(pane, instrument);
+        }
+        self.save_workspace();
     }
 
     /// The indicator rows under the legend: a dot, a name, and the two things
@@ -1310,13 +1787,21 @@ impl Window {
     /// Deliberately faint. These sit over the drawing, and the drawing is the
     /// point; they come up to full strength when the pointer is near.
     fn rebuild_indicator_legend(self: &Rc<Self>) {
-        while let Some(child) = self.indicator_legend.first_child() {
-            self.indicator_legend.remove(&child);
+        let panes = self.panes.borrow().clone();
+        for pane in panes {
+            self.rebuild_legend_of(&pane);
         }
+    }
+
+    fn rebuild_legend_of(self: &Rc<Self>, pane: &Rc<ChartPane>) {
+        while let Some(child) = pane.indicator_legend.first_child() {
+            pane.indicator_legend.remove(&child);
+        }
+        pane.write_readout();
         let theme = self.theming.borrow().theme();
 
-        let timeframe = *self.timeframe.borrow();
-        let all = self.indicators.borrow().clone();
+        let timeframe = pane.timeframe.get();
+        let all = pane.indicators.borrow().clone();
         let colors = omacharts_engine::palette_colors(&all, &theme);
         for (indicator, colour) in all.iter().zip(colors) {
             let id = indicator.id;
@@ -1397,10 +1882,11 @@ impl Window {
             remove.add_css_class("legend-button");
             remove.set_tooltip_text(Some("Remove"));
             let this = self.clone();
+            let owner = pane.clone();
             remove.connect_clicked(move |_| {
                 let kept: Vec<Indicator> =
-                    this.indicators().into_iter().filter(|i| i.id != id).collect();
-                this.set_indicators(kept);
+                    owner.indicators.borrow().iter().filter(|i| i.id != id).cloned().collect();
+                this.set_indicators_of(&owner, kept);
             });
 
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -1410,7 +1896,7 @@ impl Window {
             row.append(&toggle);
             row.append(&settings);
             row.append(&remove);
-            self.indicator_legend.append(&row);
+            pane.indicator_legend.append(&row);
         }
     }
 
@@ -1419,8 +1905,14 @@ impl Window {
         self.theming.borrow().theme()
     }
 
-    pub fn session(&self) -> Rc<RefCell<Session>> {
-        self.session.clone()
+    /// The focused chart's trading hours.
+    pub fn session(&self) -> Session {
+        self.focused_pane().session.get()
+    }
+
+    pub fn set_session(self: &Rc<Self>, session: Session) {
+        self.focused_pane().session.set(session);
+        self.save_workspace();
     }
 
     pub fn show_grid(&self) -> bool {
@@ -1429,22 +1921,22 @@ impl Window {
 
     pub fn set_show_grid(self: &Rc<Self>, show: bool) {
         self.store.set_setting_bool(SETTING_SHOW_GRID, show);
-        self.chart.set_show_grid(show);
+        self.focused_pane().view.set_show_grid(show);
     }
 
     /// How many rows the profile with this id is drawing right now.
     pub fn profile_rows(&self, id: u32) -> Option<usize> {
-        self.chart.profile_rows(id)
+        self.focused_pane().view.profile_rows(id)
     }
 
     pub fn bar_style(&self) -> BarStyle {
-        *self.bar_style.borrow()
+        self.focused_pane().bar_style.get()
     }
 
     pub fn set_bar_style(self: &Rc<Self>, style: BarStyle) {
-        *self.bar_style.borrow_mut() = style;
+        self.focused_pane().bar_style.set(style);
         self.store.set_setting(SETTING_BAR_STYLE, style.key());
-        self.chart.set_bar_style(style);
+        self.focused_pane().view.set_bar_style(style);
     }
 
     /// Right-clicking the chart offers the things you change most, and a way
@@ -1477,12 +1969,23 @@ impl Window {
         }
         menu.append_submenu(Some("Session"), &sessions);
 
+        // The layout, in its own section: splitting and closing are about the
+        // arrangement rather than about what this chart draws.
+        let layout = gio::Menu::new();
+        layout.append(Some("Split horizontally"), Some("chart.split-h"));
+        layout.append(Some("Split vertically"), Some("chart.split-v"));
+        if self.panes.borrow().len() > 1 {
+            layout.append(Some("Close chart"), Some("chart.close"));
+        }
+        menu.append_section(None, &layout);
+
         let rest = gio::Menu::new();
+        rest.append(Some("Linked to watchlist"), Some("chart.linked"));
         rest.append(Some("Indicators…"), Some("chart.indicators"));
         rest.append(Some("Chart settings…"), Some("chart.settings"));
         menu.append_section(None, &rest);
 
-        popup_menu(&menu, &self.chart.area, x, y);
+        popup_menu(&menu, &self.focused_pane().view.area, x, y);
     }
 
     /// The actions the chart's menus drive.
@@ -1505,23 +2008,54 @@ impl Window {
             this.set_bar_style(style);
         });
         actions.add_action(&bar_style);
+        *self.bar_style_action.borrow_mut() = Some(bar_style);
 
         let session = gio::SimpleAction::new_stateful(
             "session",
             Some(glib::VariantTy::STRING),
-            &self.session.borrow().key().to_variant(),
+            &self.session().key().to_variant(),
         );
         let this = self.clone();
         session.connect_activate(move |action, value| {
             let Some(key) = value.and_then(|v| v.str().map(str::to_string)) else { return };
             let Some(chosen) = Session::from_key(&key) else { return };
             action.set_state(&key.to_variant());
-            *this.session.borrow_mut() = chosen;
+            this.focused_pane().session.set(chosen);
             this.store
                 .set_setting(crate::ui::chart_settings::SETTING_SESSION, chosen.key());
             this.redraw_current();
         });
         actions.add_action(&session);
+        *self.session_action.borrow_mut() = Some(session);
+
+        let split_h = gio::SimpleAction::new("split-h", None);
+        let this = self.clone();
+        split_h.connect_activate(move |_, _| this.split_focused(true));
+        actions.add_action(&split_h);
+
+        let split_v = gio::SimpleAction::new("split-v", None);
+        let this = self.clone();
+        split_v.connect_activate(move |_, _| this.split_focused(false));
+        actions.add_action(&split_v);
+
+        let close = gio::SimpleAction::new("close", None);
+        let this = self.clone();
+        close.connect_activate(move |_, _| this.close_focused());
+        actions.add_action(&close);
+
+        let linked = gio::SimpleAction::new_stateful(
+            "linked",
+            None,
+            &self.focused_pane().linked.get().to_variant(),
+        );
+        let this = self.clone();
+        linked.connect_activate(move |action, _| {
+            let next = !this.focused_pane().linked.get();
+            action.set_state(&next.to_variant());
+            this.set_pane_linked(this.focused.get(), next);
+        });
+        actions.add_action(&linked);
+        *self.linked_action.borrow_mut() = Some(linked);
 
         let settings = gio::SimpleAction::new("settings", None);
         let this = self.clone();
@@ -1546,6 +2080,53 @@ impl Window {
     /// Closed, open it and put the keyboard on it — the reason to open a
     /// watchlist is almost always to move through it. Open but not focused,
     /// focus it. Open and focused, you are done with it, so close it.
+    fn shows_sidebar(&self) -> bool {
+        self.split.end_child().map(|rail| rail.is_visible()).unwrap_or(false)
+    }
+
+    fn set_show_sidebar(&self, show: bool) {
+        if let Some(rail) = self.split.end_child() {
+            rail.set_visible(show);
+        }
+    }
+
+    /// Put the rail back at the width it was left at.
+    ///
+    /// Stored as a width rather than a handle position, because the position
+    /// is measured from the other side and would move the rail every time the
+    /// window was resized.
+    fn restore_sidebar_width(self: &Rc<Self>) {
+        let width = self
+            .store
+            .setting(SETTING_SIDEBAR_WIDTH)
+            .and_then(|v| v.parse::<i32>().ok())
+            .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
+            .clamp(160, 900);
+
+        let split = self.split.clone();
+        let place = move || {
+            let total = split.width();
+            if total > width + 200 {
+                split.set_position(total - width);
+            }
+        };
+        place();
+        let split = self.split.clone();
+        let again = place.clone();
+        split.connect_map(move |_| again());
+
+        let store = self.store.clone();
+        let split = self.split.clone();
+        self.split.connect_position_notify(move |paned| {
+            // Only once there is a real allocation: a position reported before
+            // the first layout would store a nonsense width.
+            if paned.width() > 0 && split.position() > 0 {
+                let width = (paned.width() - paned.position()).clamp(160, 900);
+                store.set_setting(SETTING_SIDEBAR_WIDTH, &width.to_string());
+            }
+        });
+    }
+
     pub fn toggle_watchlist(self: &Rc<Self>) {
         let focused = self
             .watchlist
@@ -1554,9 +2135,9 @@ impl Window {
             .map(|w| w.has_focus())
             .unwrap_or(false);
 
-        match watchlist_action(self.split.shows_sidebar(), focused) {
+        match watchlist_action(self.shows_sidebar(), focused) {
             WatchlistAction::Open => {
-                self.split.set_show_sidebar(true);
+                self.set_show_sidebar(true);
                 self.store.set_setting_bool(SHOW_WATCHLIST, true);
                 if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
                     // The sidebar is not realised until the frame after it is
@@ -1570,9 +2151,9 @@ impl Window {
                 }
             }
             WatchlistAction::Close => {
-                self.split.set_show_sidebar(false);
+                self.set_show_sidebar(false);
                 self.store.set_setting_bool(SHOW_WATCHLIST, false);
-                self.chart.area.grab_focus();
+                self.focused_pane().view.area.grab_focus();
             }
         }
     }
@@ -1602,12 +2183,12 @@ impl Window {
     }
 
     pub fn indicators(&self) -> Vec<Indicator> {
-        self.indicators.borrow().clone()
+        self.focused_pane().indicators.borrow().clone()
     }
 
     /// An id nothing on the chart is using.
     pub fn next_indicator_id(&self) -> u32 {
-        self.indicators.borrow().iter().map(|i| i.id).max().unwrap_or(0) + 1
+        self.focused_pane().indicators.borrow().iter().map(|i| i.id).max().unwrap_or(0) + 1
     }
 
     fn restore_last_symbol(self: &Rc<Self>) {
