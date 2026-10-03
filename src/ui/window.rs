@@ -295,6 +295,8 @@ impl Window {
         let loader = Loader::new(Yahoo::new(), sender.clone());
 
         let window = adw::ApplicationWindow::new(app);
+        // Just the name. Which symbol you are looking at is written over each
+        // chart, and with several of them the title could only ever name one.
         window.set_title(Some("Omacharts"));
         window.set_default_size(1280, 800);
 
@@ -551,13 +553,6 @@ impl Window {
     /// Point the header and the rail at the focused chart.
     fn sync_header(self: &Rc<Self>) {
         let pane = self.focused_pane();
-        let label = pane
-            .instrument
-            .borrow()
-            .as_ref()
-            .map(|i| i.display_symbol())
-            .unwrap_or_default();
-        self.window.set_title(Some(&format!("{label} · Omacharts")));
         self.sync_timeframe_buttons();
         self.sync_chart_actions(&pane);
         if let (Some(watchlist), Some(instrument)) =
@@ -1686,8 +1681,6 @@ impl Window {
         *pane.instrument.borrow_mut() = Some(instrument.clone());
         pane.write_readout();
         if pane.id == self.focused.get() {
-            self.window
-                .set_title(Some(&format!("{} · Omacharts", instrument.display_symbol())));
             self.store.set_setting(LAST_SYMBOL, &instrument.symbol);
             self.store
                 .set_setting(LAST_SUFFIX, instrument.suffix.as_deref().unwrap_or(""));
