@@ -14,7 +14,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::theme::{Mode, Source, Swatch, Theme, UiColors, OMARCHY_ID, SWATCH_NAMES};
+use crate::theme::{
+    distance, ensure_distinct, rotate_hue, Mode, Source, Swatch, Theme, UiColors, OMARCHY_ID,
+    SWATCH_NAMES, SWATCH_SEQUENCE,
+};
 
 const COLORS: &str = ".local/state/omarchy/current/theme/colors.toml";
 const NAME: &str = ".local/state/omarchy/current/theme.name";
@@ -103,6 +106,79 @@ fn pretty_name(raw: &str) -> String {
     }
 }
 
+/// How far off the background a grid line has to sit to be a grid line.
+const MIN_GRID: f64 = 0.015;
+/// How far apart up and down have to be to mean opposite things.
+const MIN_DIRECTION: f64 = 0.15;
+/// How far an overlay colour has to be from the chart to be seen on it.
+const MIN_OVERLAY: f64 = 0.12;
+/// How far consecutive overlay colours have to be from each other.
+const MIN_BETWEEN_OVERLAYS: f64 = 0.10;
+
+/// Make a derived palette usable, whatever the theme handed us.
+///
+/// Omarchy themes are designed for terminals, not charts, and a few of the
+/// shipped ones break assumptions a chart depends on. Hackerman is green on
+/// green, so its "red" and "green" are the same colour and up would look like
+/// down. Lumon's blue and yellow are both blue, so two overlays would be
+/// indistinguishable. Rather than hand-writing a palette for each theme — which
+/// would stop working the moment anyone installs a new one — the derivation
+/// repairs what it is given: nudged for contrast, hue-rotated for separation,
+/// and otherwise left exactly as the theme intended.
+fn repair_palette(swatches: &mut [Swatch], background: &str) {
+    // Every colour has to be visible on the chart at all.
+    for swatch in swatches.iter_mut() {
+        let lift = if crate::theme::rgb(background).map(|(r, g, b)| {
+            (r as u32 + g as u32 + b as u32) < 384
+        }) == Some(true)
+        {
+            "#ffffff"
+        } else {
+            "#000000"
+        };
+        swatch.hex = ensure_distinct(&swatch.hex, background, MIN_OVERLAY, lift);
+    }
+
+    // Up and down must not be the same colour, or the chart lies.
+    separate(swatches, "Green", "Rose", MIN_DIRECTION);
+
+    // Consecutive overlays are the ones that end up on top of each other.
+    for pair in SWATCH_SEQUENCE.windows(2) {
+        separate(swatches, pair[0], pair[1], MIN_BETWEEN_OVERLAYS);
+    }
+}
+
+/// Rotate `later` away from `earlier` until they can be told apart.
+fn separate(swatches: &mut [Swatch], earlier: &str, later: &str, minimum: f64) {
+    let Some(anchor) = swatches.iter().find(|s| s.name == earlier).map(|s| s.hex.clone()) else {
+        return;
+    };
+    let Some(target) = swatches.iter_mut().find(|s| s.name == later) else {
+        return;
+    };
+    if distance(&target.hex, &anchor) >= minimum {
+        return;
+    }
+    // Quarter turns first: a big move is more likely to land somewhere the
+    // palette does not already occupy.
+    for degrees in [90.0, 150.0, 210.0, 45.0, 270.0, 120.0] {
+        let rotated = rotate_hue(&target.hex, degrees);
+        if distance(&rotated, &anchor) >= minimum {
+            target.hex = rotated;
+            return;
+        }
+    }
+    // A greyscale theme has no hue to rotate, so separate by lightness
+    // instead — away from the anchor, toward whichever end has more room.
+    let lightness = |hex: &str| {
+        crate::theme::rgb(hex)
+            .map(|(r, g, b)| (r as f64 + g as f64 + b as f64) / 765.0)
+            .unwrap_or(0.5)
+    };
+    let toward = if lightness(&anchor) > 0.5 { "#000000" } else { "#ffffff" };
+    target.hex = ensure_distinct(&target.hex, &anchor, minimum, toward);
+}
+
 /// Map the semantic keys onto our theme.
 ///
 /// Omarchy guarantees only a core set of keys, so every lookup carries a
@@ -141,11 +217,12 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
         pick(&["orange", "brown"], "#ff9b50"),
         pick(&["bright_cyan", "cyan"], "#76e4f7"),
     ];
-    let swatches: Vec<Swatch> = SWATCH_NAMES
+    let mut swatches: Vec<Swatch> = SWATCH_NAMES
         .iter()
         .zip(hexes)
         .map(|(name, hex)| Swatch { name: name.to_string(), hex })
         .collect();
+    repair_palette(&mut swatches, &background);
 
     Theme {
         id: OMARCHY_ID.to_string(),
@@ -157,10 +234,16 @@ pub fn derive(keys: &HashMap<String, String>, name: &str) -> Theme {
             surface_variant: pick(&["selection", "lighter_background"], &background),
             border: muted.clone(),
             text_muted: pick(&["light_foreground", "dark_foreground"], &muted),
-            // The grid must sit just off the background;
-            // `lighter_background` is the key Omarchy themes reliably put
-            // there.
-            grid: pick(&["lighter_background", "selection"], &background),
+            // The grid must sit just off the background. `lighter_background`
+            // is where Omarchy themes usually put it, but not every theme has
+            // the key and some set it to the background itself, so the result
+            // is nudged until it is actually visible.
+            grid: ensure_distinct(
+                &pick(&["lighter_background", "selection"], &background),
+                &background,
+                MIN_GRID,
+                &text,
+            ),
             axis: muted,
             crosshair: accent.clone(),
             background,

@@ -639,6 +639,83 @@ pub fn mix(a: &str, b: &str, t: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", lerp(ar, br), lerp(ag, bg), lerp(ab, bb))
 }
 
+/// How far apart two colours are, 0 to 1.
+///
+/// Euclidean in RGB. Crude next to a perceptual space, but enough to catch the
+/// thing that actually matters: two colours nobody could tell apart.
+pub fn distance(a: &str, b: &str) -> f64 {
+    let (Some(a), Some(b)) = (rgb(a), rgb(b)) else { return 0.0 };
+    let d = |x: u8, y: u8| (x as f64 - y as f64) / 255.0;
+    ((d(a.0, b.0).powi(2) + d(a.1, b.1).powi(2) + d(a.2, b.2).powi(2)) / 3.0).sqrt()
+}
+
+/// Nudge `colour` away from `from` by blending it toward `toward`, until it is
+/// at least `minimum` away or we run out of room.
+///
+/// Used where a theme gives us a colour that collides with another — a grid
+/// line the same hex as the background, say. Blending rather than substituting
+/// keeps the theme's character.
+pub fn ensure_distinct(colour: &str, from: &str, minimum: f64, toward: &str) -> String {
+    if distance(colour, from) >= minimum {
+        return colour.to_string();
+    }
+    let mut blended = colour.to_string();
+    for step in 1..=12 {
+        blended = mix(colour, toward, step as f64 * 0.06);
+        if distance(&blended, from) >= minimum {
+            return blended;
+        }
+    }
+    blended
+}
+
+/// Rotate a colour's hue, keeping its lightness and saturation.
+///
+/// For separating two swatches a theme happens to have made nearly identical,
+/// without inventing a colour that looks nothing like the rest of the palette.
+pub fn rotate_hue(hex: &str, degrees: f64) -> String {
+    let Some((r, g, b)) = rgb(hex) else { return hex.to_string() };
+    let (h, s, l) = to_hsl(r, g, b);
+    let (r, g, b) = from_hsl((h + degrees).rem_euclid(360.0), s, l);
+    format!("#{r:02x}{g:02x}{b:02x}")
+}
+
+fn to_hsl(r: u8, g: u8, b: u8) -> (f64, f64, f64) {
+    let (r, g, b) = (r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let delta = max - min;
+    if delta.abs() < f64::EPSILON {
+        return (0.0, 0.0, l);
+    }
+    let s = delta / (1.0 - (2.0 * l - 1.0).abs()).max(f64::EPSILON);
+    let h = if (max - r).abs() < f64::EPSILON {
+        60.0 * (((g - b) / delta) % 6.0)
+    } else if (max - g).abs() < f64::EPSILON {
+        60.0 * ((b - r) / delta + 2.0)
+    } else {
+        60.0 * ((r - g) / delta + 4.0)
+    };
+    (h.rem_euclid(360.0), s.clamp(0.0, 1.0), l)
+}
+
+fn from_hsl(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match h as u32 {
+        0..=59 => (c, x, 0.0),
+        60..=119 => (x, c, 0.0),
+        120..=179 => (0.0, c, x),
+        180..=239 => (0.0, x, c),
+        240..=299 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let to_byte = |v: f64| (((v + m) * 255.0).round().clamp(0.0, 255.0)) as u8;
+    (to_byte(r), to_byte(g), to_byte(b))
+}
+
 /// `#rgb`, `#rrggbb` or `#rrggbbaa` to bytes. Alpha is dropped.
 pub fn rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let h = hex.trim().trim_start_matches('#');
@@ -950,6 +1027,38 @@ mod tests {
         assert_eq!(Direction::Up.css_class(), "change-up");
         assert_eq!(Direction::Down.css_class(), "change-down");
         assert_eq!(Direction::Flat.css_class(), "change-flat");
+    }
+
+    #[test]
+    fn a_colliding_colour_is_nudged_until_it_separates() {
+        // A grid line the theme made identical to the background.
+        let repaired = ensure_distinct("#0c0b0c", "#0c0b0c", 0.02, "#e0e0e0");
+        assert!(distance(&repaired, "#0c0b0c") >= 0.02, "{repaired}");
+        // Something already separate is left exactly as it was.
+        assert_eq!(ensure_distinct("#ffffff", "#000000", 0.02, "#888888"), "#ffffff");
+    }
+
+    #[test]
+    fn hue_rotation_keeps_the_colour_but_moves_it() {
+        let rotated = rotate_hue("#4fe88f", 150.0);
+        assert!(distance(&rotated, "#4fe88f") > 0.1, "{rotated} is too close to the original");
+        // Still a real colour of comparable lightness.
+        let (a, b) = (rgb("#4fe88f").unwrap(), rgb(&rotated).unwrap());
+        let lightness = |c: (u8, u8, u8)| c.0 as f64 + c.1 as f64 + c.2 as f64;
+        assert!((lightness(a) - lightness(b)).abs() / 765.0 < 0.3);
+    }
+
+    #[test]
+    fn rotating_a_full_turn_comes_back() {
+        let original = "#7fbbb3";
+        assert!(distance(&rotate_hue(original, 360.0), original) < 0.02);
+    }
+
+    #[test]
+    fn grey_survives_rotation() {
+        // No hue to rotate; it must not become a colour.
+        let rotated = rotate_hue("#808080", 120.0);
+        assert!(distance(&rotated, "#808080") < 0.02, "{rotated}");
     }
 
     #[test]

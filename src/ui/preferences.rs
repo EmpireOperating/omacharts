@@ -108,13 +108,27 @@ fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     group.set_title("Theme");
     let theming = context.theming.borrow();
     group.set_description(Some(if theming.omarchy_available() {
-        "The Omarchy theme follows your desktop as you change it."
+        "“Follow desktop” tracks your Omarchy theme as you change it. \
+         The others are fixed, and stay put whatever the desktop does."
     } else {
         "How the whole app looks."
     }));
 
     let ids: Vec<String> = theming.themes().iter().map(|t| t.id.clone()).collect();
-    let names: Vec<String> = theming.themes().iter().map(|t| t.name.clone()).collect();
+    // The entry that tracks the desktop has to say so. Labelled with just the
+    // desktop theme's name it is indistinguishable from a fixed preset, and
+    // the difference between them is the whole point: one keeps changing.
+    let names: Vec<String> = theming
+        .themes()
+        .iter()
+        .map(|t| {
+            if t.id == omacharts_engine::theme::OMARCHY_ID {
+                format!("Follow desktop · {}", t.name)
+            } else {
+                t.name.clone()
+            }
+        })
+        .collect();
     let selected = ids.iter().position(|id| id == theming.theme_id()).unwrap_or(0);
     let source = theming.theme().source;
     drop(theming);
