@@ -152,12 +152,19 @@ Panel {
           // The name of the app, and the way into it. It was a title doing
           // nothing while a whole row at the bottom existed to say the same
           // thing; this is one control instead of a label and a footer.
+          //
+          // The mark sits at the left edge of the rows below it, and the
+          // highlight bleeds past it exactly as a row's does, so the panel
+          // reads as one column with a heading rather than a label that
+          // happens to be above a list.
           Item {
-            implicitWidth: openLabel.implicitWidth + Style.space(12)
-            implicitHeight: openLabel.implicitHeight + Style.space(6)
+            implicitWidth: titleRow.implicitWidth
+            implicitHeight: titleRow.implicitHeight + Style.space(6)
 
             Rectangle {
               anchors.fill: parent
+              anchors.leftMargin: -Style.space(6)
+              anchors.rightMargin: -Style.space(6)
               radius: Style.space(6)
               color: root.foreground
               opacity: openHover.hovered ? 0.09 : 0
@@ -167,14 +174,25 @@ Panel {
             HoverHandler { id: openHover }
             TapHandler { onTapped: { root.service.openApp(); root.close() } }
 
-            Text {
-              id: openLabel
+            RowLayout {
+              id: titleRow
               anchors.centerIn: parent
-              text: "Omacharts"
-              font.family: root.fontFamily
-              font.pixelSize: Style.space(14)
-              font.bold: true
-              color: root.foreground
+              spacing: Style.space(7)
+
+              OmachartsIcon {
+                Layout.alignment: Qt.AlignVCenter
+                iconSize: Style.space(15)
+                color: root.foreground
+              }
+
+              Text {
+                id: openLabel
+                text: "Omacharts"
+                font.family: root.fontFamily
+                font.pixelSize: Style.space(14)
+                font.bold: true
+                color: root.foreground
+              }
             }
           }
 
