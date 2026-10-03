@@ -262,9 +262,14 @@ pub fn price_decimals(step: f64, price: f64, kind: Option<InstrumentKind>) -> us
         // runs in the hundreds, as the yen pairs do.
         Some(InstrumentKind::Fx) if size >= 20.0 => 3,
         Some(InstrumentKind::Fx) => 5,
+        // Anything priced like a share, an index or a contract is quoted in
+        // cents, and that holds at $15 as much as at $150. Giving the teens
+        // four places was over-correction: it is where VIX at 15.31 picked up
+        // two trailing zeros nobody asked for. Below a dollar the cent stops
+        // being a useful unit, so precision comes back.
         _ => match size {
-            p if p >= 20.0 => 2,
-            p if p >= 1.0 => 4,
+            p if p >= 1.0 => 2,
+            p if p >= 0.01 => 4,
             _ => 6,
         },
     };
@@ -533,8 +538,12 @@ mod tests {
         assert_eq!(price_decimals(50.0, 7722.72, Some(InstrumentKind::Index)), 2);
         assert_eq!(price_decimals(1.0, 233.95, Some(InstrumentKind::Equity)), 2);
         // A share priced like a currency pair is still a share.
-        assert_eq!(price_decimals(0.005, 1.12, Some(InstrumentKind::Equity)), 4);
+        assert_eq!(price_decimals(0.005, 1.12, Some(InstrumentKind::Equity)), 3);
         assert_eq!(price_decimals(0.0001, 0.00042, Some(InstrumentKind::Crypto)), 6);
+        // The teens are not a special case. VIX at 15.31 is 15.31, not
+        // 15.3100, and a share at €11.81 does not want four places either.
+        assert_eq!(price_decimals(1.0, 15.31, Some(InstrumentKind::Index)), 2);
+        assert_eq!(price_decimals(0.5, 11.808, Some(InstrumentKind::Equity)), 2);
     }
 
     #[test]
@@ -548,7 +557,7 @@ mod tests {
     fn a_degenerate_step_or_unknown_instrument_still_gives_an_answer() {
         assert_eq!(price_decimals(0.0, 100.0, None), 2);
         assert_eq!(price_decimals(-1.0, 100.0, None), 2);
-        assert_eq!(price_decimals(0.0, 1.5, None), 4);
+        assert_eq!(price_decimals(0.0, 1.5, None), 2);
     }
 
     #[test]

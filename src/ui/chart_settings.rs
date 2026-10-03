@@ -380,10 +380,8 @@ fn appearance_group(
         list,
         "Colour",
         &indicator.color(&window.theme(), slot),
-        indicator.color.is_none(),
-        move |indicator, hex| {
-            indicator.color = hex.map(|hex| ColorChoice::Fixed { hex });
-        },
+        indicator.color.clone(),
+        move |indicator, choice| indicator.color = choice,
         id,
     ));
     group.add(&stroke_rows(window, dialog, list, id, "", indicator.stroke, {
@@ -457,24 +455,19 @@ fn colour_row(
     list: &IndicatorList,
     title: &str,
     current: &str,
-    is_default: bool,
-    apply: impl Fn(&mut Indicator, Option<String>) + Clone + 'static,
+    choice: Option<ColorChoice>,
+    apply: impl Fn(&mut Indicator, Option<ColorChoice>) + Clone + 'static,
     id: u32,
 ) -> adw::ActionRow {
     let row = adw::ActionRow::new();
     row.set_title(title);
-
-    let button = gtk::ColorDialogButton::new(Some(gtk::ColorDialog::new()));
-    button.set_rgba(&colors::parse(current));
-    button.set_valign(gtk::Align::Center);
-    button.add_css_class("swatch-button");
 
     let default = gtk::Button::with_label("Reset");
     default.add_css_class("flat");
     default.add_css_class("subtle-link");
     default.set_valign(gtk::Align::Center);
     default.set_tooltip_text(Some("Back to the colour the theme gives it"));
-    default.set_sensitive(!is_default);
+    default.set_sensitive(choice.is_some());
 
     // Only the list behind this panel is rebuilt when a colour changes, so
     // these two have to keep each other up to date — otherwise Reset stays
@@ -485,34 +478,29 @@ fn colour_row(
     let list_for_colour = list.clone();
     let apply_for_colour = apply.clone();
     let default_weak = default.downgrade();
-    button.connect_rgba_notify(move |button| {
-        let hex = colors::to_hex(&button.rgba());
-        let apply = apply_for_colour.clone();
-        update(&window_for_colour, id, move |indicator| apply(indicator, Some(hex.clone())));
-        if let Some(default) = default_weak.upgrade() {
-            default.set_sensitive(true);
-        }
-        rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
-    });
+    let button = crate::ui::palette::picker(
+        &window.theme(),
+        choice,
+        current,
+        move |picked| {
+            let apply = apply_for_colour.clone();
+            update(&window_for_colour, id, move |indicator| {
+                apply(indicator, Some(picked.clone()))
+            });
+            if let Some(default) = default_weak.upgrade() {
+                default.set_sensitive(true);
+            }
+            rebuild_indicators(&window_for_colour, &dialog_for_colour, &list_for_colour);
+        },
+    );
 
     let window_for_default = window.clone();
     let dialog_for_default = dialog.clone();
     let list_for_default = list.clone();
-    let button_weak = button.downgrade();
     default.connect_clicked(move |default| {
         let apply = apply.clone();
         update(&window_for_default, id, move |indicator| apply(indicator, None));
         default.set_sensitive(false);
-
-        // Show the colour it reverted to, so the swatch is not left displaying
-        // the one that was just discarded.
-        if let Some(button) = button_weak.upgrade() {
-            let indicators = window_for_default.indicators();
-            if let Some(slot) = indicators.iter().position(|i| i.id == id) {
-                let reverted = indicators[slot].color(&window_for_default.theme(), slot);
-                button.set_rgba(&colors::parse(&reverted));
-            }
-        }
         rebuild_indicators(&window_for_default, &dialog_for_default, &list_for_default);
     });
 
@@ -700,11 +688,11 @@ fn band_groups(
             list,
             "Colour",
             &current,
-            band.color.is_none(),
-            move |indicator, hex| {
+            band.color.clone(),
+            move |indicator, choice| {
                 if let Params::Vwap { bands, .. } = &mut indicator.params {
                     if let Some(band) = bands.get_mut(index) {
-                        band.color = hex.map(|hex| ColorChoice::Fixed { hex });
+                        band.color = choice;
                     }
                 }
             },

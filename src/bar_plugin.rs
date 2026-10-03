@@ -84,6 +84,31 @@ pub fn install(home: &Path) -> Result<(), String> {
     edit_shell(home, add_to_layout)
 }
 
+/// Bring an already-installed widget up to date with this binary.
+///
+/// The plugin is installed once, from a switch in the settings, and then never
+/// touched again — which left the bar running whatever version of the widget
+/// happened to be current the day it was switched on. Every upgrade after that
+/// shipped a new Panel.qml nobody ever saw.
+///
+/// Only files whose contents actually differ are written. The shell watches
+/// the folder and reloads on any change, so rewriting seven identical files
+/// every launch would restart the bar for nothing.
+pub fn refresh(home: &Path) -> Result<(), String> {
+    if !installed(home) {
+        return Ok(());
+    }
+    let target = plugins_dir(home).join(PLUGIN_ID);
+    for (name, contents) in FILES {
+        let path = target.join(name);
+        if std::fs::read_to_string(&path).is_ok_and(|current| current == *contents) {
+            continue;
+        }
+        std::fs::write(&path, contents).map_err(|e| format!("could not update {name}: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Take it out of the bar and remove the folder.
 pub fn remove(home: &Path) -> Result<(), String> {
     edit_shell(home, remove_from_layout)?;

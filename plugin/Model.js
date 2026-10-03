@@ -45,6 +45,7 @@ function rows(sections) {
         last: entry.last,
         change: entry.change,
         changePct: entry.changePct,
+        kind: entry.kind || "",
         hasQuote: entry.last !== null && entry.last !== undefined,
         spark: Array.isArray(entry.spark) ? entry.spark : []
       })
@@ -77,16 +78,21 @@ function headline(sections) {
 
 // Prices of different sizes want different precision. A currency pair moving
 // 0.0008 shown to two decimals reads as "nothing happened".
-function decimals(price) {
+//
+// Mirrors the app's own price_decimals, kind and all, so a symbol does not
+// read one way in the bar and another in the window. What it cannot mirror is
+// the gridline term: the bar has no grid.
+function decimals(price, kind) {
   var size = Math.abs(price)
-  if (size >= 20) return 2
-  if (size >= 1) return 4
+  if (kind === "FX") return size >= 20 ? 3 : 5
+  if (size >= 1) return 2
+  if (size >= 0.01) return 4
   return 6
 }
 
-function formatPrice(value) {
+function formatPrice(value, kind) {
   if (value === null || value === undefined) return "–"
-  return Number(value).toFixed(decimals(value))
+  return Number(value).toFixed(decimals(value, kind))
 }
 
 function formatPercent(value) {
@@ -95,10 +101,10 @@ function formatPercent(value) {
   return sign + Number(value).toFixed(2) + "%"
 }
 
-function formatChange(value, price) {
+function formatChange(value, price, kind) {
   if (value === null || value === undefined) return ""
   var sign = value > 0 ? "+" : ""
-  return sign + Number(value).toFixed(decimals(price))
+  return sign + Number(value).toFixed(decimals(price, kind))
 }
 
 // Black or white, whichever can be read on `hex`.

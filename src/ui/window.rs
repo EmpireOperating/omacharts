@@ -141,8 +141,14 @@ mod tests {
 /// buttons: it is what the platform draws for a context menu, it handles
 /// radio items and keyboard navigation itself, and it looks like every other
 /// menu on the desktop.
+///
+/// Nested rather than sliding, which is what fixes the height. Sliding
+/// submenus live in one stack, and the stack is as tall as its tallest page —
+/// so a four-item menu whose submenu has more rows than that opens with dead
+/// space below it and a scrollbar down the side. Nested submenus fly out as
+/// their own popovers, leaving each menu exactly as tall as what is in it.
 fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
-    let popover = gtk::PopoverMenu::from_model(Some(model));
+    let popover = gtk::PopoverMenu::from_model_full(model, gtk::PopoverMenuFlags::NESTED);
     popover.set_parent(over);
     popover.set_has_arrow(false);
     popover.set_halign(gtk::Align::Start);

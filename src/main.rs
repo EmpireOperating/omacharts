@@ -39,18 +39,23 @@ fn main() -> glib::ExitCode {
     }
 
     // GTK4 picks the Vulkan renderer by default, and bringing up a Vulkan
-    // context costs around 350ms before anything of ours runs — measured
-    // here at 561ms to a window with it, 226ms with the GL renderer, against
-    // 8ms of our own work. The chart is drawn with cairo into a DrawingArea
-    // either way, so the renderer only composites the result; paying a third
-    // of a second for that is a bad trade on an app whose whole point is
-    // feeling instant.
+    // context costs most of half a second before anything of ours runs —
+    // measured here, window on screen: vulkan 575ms, gl 191ms, cairo 148ms,
+    // against 8ms of our own work. The chart is drawn with cairo into a
+    // DrawingArea either way, so the renderer only composites the result;
+    // paying a third of a second for that is a bad trade on an app whose
+    // whole point is feeling instant.
     //
-    // GSK_RENDERER=cairo is faster still (124ms) at the cost of software
-    // compositing. Anything already set is left alone.
+    // "gl", not "ngl": the renderer was renamed and the old name now draws a
+    // warning on every launch. It is still honoured — the timings above are
+    // identical either way — but a warning nobody can act on is noise.
+    //
+    // Software compositing (cairo) is faster still to the first frame and
+    // pays for it while panning, which is the one thing this app does
+    // constantly. Anything already set is left alone.
     if std::env::var_os("GSK_RENDERER").is_none() {
         // SAFETY: single-threaded, before GTK or any other thread starts.
-        unsafe { std::env::set_var("GSK_RENDERER", "ngl") };
+        unsafe { std::env::set_var("GSK_RENDERER", "gl") };
     }
 
     // The command line is handled rather than ignored, because a second
@@ -88,6 +93,18 @@ fn main() -> glib::ExitCode {
         }
 
         window.window.present();
+
+        // After the window is on screen, never before it: keeping an installed
+        // bar widget current is housekeeping, and housekeeping does not get to
+        // sit in front of the first frame.
+        glib::idle_add_local_once(|| {
+            if let Some(home) = glib::home_dir().to_str().map(std::path::PathBuf::from) {
+                if let Err(error) = omacharts::bar_plugin::refresh(&home) {
+                    eprintln!("omacharts: bar widget not updated: {error}");
+                }
+            }
+        });
+
         glib::ExitCode::SUCCESS
     });
 

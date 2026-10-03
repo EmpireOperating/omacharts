@@ -249,17 +249,26 @@ Panel {
               anchors.fill: parent
               spacing: Style.space(8)
 
+              // The name is the only part of the row that may be any length,
+              // so it is the only part that gives way. Everything to its right
+              // keeps its size and the name elides into whatever is left —
+              // otherwise a long one ("CBOE Volatility Index") pushes the
+              // percentage pill off the edge of the panel.
               ColumnLayout {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
                 spacing: 0
                 Text {
+                  Layout.fillWidth: true
                   text: modelData.display || ""
+                  elide: Text.ElideRight
                   font.family: root.fontFamily
                   font.pixelSize: Style.space(13)
                   font.bold: true
                   color: root.foreground
                 }
                 Text {
-                  Layout.maximumWidth: Style.space(150)
+                  Layout.fillWidth: true
                   text: modelData.name || ""
                   elide: Text.ElideRight
                   font.family: root.fontFamily
@@ -267,8 +276,6 @@ Panel {
                   color: root.dim
                 }
               }
-
-              Item { Layout.fillWidth: true }
 
               Sparkline {
                 visible: modelData.spark && modelData.spark.length > 1
@@ -279,7 +286,7 @@ Panel {
               }
 
               Text {
-                text: Model.formatPrice(modelData.last)
+                text: Model.formatPrice(modelData.last, modelData.kind)
                 font.family: root.fontFamily
                 font.pixelSize: Style.space(13)
                 color: modelData.hasQuote === true ? root.foreground : root.dim
