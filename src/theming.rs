@@ -253,6 +253,11 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .timeframe-strip button { min-width: 34px; padding: 2px 6px; }
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
+
+/* The legend's gear sits over the drawing, so it stays out of the way until
+   the pointer is near it. */
+.legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
+.legend-gear:hover { opacity: 1; }
 ",
     );
     css

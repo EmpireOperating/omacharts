@@ -9,6 +9,7 @@ pub mod bars;
 pub mod indicators;
 pub mod omarchy;
 pub mod provider;
+pub mod session;
 pub mod providers;
 pub mod symbols;
 pub mod theme;
@@ -16,6 +17,7 @@ pub mod theme;
 pub use bars::{resample, Bar, Timeframe};
 pub use indicators::{Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use provider::{Capability, Provider, ProviderError};
+pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
 pub use theme::{
     theme_bars, BarScheme, BarSlot, ColorChoice, Direction, Mode, Source, Swatch, Theme,

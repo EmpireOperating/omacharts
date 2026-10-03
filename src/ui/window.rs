@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, Instrument, Provider, SearchIndex, Timeframe,
+    resample, Instrument, Provider, SearchIndex, Session, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
@@ -67,6 +67,8 @@ pub struct Window {
     symbol_button: gtk::Button,
     /// The chart's legend: what this is, and at what resolution.
     legend: gtk::Label,
+    /// Regular or extended hours.
+    session: Rc<RefCell<Session>>,
     /// The preset strip, so a typed resolution can update it.
     timeframe_buttons: RefCell<Option<Vec<(Timeframe, gtk::ToggleButton)>>>,
 }
@@ -97,10 +99,7 @@ impl Window {
 
         let readout = gtk::Label::new(None);
         readout.add_css_class("readout-symbol");
-        readout.set_halign(gtk::Align::Start);
-        readout.set_valign(gtk::Align::Start);
-        readout.set_margin_start(14);
-        readout.set_margin_top(10);
+        readout.set_valign(gtk::Align::Center);
         readout.set_can_target(false);
 
         let this = Rc::new(Window {
@@ -123,6 +122,12 @@ impl Window {
             )),
             symbol_button,
             legend: readout.clone(),
+            session: Rc::new(RefCell::new(
+                store
+                    .setting(crate::ui::chart_settings::SETTING_SESSION)
+                    .and_then(|k| Session::from_key(&k))
+                    .unwrap_or_default(),
+            )),
             timeframe_buttons: RefCell::new(None),
         });
 
@@ -135,10 +140,27 @@ impl Window {
         split.set_collapsed(false);
         split.set_show_sidebar(store.setting_bool(SHOW_WATCHLIST, true));
 
+        let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
+        gear.add_css_class("flat");
+        gear.add_css_class("legend-gear");
+        gear.set_tooltip_text(Some("Chart settings"));
+        gear.set_valign(gtk::Align::Center);
+
+        let legend_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        legend_bar.set_halign(gtk::Align::Start);
+        legend_bar.set_valign(gtk::Align::Start);
+        legend_bar.set_margin_start(12);
+        legend_bar.set_margin_top(6);
+        legend_bar.append(&readout);
+        legend_bar.append(&gear);
+
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&chart.area));
-        overlay.add_overlay(&readout);
+        overlay.add_overlay(&legend_bar);
         split.set_content(Some(&overlay));
+
+        let opener = this.clone();
+        gear.connect_clicked(move |_| opener.open_chart_settings());
 
         let header = this.build_header(&split);
         let toolbar = adw::ToolbarView::new();
@@ -469,6 +491,26 @@ impl Window {
         entry.set_position(-1);
     }
 
+    fn open_chart_settings(self: &Rc<Self>) {
+        let this = self.clone();
+        crate::ui::chart_settings::ChartSettings::present(
+            &self.window,
+            self.store.clone(),
+            self.session.clone(),
+            Rc::new(move || this.redraw_current()),
+        );
+    }
+
+    /// Re-fold and repaint what is on screen, after something that changes
+    /// how the bars are read rather than which bars they are.
+    fn redraw_current(self: &Rc<Self>) {
+        self.series.borrow_mut().clear();
+        let instrument = self.current.borrow().clone();
+        if let Some(instrument) = instrument {
+            self.show(instrument);
+        }
+    }
+
     fn open_preferences(self: &Rc<Self>) {
         let this = self.clone();
         Preferences::present(
@@ -653,6 +695,12 @@ impl Window {
         timeframe: Timeframe,
         bars: Vec<omacharts_engine::Bar>,
     ) {
+        let bars = omacharts_engine::session::filter(
+            &bars,
+            *self.session.borrow(),
+            instrument,
+            timeframe.is_intraday(),
+        );
         let bars = if timeframe.is_derived() {
             resample(&bars, timeframe, instrument.session_origin)
         } else {
