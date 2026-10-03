@@ -872,15 +872,11 @@ fn write_cell(label: &gtk::Label, column: Column, quote: Option<Quote>) {
 
 /// How many decimals a price of this size deserves.
 ///
-/// Two is right for a stock and absurd for a currency pair: EURUSD moving
-/// 0.0008 rounds to "+0.00", which reads as "nothing happened" when the
-/// percent column says otherwise.
+/// The engine owns the rule so the rail and the chart cannot give the same
+/// price two ways. There is no gridline here, so only the instrument has an
+/// opinion.
 fn decimals_for(price: f64) -> usize {
-    match price.abs() {
-        p if p >= 20.0 => 2,
-        p if p >= 1.0 => 4,
-        _ => 6,
-    }
+    omacharts_engine::price_decimals(0.0, price)
 }
 
 /// Pop a real menu up where the pointer is.

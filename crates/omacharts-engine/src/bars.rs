@@ -234,6 +234,30 @@ impl Timeframe {
     }
 }
 
+/// How many decimals a price deserves, given how finely the chart is ruled.
+///
+/// Two answers have to agree here. The gridline spacing says how much
+/// precision the *chart* needs: lines 5 apart do not want three decimals. The
+/// price itself says how much precision the *instrument* needs: EURUSD moves
+/// in the fourth decimal, and rounding it to the step makes a day's range look
+/// like nothing happened.
+///
+/// Taking the finer of the two is what keeps the axis, the last-price chip and
+/// the watchlist from giving the same price three different ways.
+pub fn price_decimals(step: f64, price: f64) -> usize {
+    let from_step = if step > 0.0 {
+        (-step.log10().floor()).clamp(0.0, 8.0) as usize
+    } else {
+        2
+    };
+    let from_price = match price.abs() {
+        p if p >= 20.0 => 2,
+        p if p >= 1.0 => 4,
+        _ => 6,
+    };
+    from_step.max(from_price)
+}
+
 /// Fold `src` into `target`.
 ///
 /// `origin` shifts the bucket boundaries, in seconds. Futures sessions open at
@@ -431,6 +455,26 @@ mod tests {
         assert!(Timeframe::hours(12).is_intraday());
         assert!(!Timeframe::days(1).is_intraday());
         assert!(!Timeframe::weeks(1).is_intraday());
+    }
+
+    #[test]
+    fn prices_are_written_as_finely_as_the_chart_or_the_instrument_needs() {
+        // An index ruled every 50 points: two decimals is already generous.
+        assert_eq!(price_decimals(50.0, 7722.72), 2);
+        // A currency pair ruled every 0.005: the step says three, but the pair
+        // moves in the fourth, which is why it was being shown as 1.126.
+        assert_eq!(price_decimals(0.005, 1.1257), 4);
+        // And a chart ruled finer than the instrument still gets the finer.
+        assert_eq!(price_decimals(0.0001, 1.1257), 4);
+        assert_eq!(price_decimals(0.00001, 1.1257), 5);
+        // Something priced in pennies.
+        assert_eq!(price_decimals(0.0001, 0.00042), 6);
+    }
+
+    #[test]
+    fn a_degenerate_step_still_gives_an_answer() {
+        assert_eq!(price_decimals(0.0, 100.0), 2);
+        assert_eq!(price_decimals(-1.0, 100.0), 2);
     }
 
     #[test]

@@ -690,7 +690,8 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     // One answer for how precisely prices are written, used by the gridlines,
     // the last-price chip and the crosshair alike — a chart saying 1.1257 on
     // one label and 1.13 on another is describing two different prices.
-    let decimals = decimals_for(nice_step(high - low, (price_h / 52.0).max(2.0) as usize));
+    let step = nice_step(high - low, (price_h / 52.0).max(2.0) as usize);
+    let decimals = omacharts_engine::price_decimals(step, (low + high) / 2.0);
 
     draw_price_grid(cr, state, plot_x, plot_w, plot_y, price_h, low, high, &to_y);
     draw_time_axis(cr, state, bars, plot_x, plot_w, height, bar_w, first);
@@ -749,7 +750,7 @@ fn draw_price_grid(
     if step <= 0.0 {
         return;
     }
-    let decimals = decimals_for(step);
+    let decimals = omacharts_engine::price_decimals(step, (low + high) / 2.0);
 
     cr.set_line_width(1.0);
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
@@ -1061,7 +1062,7 @@ fn draw_crosshair(
     if py <= plot_y + price_h {
         let price = high - (py - plot_y) / price_h * (high - low);
         let step = nice_step(high - low, (price_h / 52.0).max(2.0) as usize);
-        let decimals = decimals_for(step);
+        let decimals = omacharts_engine::price_decimals(step, price);
         label_on_axis(
             cr,
             state,
