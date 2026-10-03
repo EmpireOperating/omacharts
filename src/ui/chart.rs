@@ -478,6 +478,12 @@ fn draw_time_axis(
     // jitter as the view scrolls.
     let target = (plot_w / 90.0).max(2.0) as usize;
     let stride = (bars.len() / target).max(1);
+    // How much time is on screen decides the format. A decade of daily bars
+    // labelled "01 Jun" tells you nothing.
+    let span = match (bars.first(), bars.last()) {
+        (Some(first), Some(last)) => last.ts - first.ts,
+        _ => 0,
+    };
     for (i, bar) in bars.iter().enumerate() {
         if i % stride != 0 {
             continue;
@@ -491,7 +497,7 @@ fn draw_time_axis(
         cr.line_to(x.round() + 0.5, y);
         let _ = cr.stroke();
 
-        let label = format_time(bar.ts, state.timeframe);
+        let label = format_axis_time(bar.ts, span);
         colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
         if let Ok(extents) = cr.text_extents(&label) {
             cr.move_to(x - extents.width() / 2.0, height - 7.0);
@@ -777,27 +783,31 @@ pub fn decimals_for(step: f64) -> usize {
     places.clamp(0.0, 6.0) as usize
 }
 
-fn format_time(ts: i64, timeframe: Timeframe) -> String {
+/// Label an axis tick at a detail the visible span justifies.
+fn format_axis_time(ts: i64, span_seconds: i64) -> String {
     use chrono::{Local, TimeZone};
     let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
         return String::new();
     };
-    if timeframe.is_intraday() {
-        dt.format("%H:%M").to_string()
-    } else if timeframe == Timeframe::W1 {
-        dt.format("%b %Y").to_string()
-    } else {
-        dt.format("%d %b").to_string()
+    const DAY: i64 = 86_400;
+    match span_seconds {
+        s if s > 1460 * DAY => dt.format("%Y").to_string(),
+        s if s > 160 * DAY => dt.format("%b %Y").to_string(),
+        s if s > 4 * DAY => dt.format("%d %b").to_string(),
+        s if s > DAY => dt.format("%a %H:%M").to_string(),
+        _ => dt.format("%H:%M").to_string(),
     }
 }
 
+/// The crosshair label always carries the year — it is the one place you look
+/// to know exactly which bar you are on.
 fn format_time_full(ts: i64, timeframe: Timeframe) -> String {
     use chrono::{Local, TimeZone};
     let Some(dt) = Local.timestamp_opt(ts, 0).single() else {
         return String::new();
     };
     if timeframe.is_intraday() {
-        dt.format("%a %d %b %H:%M").to_string()
+        dt.format("%d %b %Y %H:%M").to_string()
     } else {
         dt.format("%a %d %b %Y").to_string()
     }
@@ -826,6 +836,35 @@ mod tests {
             let lines = range / step;
             assert!((2.0..=15.0).contains(&lines), "{range} -> {lines} lines");
         }
+    }
+
+    #[test]
+    fn axis_labels_match_the_span_on_screen() {
+        const DAY: i64 = 86_400;
+        // A fixed instant so the assertions do not drift with the clock.
+        let ts = 1_700_000_000;
+
+        // Decades: years only. This is the case that read "01 Jun" for every
+        // tick before the span was taken into account.
+        let decade = format_axis_time(ts, 4000 * DAY);
+        assert_eq!(decade.len(), 4, "{decade}");
+        assert!(decade.chars().all(|c| c.is_ascii_digit()), "{decade}");
+
+        // A year or two: month and year.
+        assert!(format_axis_time(ts, 400 * DAY).contains("20"));
+        // A few weeks: day and month, no year.
+        assert!(!format_axis_time(ts, 30 * DAY).contains("20"));
+        // Intraday: a clock.
+        assert!(format_axis_time(ts, 3600).contains(':'));
+    }
+
+    #[test]
+    fn two_ticks_a_decade_apart_get_different_labels() {
+        const DAY: i64 = 86_400;
+        let span = 4000 * DAY;
+        let a = format_axis_time(1_200_000_000, span);
+        let b = format_axis_time(1_700_000_000, span);
+        assert_ne!(a, b);
     }
 
     #[test]

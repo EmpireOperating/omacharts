@@ -89,10 +89,29 @@ impl Swatch {
     }
 }
 
-/// The swatch names every shipped theme provides, in display order.
+/// The swatch names every shipped theme provides, in display order — how the
+/// palette is laid out when you go looking for a colour.
 pub const SWATCH_NAMES: [&str; 8] = [
     "Blue", "Amber", "Violet", "Teal", "Rose", "Green", "Orange", "Cyan",
 ];
+
+/// The order colours are handed out in when nobody picks one.
+///
+/// Two rules, both about not making the chart harder to read:
+///
+/// * **Direction colours are never handed out.** Green and Rose are what
+///   candles use for up and down, so an overlay wearing them reads as price
+///   action. They stay in the palette for anyone who deliberately wants them;
+///   they are simply never assigned automatically. That is why this is six
+///   names and not eight.
+/// * **Neighbours are far apart in hue.** Consecutive overlays are the ones
+///   most likely to sit on top of each other, so blue is followed by amber,
+///   not by teal.
+///
+/// Past six, colours repeat. Every charting tool does; six distinguishable
+/// overlays is already more than a chart can carry.
+pub const SWATCH_SEQUENCE: [&str; 6] =
+    ["Blue", "Amber", "Violet", "Teal", "Orange", "Cyan"];
 
 /// How a colour was chosen for an indicator or overlay.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
@@ -138,13 +157,42 @@ impl Theme {
         self.swatches.iter().find(|s| s.name == name)
     }
 
-    /// The nth palette colour, wrapping. For handing successive overlays
-    /// colours that do not clash.
+    /// The nth colour to hand an overlay that has not been given one.
+    ///
+    /// Follows [`SWATCH_SEQUENCE`], so the first few indicators on a chart are
+    /// far apart in hue and none of them is wearing the candles' colours.
     pub fn series(&self, n: usize) -> String {
         if self.swatches.is_empty() {
             return self.ui.accent.clone();
         }
-        self.swatches[n % self.swatches.len()].hex.clone()
+        let name = SWATCH_SEQUENCE[n % SWATCH_SEQUENCE.len()];
+        self.swatch(name)
+            .map(|s| s.hex.clone())
+            .unwrap_or_else(|| self.swatches[n % self.swatches.len()].hex.clone())
+    }
+
+    /// The fill that belongs under a line of colour `hex`.
+    ///
+    /// Bands, clouds and shaded zones need the same hue sitting quietly behind
+    /// the line rather than competing with it. Deriving the fill from the line
+    /// and the theme's own background — rather than storing a second colour —
+    /// is what keeps it harmonious in every theme, including one the user
+    /// edited at midnight.
+    pub fn fill_for(&self, hex: &str) -> String {
+        mix(hex, &self.ui.background, 0.82)
+    }
+
+    /// A softer line, for the second half of a pair — a signal line against
+    /// its indicator, the slow half of a cross.
+    pub fn muted_for(&self, hex: &str) -> String {
+        mix(hex, &self.ui.background, 0.38)
+    }
+
+    /// The nth overlay's line and fill together.
+    pub fn series_pair(&self, n: usize) -> (String, String) {
+        let line = self.series(n);
+        let fill = self.fill_for(&line);
+        (line, fill)
     }
 
     pub fn duplicate(&self, id: impl Into<String>, name: impl Into<String>) -> Theme {
@@ -712,8 +760,92 @@ mod tests {
     #[test]
     fn series_colours_wrap_without_panicking() {
         let theme = midnight();
-        assert_eq!(theme.series(0), theme.swatches[0].hex);
-        assert_eq!(theme.series(8), theme.swatches[0].hex);
+        assert_eq!(theme.series(0), theme.swatch("Blue").unwrap().hex);
+        assert_eq!(theme.series(SWATCH_SEQUENCE.len()), theme.series(0));
+    }
+
+    #[test]
+    fn the_sequence_is_drawn_from_the_palette() {
+        for name in SWATCH_SEQUENCE {
+            assert!(SWATCH_NAMES.contains(&name), "{name} is not a palette colour");
+        }
+        let mut seen = SWATCH_SEQUENCE.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), SWATCH_SEQUENCE.len(), "a colour is handed out twice");
+    }
+
+    #[test]
+    fn overlays_never_wear_the_candles_colours() {
+        // Green and Rose are what up and down look like. An overlay in those
+        // reads as price action, so they are never assigned automatically —
+        // though they stay pickable by hand.
+        assert!(!SWATCH_SEQUENCE.contains(&"Green"));
+        assert!(!SWATCH_SEQUENCE.contains(&"Rose"));
+        assert!(SWATCH_NAMES.contains(&"Green") && SWATCH_NAMES.contains(&"Rose"));
+    }
+
+    #[test]
+    fn consecutive_overlay_colours_are_far_apart() {
+        // Consecutive overlays are the ones most likely to overlap, so they
+        // must be separable at a glance in every theme we ship.
+        for theme in builtin_themes() {
+            for n in 0..SWATCH_SEQUENCE.len() - 1 {
+                let (a, b) = (theme.series(n), theme.series(n + 1));
+                let distance = rgb_distance(&a, &b);
+                assert!(distance > 0.25, "{} {n}: {a} vs {b} ({distance:.3})", theme.name);
+            }
+        }
+    }
+
+    #[test]
+    fn every_swatch_is_legible_on_its_theme_background() {
+        for theme in builtin_themes() {
+            for swatch in &theme.swatches {
+                let distance = rgb_distance(&swatch.hex, &theme.ui.background);
+                assert!(
+                    distance > 0.25,
+                    "{} / {}: {} on {} ({distance:.3})",
+                    theme.name,
+                    swatch.name,
+                    swatch.hex,
+                    theme.ui.background
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fills_sit_between_the_line_and_the_background() {
+        for theme in builtin_themes() {
+            let (line, fill) = theme.series_pair(0);
+            assert_ne!(fill, line, "a fill must be quieter than its line");
+            assert!(
+                rgb_distance(&fill, &theme.ui.background) < rgb_distance(&line, &theme.ui.background),
+                "{}: the fill must be closer to the background than the line",
+                theme.name
+            );
+            // But still visible against it.
+            assert!(rgb_distance(&fill, &theme.ui.background) > 0.01, "{}", theme.name);
+        }
+    }
+
+    #[test]
+    fn a_muted_line_is_between_the_fill_and_the_line() {
+        let theme = midnight();
+        let line = theme.series(0);
+        let muted = theme.muted_for(&line);
+        let fill = theme.fill_for(&line);
+        let to_bg = |hex: &str| rgb_distance(hex, &theme.ui.background);
+        assert!(to_bg(&fill) < to_bg(&muted) && to_bg(&muted) < to_bg(&line));
+    }
+
+    /// Euclidean distance in RGB, normalised. Crude next to a perceptual
+    /// space, but enough to catch two colours nobody could tell apart.
+    fn rgb_distance(a: &str, b: &str) -> f64 {
+        let (Some(a), Some(b)) = (rgb(a), rgb(b)) else { return 0.0 };
+        let d = |x: u8, y: u8| (x as f64 - y as f64) / 255.0;
+        (d(a.0, b.0).powi(2) + d(a.1, b.1).powi(2) + d(a.2, b.2).powi(2)).sqrt() / 3f64.sqrt()
     }
 
     #[test]
