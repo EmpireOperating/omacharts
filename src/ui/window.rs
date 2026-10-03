@@ -349,6 +349,22 @@ impl Window {
         this.chart.set_show_grid(this.show_grid());
         let menu_owner = this.clone();
         this.chart.set_context_menu_handler(move |x, y| menu_owner.chart_menu(x, y));
+
+        // Dragging a pane's edge changes the indicator, not just the drawing,
+        // so the new height is stored the way any other setting of its would be.
+        let resizer = this.clone();
+        this.chart.set_pane_resize_handler(move |id, share| {
+            let mut indicators = resizer.indicators();
+            if let Some(indicator) = indicators.iter_mut().find(|i| i.id == id) {
+                match &mut indicator.params {
+                    omacharts_engine::Params::Volume { height }
+                    | omacharts_engine::Params::Rsi { height, .. }
+                    | omacharts_engine::Params::Atr { height, .. } => *height = share,
+                    _ => return,
+                }
+                resizer.set_indicators(indicators);
+            }
+        });
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();

@@ -348,6 +348,18 @@ impl Output {
             _ => None,
         }
     }
+
+    /// Resize the strip, for dragging its edge. The computed series is left
+    /// alone — only the box it is drawn in changes, so there is nothing to
+    /// recompute while the hand is moving.
+    pub fn set_pane_height(&mut self, share: f64) {
+        let share = share.clamp(0.05, 0.6);
+        match self {
+            Output::Volume { height, .. } => *height = share,
+            Output::Pane(pane) => pane.height = share,
+            _ => {}
+        }
+    }
 }
 
 /// Compute an indicator over `bars`.

@@ -254,6 +254,11 @@ fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
+/* Nested submenus leave the menu exactly as tall as its contents, which turned
+   out to be a shade too exact: the last item sat on the rounded corner with
+   nothing under it. */
+popover.menu contents { padding-top: 4px; padding-bottom: 4px; }
+
 /* The legend sits over the drawing, and the drawing is the point. Everything
    here stays faint until the pointer is near it. */
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }

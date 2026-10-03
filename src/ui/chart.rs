@@ -30,6 +30,8 @@ const PAD: f64 = 10.0;
 const PANE_GAP: f64 = 6.0;
 /// The least of the chart price keeps, however many panes are stacked below.
 const MIN_PRICE_SHARE: f64 = 0.45;
+/// How near a pane's top edge the pointer has to be to grab it.
+const EDGE_GRAB: f64 = 4.0;
 
 /// Fewest bars we will zoom into, and the most we will draw at once.
 const MIN_VISIBLE: usize = 12;
@@ -100,6 +102,72 @@ enum Drag {
     Pan { first: usize, offset: f64 },
     PriceScale { zoom: f64 },
     TimeScale { visible: usize },
+    /// Pulling the line above a pane, to make that pane taller or shorter.
+    PaneEdge { id: u32, share: f64, total_h: f64 },
+}
+
+/// One indicator's strip: which indicator, and where it sits.
+struct PaneBox {
+    id: u32,
+    top: f64,
+    height: f64,
+}
+
+/// Where everything goes.
+///
+/// Worked out in one place so the drawing and the pointer cannot disagree. A
+/// resize handle that is a pixel off the line it appears to grab is worse than
+/// no handle at all.
+struct Layout {
+    plot_x: f64,
+    plot_w: f64,
+    plot_y: f64,
+    total_h: f64,
+    price_h: f64,
+    panes: Vec<PaneBox>,
+}
+
+impl Layout {
+    /// The separator above a pane, which is also what you grab to resize it.
+    fn edge(pane: &PaneBox) -> f64 {
+        pane.top - PANE_GAP / 2.0
+    }
+
+    fn edge_at(&self, y: f64) -> Option<u32> {
+        self.panes.iter().find(|pane| (y - Layout::edge(pane)).abs() <= EDGE_GRAB).map(|p| p.id)
+    }
+}
+
+/// Volume, RSI and ATR each want a strip of their own, stacked under the price
+/// in the order they are listed. Price keeps most of the chart whatever is
+/// below it: three panes sharing the window equally would leave the candles —
+/// the thing you came for — as a sliver.
+fn layout(state: &State, width: f64, height: f64) -> Layout {
+    let plot_x = PAD;
+    let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
+    let plot_y = PAD;
+    let total_h = (height - TIME_AXIS_H - PAD).max(1.0);
+
+    let wanted: Vec<(u32, f64)> = state
+        .indicators
+        .iter()
+        .filter(|drawn| drawn.indicator.visible)
+        .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn.indicator.id, share)))
+        .collect();
+    let sum: f64 = wanted.iter().map(|(_, share)| share).sum();
+    let squeeze = if sum > 1.0 - MIN_PRICE_SHARE { (1.0 - MIN_PRICE_SHARE) / sum } else { 1.0 };
+    let heights: Vec<f64> =
+        wanted.iter().map(|(_, share)| (total_h * share * squeeze).min(220.0)).collect();
+    let used = heights.iter().sum::<f64>() + PANE_GAP * wanted.len() as f64;
+    let price_h = (total_h - used).max(1.0);
+
+    let mut panes = Vec::new();
+    let mut top = plot_y + price_h + PANE_GAP;
+    for ((id, _), height) in wanted.iter().zip(&heights) {
+        panes.push(PaneBox { id: *id, top, height: *height });
+        top += height + PANE_GAP;
+    }
+    Layout { plot_x, plot_w, plot_y, total_h, price_h, panes }
 }
 
 /// Which part of the widget a point is over.
@@ -202,6 +270,9 @@ pub struct ChartView {
     state: Rc<RefCell<State>>,
     on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>>,
     on_context_menu: Rc<RefCell<Option<Box<dyn Fn(f64, f64)>>>>,
+    /// Told when a pane's edge has been dragged, so the indicator it belongs
+    /// to can be stored at its new height.
+    on_pane_resize: Rc<RefCell<Option<Box<dyn Fn(u32, f64)>>>>,
 }
 
 impl ChartView {
@@ -238,6 +309,7 @@ impl ChartView {
             state,
             on_hover,
             on_context_menu: Rc::new(RefCell::new(None)),
+            on_pane_resize: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
         view.wire_pointer();
@@ -286,6 +358,10 @@ impl ChartView {
 
     /// What to do when the chart itself is right-clicked. The axis keeps its
     /// own menu.
+    pub fn set_pane_resize_handler(&self, handler: impl Fn(u32, f64) + 'static) {
+        *self.on_pane_resize.borrow_mut() = Some(Box::new(handler));
+    }
+
     pub fn set_context_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
         *self.on_context_menu.borrow_mut() = Some(Box::new(handler));
     }
@@ -371,6 +447,13 @@ impl ChartView {
         let on_hover = self.on_hover.clone();
         motion.connect_motion(move |_, x, y| {
             state.borrow_mut().pointer = Some((x, y));
+            // The cursor is the only thing that says a line can be dragged, so
+            // it changes the moment the pointer is close enough to grab it.
+            let over_edge = {
+                let s = state.borrow();
+                layout(&s, area.width() as f64, area.height() as f64).edge_at(y).is_some()
+            };
+            area.set_cursor_from_name(Some(if over_edge { "ns-resize" } else { "default" }));
             notify_hover(&state, &on_hover, &area);
             area.queue_draw();
         });
@@ -453,6 +536,19 @@ impl ChartView {
         drag.connect_drag_begin(move |_, x, y| {
             let mut s = state.borrow_mut();
             let (first, visible) = s.slice();
+            // The edge wins over whatever region it crosses, because that is
+            // what the cursor was already promising.
+            let plan = layout(&s, area.width() as f64, area.height() as f64);
+            if let Some(id) = plan.edge_at(y) {
+                let share = s
+                    .indicators
+                    .iter()
+                    .find(|d| d.indicator.id == id)
+                    .and_then(|d| d.output.pane_height())
+                    .unwrap_or(0.18);
+                s.drag = Some(Drag::PaneEdge { id, share, total_h: plan.total_h });
+                return;
+            }
             s.drag = Some(
                 match region_at(x, y, area.width() as f64, area.height() as f64) {
                     Region::PriceAxis => {
@@ -506,6 +602,14 @@ impl ChartView {
                     let factor = 2f64.powf(offset_y / DRAG_PER_DOUBLING);
                     s.price_zoom = (zoom * factor).clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
                 }
+                Drag::PaneEdge { id, share, total_h } => {
+                    // Pulling the line up grows the pane under it: the boundary
+                    // goes where the hand goes.
+                    let next = (share - offset_y / total_h).clamp(0.05, 0.6);
+                    if let Some(drawn) = s.indicators.iter_mut().find(|d| d.indicator.id == id) {
+                        drawn.output.set_pane_height(next);
+                    }
+                }
                 Drag::TimeScale { visible } => {
                     // Dragging left compresses: more time on screen.
                     let factor = 2f64.powf(-offset_x / DRAG_PER_DOUBLING);
@@ -519,8 +623,21 @@ impl ChartView {
         });
 
         let state = self.state.clone();
+        let on_resize = self.on_pane_resize.clone();
         drag.connect_drag_end(move |_, _, _| {
-            state.borrow_mut().drag = None;
+            let finished = state.borrow_mut().drag.take();
+            // Stored when the drag ends rather than on every motion event,
+            // which would be a database write per pixel of travel.
+            let Some(Drag::PaneEdge { id, .. }) = finished else { return };
+            let share = state
+                .borrow()
+                .indicators
+                .iter()
+                .find(|d| d.indicator.id == id)
+                .and_then(|d| d.output.pane_height());
+            if let (Some(share), Some(handler)) = (share, on_resize.borrow().as_ref()) {
+                handler(id, share);
+            }
         });
 
         self.area.add_controller(drag);
@@ -672,30 +789,8 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     }
     let bars = &state.bars[first..first + visible];
 
-    let plot_x = PAD;
-    let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
-    let plot_y = PAD;
-    let total_h = (height - TIME_AXIS_H - PAD).max(1.0);
-    // Volume, RSI and ATR each want a strip of their own, stacked under the
-    // price in the order they are listed. Price keeps most of the chart
-    // whatever is stacked below it: three panes sharing the window equally
-    // would leave the candles — the thing you came for — as a sliver.
-    let panes: Vec<(&Drawn, f64)> = state
-        .indicators
-        .iter()
-        .filter(|drawn| drawn.indicator.visible)
-        .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn, share)))
-        .collect();
-    let wanted: f64 = panes.iter().map(|(_, share)| share).sum();
-    let squeeze = if wanted > 1.0 - MIN_PRICE_SHARE {
-        (1.0 - MIN_PRICE_SHARE) / wanted
-    } else {
-        1.0
-    };
-    let pane_heights: Vec<f64> =
-        panes.iter().map(|(_, share)| (total_h * share * squeeze).min(220.0)).collect();
-    let panes_h: f64 = pane_heights.iter().sum::<f64>() + PANE_GAP * panes.len() as f64;
-    let price_h = (total_h - panes_h).max(1.0);
+    let plan = layout(state, width, height);
+    let (plot_x, plot_w, plot_y, price_h) = (plan.plot_x, plan.plot_w, plan.plot_y, plan.price_h);
 
     // Price scale over what is visible, padded so candles never touch the
     // edges.
@@ -737,19 +832,38 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     draw_candles(cr, state, bars, plot_x, bar_w, &to_y);
     draw_indicator_lines(cr, state, first, visible, plot_x, bar_w, &to_y);
 
-    let mut pane_y = plot_y + price_h + PANE_GAP;
-    for ((drawn, _), pane_h) in panes.iter().zip(&pane_heights) {
+    for pane_box in &plan.panes {
+        let Some(drawn) = state.indicators.iter().find(|d| d.indicator.id == pane_box.id) else {
+            continue;
+        };
+        draw_pane_edge(cr, state, &plan, pane_box);
         match &drawn.output {
-            Output::Volume { .. } if max_volume > 0.0 => {
-                draw_volume(cr, state, bars, plot_x, bar_w, pane_y, *pane_h, max_volume);
+            Output::Volume { .. } => {
+                if max_volume > 0.0 {
+                    draw_volume(
+                        cr, state, bars, plot_x, bar_w, pane_box.top, pane_box.height, max_volume,
+                    );
+                }
+                // Named like the others now that it is one strip among several.
+                // Three unlabelled boxes under a chart is a puzzle.
+                draw_pane_name(cr, state, drawn, plot_x, pane_box.top);
             }
             Output::Pane(pane) => draw_pane(
-                cr, state, pane, drawn, plot_x, plot_w, bar_w, pane_y, *pane_h, width, first,
+                cr,
+                state,
+                pane,
+                drawn,
+                plot_x,
+                plot_w,
+                bar_w,
+                pane_box.top,
+                pane_box.height,
+                width,
+                first,
                 visible,
             ),
             _ => {}
         }
-        pane_y += pane_h + PANE_GAP;
     }
 
     draw_last_price(cr, state, plot_x, plot_w, width, decimals, &to_y);
@@ -1033,6 +1147,32 @@ fn draw_volume(
     }
 }
 
+/// The line between the chart and a pane, or between two panes.
+///
+/// Faint on purpose: it is there to say where one box ends and the next
+/// begins, not to be read. It is also the handle — the pointer turns into a
+/// resize cursor within a few pixels of it — so it has to be visible enough to
+/// aim at.
+fn draw_pane_edge(cr: &cairo::Context, state: &State, plan: &Layout, pane: &PaneBox) {
+    let y = Layout::edge(pane).round() + 0.5;
+    cr.save().ok();
+    cr.set_line_width(1.0);
+    colors::set_source_alpha(cr, &state.theme.ui.border, 0.9);
+    cr.move_to(plan.plot_x, y);
+    cr.line_to(plan.plot_x + plan.plot_w, y);
+    let _ = cr.stroke();
+    cr.restore().ok();
+}
+
+/// What a strip is, written in its own top-left corner.
+fn draw_pane_name(cr: &cairo::Context, state: &State, drawn: &Drawn, plot_x: f64, top: f64) {
+    cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(10.0);
+    colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.8);
+    cr.move_to(plot_x + 2.0, top + 11.0);
+    let _ = cr.show_text(&drawn.indicator.label_for(state.timeframe));
+}
+
 /// One indicator in its own strip: guides, then the line.
 ///
 /// The strip carries its own name because the legend at the top cannot say
@@ -1119,11 +1259,7 @@ fn draw_pane(
     }
     let _ = width;
 
-    // Its name, top left of its own strip.
-    cr.set_font_size(10.0);
-    colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.8);
-    cr.move_to(plot_x + 2.0, top + 11.0);
-    let _ = cr.show_text(&drawn.indicator.label_for(state.timeframe));
+    draw_pane_name(cr, state, drawn, plot_x, top);
 
     // The line last, over its own furniture.
     let stroke = drawn.indicator.stroke;
