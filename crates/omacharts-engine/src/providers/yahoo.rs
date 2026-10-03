@@ -39,10 +39,18 @@ const CAPABILITIES: &[Capability] = &[
     Capability { timeframe: Timeframe::days(1), history_days: None },
 ];
 
-/// Smallest gap between two requests. Yahoo tolerates a steady trickle and
-/// punishes bursts, and nothing in this app needs to be fast about fetching —
-/// the cache is what makes it feel fast.
+/// Smallest gap between two requests the user is waiting on.
+///
+/// Yahoo tolerates a steady trickle and punishes bursts, and nothing here
+/// needs to be fast about fetching — the cache is what makes it feel fast.
 const MIN_GAP: Duration = Duration::from_millis(350);
+
+/// Smallest gap between two requests nobody asked for.
+///
+/// Speculative work gets a much longer leash. Filling a watchlist is a
+/// one-time cost per symbol — the bars are kept forever — so there is no
+/// reason to spend the request budget quickly, and every reason not to.
+const MIN_GAP_SPECULATIVE: Duration = Duration::from_millis(2_000);
 
 /// How long to stop asking entirely after a 429, and the ceiling that repeated
 /// throttling climbs to.
@@ -66,17 +74,22 @@ impl Throttle {
         Throttle { last_request: None, cooldown_until: None, cooldown: COOLDOWN_START }
     }
 
-    /// `Err` when we are still in a cooldown and must not ask.
-    fn admit(&mut self, now: Instant) -> Result<Option<Duration>, ()> {
+    /// `Err` when we must not ask at all right now.
+    ///
+    /// Speculative work is refused for the whole cooldown *and* paced further
+    /// apart the rest of the time. When Yahoo is unhappy, the thing to stop is
+    /// the work nobody asked for — not the chart someone is looking at.
+    fn admit(&mut self, now: Instant, speculative: bool) -> Result<Option<Duration>, ()> {
         if let Some(until) = self.cooldown_until {
             if now < until {
                 return Err(());
             }
             self.cooldown_until = None;
         }
+        let gap = if speculative { MIN_GAP_SPECULATIVE } else { MIN_GAP };
         let wait = self.last_request.and_then(|last| {
             let since = now.saturating_duration_since(last);
-            (since < MIN_GAP).then(|| MIN_GAP - since)
+            (since < gap).then(|| gap - since)
         });
         Ok(wait)
     }
@@ -263,13 +276,36 @@ impl Provider for Yahoo {
         timeframe: Timeframe,
         since: Option<i64>,
     ) -> Result<Vec<Bar>, ProviderError> {
+        self.bars_paced(symbol, timeframe, since, false)
+    }
+
+    fn bars_speculative(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        since: Option<i64>,
+    ) -> Result<Vec<Bar>, ProviderError> {
+        self.bars_paced(symbol, timeframe, since, true)
+    }
+}
+
+impl Yahoo {
+    fn bars_paced(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        since: Option<i64>,
+        speculative: bool,
+    ) -> Result<Vec<Bar>, ProviderError> {
         let url = Self::url(symbol, timeframe, since)?;
 
         // Sitting out a cooldown is not a failure worth retrying — the caller
         // shows what it already has.
         let wait = {
             let mut throttle = self.throttle.lock().unwrap_or_else(|e| e.into_inner());
-            throttle.admit(Instant::now()).map_err(|()| ProviderError::RateLimited)?
+            throttle
+                .admit(Instant::now(), speculative)
+                .map_err(|()| ProviderError::RateLimited)?
         };
         if let Some(wait) = wait {
             std::thread::sleep(wait);
@@ -553,15 +589,29 @@ mod tests {
         let mut throttle = Throttle::new();
         let t0 = Instant::now();
 
-        assert_eq!(throttle.admit(t0), Ok(None), "first request waits for nothing");
+        assert_eq!(throttle.admit(t0, false), Ok(None), "first request waits for nothing");
         throttle.record_request(t0);
 
         // Straight away: told to wait out the rest of the gap.
-        let wait = throttle.admit(t0).unwrap().expect("should wait");
+        let wait = throttle.admit(t0, false).unwrap().expect("should wait");
         assert!(wait <= MIN_GAP && wait > Duration::ZERO, "{wait:?}");
 
         // Once the gap has passed: no wait.
-        assert_eq!(throttle.admit(t0 + MIN_GAP).unwrap(), None);
+        assert_eq!(throttle.admit(t0 + MIN_GAP, false).unwrap(), None);
+    }
+
+    #[test]
+    fn speculative_work_is_paced_far_further_apart() {
+        let mut throttle = Throttle::new();
+        let t0 = Instant::now();
+        throttle.record_request(t0);
+
+        // The chart someone is waiting on may go again after the short gap.
+        assert_eq!(throttle.admit(t0 + MIN_GAP, false).unwrap(), None);
+        // Work nobody asked for waits much longer.
+        let wait = throttle.admit(t0 + MIN_GAP, true).unwrap().expect("should wait");
+        assert!(wait > Duration::from_millis(500), "{wait:?}");
+        assert_eq!(throttle.admit(t0 + MIN_GAP_SPECULATIVE, true).unwrap(), None);
     }
 
     #[test]
@@ -570,9 +620,9 @@ mod tests {
         let t0 = Instant::now();
         throttle.record_throttled(t0);
 
-        assert_eq!(throttle.admit(t0), Err(()), "inside the cooldown");
+        assert_eq!(throttle.admit(t0, false), Err(()), "inside the cooldown");
         assert_eq!(
-            throttle.admit(t0 + COOLDOWN_START + Duration::from_secs(1)),
+            throttle.admit(t0 + COOLDOWN_START + Duration::from_secs(1), false),
             Ok(None),
             "cooldown expired"
         );

@@ -27,6 +27,10 @@ const TOLERANCE: f64 = 0.0005;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Request {
+    /// True when nobody asked for this yet. Providers pace speculative work
+    /// further apart and refuse it outright while being throttled, so filling
+    /// the rail can never cost someone the chart they are looking at.
+    pub speculative: bool,
     /// Cache key: `provider:symbol`.
     pub key: String,
     /// The provider's own spelling.
@@ -173,6 +177,13 @@ fn best(jobs: &[Job]) -> Option<usize> {
 }
 
 fn run<P: Provider>(request: &Request, provider: &P) -> Response {
+    let fetch = |symbol: &str, timeframe, since| {
+        if request.speculative {
+            provider.bars_speculative(symbol, timeframe, since)
+        } else {
+            provider.bars(symbol, timeframe, since)
+        }
+    };
     let native = request.timeframe.native();
     let Ok(store) = Store::open() else {
         return Response::Failed {
@@ -191,7 +202,7 @@ fn run<P: Provider>(request: &Request, provider: &P) -> Response {
     // one asks from a few bars before where it ends.
     let since = coverage.map(|c| c.last_ts - OVERLAP * native.seconds());
 
-    match provider.bars(&request.symbol, native, since) {
+    match fetch(&request.symbol, native, since) {
         Ok(fresh) if fresh.is_empty() => Response::Bars {
             key: request.key.clone(),
             timeframe: native,
@@ -202,7 +213,7 @@ fn run<P: Provider>(request: &Request, provider: &P) -> Response {
             // from under us and cannot be trusted. Start over.
             if !cached.is_empty() && !overlap_agrees(&cached, &fresh) {
                 store.drop_series(&request.key, native);
-                let full = match provider.bars(&request.symbol, native, None) {
+                let full = match fetch(&request.symbol, native, None) {
                     Ok(full) => full,
                     // We dropped the cache and could not refill it; report
                     // honestly rather than showing a series we know is stale.
@@ -307,6 +318,7 @@ mod tests {
                 key: key.into(),
                 symbol: key.into(),
                 timeframe: Timeframe::days(1),
+                speculative: false,
             },
             priority,
             seq,

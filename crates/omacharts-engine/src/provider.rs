@@ -76,6 +76,22 @@ pub trait Provider: Send + Sync {
         since: Option<i64>,
     ) -> Result<Vec<Bar>, ProviderError>;
 
+    /// Bars for something nobody asked for yet.
+    ///
+    /// Same data, lower claim on the provider: implementations are expected to
+    /// pace this further apart and to refuse it outright while they are being
+    /// throttled, so filling a watchlist in the background can never cost
+    /// someone the chart they are actually looking at. Defaults to a normal
+    /// fetch for providers with no rate limit worth respecting.
+    fn bars_speculative(
+        &self,
+        symbol: &str,
+        timeframe: Timeframe,
+        since: Option<i64>,
+    ) -> Result<Vec<Bar>, ProviderError> {
+        self.bars(symbol, timeframe, since)
+    }
+
     /// Does this provider serve the timeframe natively?
     fn serves(&self, timeframe: Timeframe) -> bool {
         self.capabilities().iter().any(|c| c.timeframe == timeframe)

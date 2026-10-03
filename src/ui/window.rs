@@ -32,6 +32,14 @@ use gtk::gio;
 /// often enough to feel immediate.
 const THEME_POLL_SECONDS: u32 = 2;
 
+/// How many symbols either side of the selection to fetch ahead.
+///
+/// Small on purpose. Every request is one someone may never want, and the
+/// window moves with the selection — arrow up and the two above you are
+/// already being fetched. Filling an entire watchlist up front is fifty
+/// requests in a burst for a list most of which never gets looked at.
+const PREFETCH_WINDOW: usize = 3;
+
 const LAST_SYMBOL: &str = "last_symbol";
 const LAST_SUFFIX: &str = "last_suffix";
 const LAST_TIMEFRAME: &str = "last_timeframe";
@@ -141,13 +149,6 @@ impl Window {
         this.wire_theme_polling();
 
         this.restore_last_symbol();
-
-        // Fill the rest of the rail, but not until the window is actually up.
-        // Queuing it walks the whole watchlist and asks the database what it
-        // already has, and none of that belongs between launch and first paint.
-        let deferred = this.clone();
-        glib::idle_add_local_once(move || deferred.prefetch_watchlist());
-
         this
     }
 
@@ -460,49 +461,24 @@ impl Window {
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.highlight(&instrument);
         }
-        // The chart on screen overtakes everything queued behind it. Queued
-        // prefetches are kept rather than dropped — they are still symbols we
-        // want, and re-queueing only reorders them by their new distance.
+        // The chart on screen overtakes everything queued behind it, and the
+        // old neighbourhood is forgotten: those symbols are no longer the ones
+        // a keypress away.
         self.chart.set_loading(cached_was_empty);
-        self.loader.fetch(Request { key, symbol, timeframe }, FOREGROUND);
+        self.loader.drop_prefetches();
+        self.loader
+            .fetch(Request { key, symbol, timeframe, speculative: false }, FOREGROUND);
         self.prefetch_neighbours(&instrument, timeframe);
     }
 
-    /// Queue every symbol on the rail we have no bars for.
+
+    /// Fetch ahead around the selection, nearest first.
     ///
-    /// Called once the window is up, and whenever the rail changes. Browsing is
-    /// faster than fetching, so waiting until something is selected is already
-    /// too late; this fills the whole list in the background while you are
-    /// looking at the first chart.
-    pub fn prefetch_watchlist(self: &Rc<Self>) {
-        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
-        let timeframe = *self.timeframe.borrow();
-        let daily = Timeframe::days(1);
-
-        for (index, instrument) in watchlist.flat_order().iter().enumerate() {
-            let Some(symbol) = self.provider.symbol_for(instrument) else { continue };
-            let key = format!("{}:{symbol}", self.provider.id());
-            let rank = BACKGROUND + index as u32;
-
-            if self.store.coverage(&key, timeframe.native()).is_none() {
-                self.loader.fetch(
-                    Request { key: key.clone(), symbol: symbol.clone(), timeframe },
-                    rank,
-                );
-            }
-            // The rail's change column reads daily bars, so every row needs
-            // them even if you never open it.
-            if timeframe.native() != daily && self.store.coverage(&key, daily).is_none() {
-                self.loader.fetch(Request { key, symbol, timeframe: daily }, rank + 10_000);
-            }
-        }
-    }
-
-    /// Queue the rest of the watchlist, nearest to the current symbol first.
-    ///
-    /// This is what makes arrowing down the list feel instant: by the time you
-    /// press the key, the next few are already cached, and the ones after them
-    /// are being fetched in the order you are most likely to reach them.
+    /// This is what makes arrowing through the rail feel instant: by the time
+    /// you press the key the next one is already cached, and moving shifts the
+    /// window so the symbols now a keypress away are the ones being fetched.
+    /// Everything here is speculative, so the provider paces it apart and
+    /// drops it entirely if Yahoo starts refusing.
     fn prefetch_neighbours(self: &Rc<Self>, current: &Instrument, timeframe: Timeframe) {
         let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else {
             return;
@@ -515,24 +491,36 @@ impl Window {
             return;
         };
 
-        for (index, instrument) in order.iter().enumerate() {
+        let first = position.saturating_sub(PREFETCH_WINDOW);
+        let last = (position + PREFETCH_WINDOW).min(order.len().saturating_sub(1));
+
+        for index in first..=last {
             if index == position {
                 continue;
             }
+            let instrument = &order[index];
             let Some(symbol) = self.provider.symbol_for(instrument) else { continue };
-            let distance = index.abs_diff(position) as u32;
             let key = format!("{}:{symbol}", self.provider.id());
+            let distance = index.abs_diff(position) as u32;
 
-            // The chart you would see if you pressed an arrow, then the one
-            // after that. Priority 0 belongs to what is on screen.
-            self.loader.fetch(Request { key: key.clone(), symbol: symbol.clone(), timeframe }, distance);
-
-            // The watchlist's change column reads daily bars, so a symbol you
-            // never open still needs them — but only after the chart data.
-            if timeframe.native() != Timeframe::days(1) {
+            if self.store.coverage(&key, timeframe.native()).is_none() {
                 self.loader.fetch(
-                    Request { key, symbol, timeframe: Timeframe::days(1) },
-                    distance + order.len() as u32,
+                    Request {
+                        key: key.clone(),
+                        symbol: symbol.clone(),
+                        timeframe,
+                        speculative: true,
+                    },
+                    distance,
+                );
+            }
+            // The rail's change column reads daily bars, so a neighbour needs
+            // them even if you never open it — but after its chart data.
+            let daily = Timeframe::days(1);
+            if timeframe.native() != daily && self.store.coverage(&key, daily).is_none() {
+                self.loader.fetch(
+                    Request { key, symbol, timeframe: daily, speculative: true },
+                    distance + BACKGROUND,
                 );
             }
         }
