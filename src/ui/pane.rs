@@ -228,11 +228,17 @@ impl ChartPane {
     }
 }
 
-/// A chain: two rounded capsules side by side, joined across the middle.
+/// A chain: two rounded links, overlapping, on the diagonal.
+///
+/// Flat and side by side they read as a Venn diagram — two ovals that happen
+/// to overlap. On the diagonal the same two shapes read as a chain, which is
+/// why every chain icon is drawn that way, and it survives being shrunk to
+/// sixteen pixels where the flat version does not. Checked by rendering all
+/// three at true size and looking at them.
 fn chain_icon() -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
-    area.set_content_width(16);
-    area.set_content_height(16);
+    area.set_content_width(18);
+    area.set_content_height(18);
     area.set_draw_func(|area, cr, width, height| {
         let colour = area.color();
         cr.set_source_rgba(
@@ -242,27 +248,32 @@ fn chain_icon() -> gtk::DrawingArea {
             colour.alpha() as f64,
         );
         let (w, h) = (width as f64, height as f64);
-        let mid = h / 2.0;
-        let thickness = (h / 5.5).max(1.5);
-        cr.set_line_width(thickness);
-        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        let link_w = w * 0.56;
+        let link_h = h * 0.36;
+        let overlap = link_h * 0.34;
+        cr.set_line_width(1.3);
 
-        // Two links, each a short stroke, with the gap between them bridged by
-        // a thinner bar — the shape you read as a chain at sixteen pixels.
-        let inset = w * 0.12;
-        let gap = w * 0.09;
-        cr.move_to(inset, mid);
-        cr.line_to(w / 2.0 - gap, mid);
-        cr.move_to(w / 2.0 + gap, mid);
-        cr.line_to(w - inset, mid);
-        let _ = cr.stroke();
-
-        cr.set_line_width(thickness * 0.62);
-        cr.move_to(w / 2.0 - gap * 1.6, mid);
-        cr.line_to(w / 2.0 + gap * 1.6, mid);
-        let _ = cr.stroke();
+        cr.save().ok();
+        cr.translate(w / 2.0, h / 2.0);
+        cr.rotate(-std::f64::consts::FRAC_PI_4);
+        let total = link_w * 2.0 - overlap;
+        for x in [-total / 2.0, -total / 2.0 + link_w - overlap] {
+            rounded(cr, x, -link_h / 2.0, link_w, link_h, link_h / 2.0);
+            let _ = cr.stroke();
+        }
+        cr.restore().ok();
     });
     area
+}
+
+fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -std::f64::consts::FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, std::f64::consts::FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, std::f64::consts::FRAC_PI_2, std::f64::consts::PI);
+    cr.arc(x + r, y + r, r, std::f64::consts::PI, 1.5 * std::f64::consts::PI);
+    cr.close_path();
 }
 
 /// The legend stays out of the way, so an unlinked chart's toggle is nearly
