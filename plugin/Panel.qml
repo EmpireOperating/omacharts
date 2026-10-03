@@ -281,7 +281,10 @@ Panel {
               }
 
               Sparkline {
-                visible: modelData.spark && modelData.spark.length > 1
+                // Coerced rather than left as the array itself: a row with no
+                // series hands QML an undefined where it wants a bool, and it
+                // complains once per row per repaint.
+                visible: !!modelData.spark && modelData.spark.length > 1
                 Layout.preferredWidth: Style.space(52)
                 Layout.preferredHeight: Style.space(22)
                 points: modelData.spark || []
