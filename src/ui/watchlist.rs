@@ -22,7 +22,10 @@ use crate::ui::search::SymbolSearch;
 
 /// What a new install starts with, so the rail is never an empty column.
 pub const DEFAULTS: &[(&str, &[&str])] = &[
-    ("Indexes", &["GSPC", "NDX", "DJI", "VIX"]),
+    // The liquid ETFs rather than the indices themselves: they are what people
+    // actually watch and trade, they carry real volume so the profile and the
+    // volume pane have something to show, and an index has neither.
+    ("Indexes", &["SPY", "QQQ", "DIA", "VIX"]),
     ("US Stocks", &["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD"]),
     ("Futures", &["ES", "NQ", "GC", "CL"]),
     ("Currencies", &["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF"]),
