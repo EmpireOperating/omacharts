@@ -45,6 +45,10 @@ pub enum Response {
 /// The chart you are looking at. Jumps every queued prefetch.
 pub const FOREGROUND: u32 = 0;
 
+/// Where speculative work starts, leaving room beneath it for the symbols
+/// immediately around the selection.
+pub const BACKGROUND: u32 = 1_000;
+
 /// Fetches bars on one worker thread, nearest-wanted first.
 ///
 /// One thread, not one per request, for two reasons. The provider is paced —

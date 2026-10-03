@@ -9,6 +9,7 @@
 //! answer arrives.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -18,7 +19,7 @@ use omacharts_engine::{
     resample, Direction, Instrument, Provider, SearchIndex, Timeframe,
 };
 
-use crate::loader::{Loader, Request, Response, FOREGROUND};
+use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::chart::{ChartView, Hover};
@@ -47,6 +48,13 @@ pub struct Window {
     provider: Rc<Yahoo>,
     loader: Loader,
     current: Rc<RefCell<Option<Instrument>>>,
+    /// Folded series, keyed by cache key and the resolution shown.
+    ///
+    /// The bars are the chart — there is nothing else to preload — so once a
+    /// symbol has been fetched, switching to it is a read and a draw. This
+    /// removes even the read, which is what makes arrowing back and forth over
+    /// the same few symbols feel like nothing is happening at all.
+    series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
     timeframe: Rc<RefCell<Timeframe>>,
     symbol_button: gtk::Button,
     readout: gtk::Label,
@@ -96,6 +104,7 @@ impl Window {
             provider: Rc::new(Yahoo::new()),
             loader,
             current: Rc::new(RefCell::new(None)),
+            series: Rc::new(RefCell::new(HashMap::new())),
             timeframe: Rc::new(RefCell::new(
                 store
                     .setting(LAST_TIMEFRAME)
@@ -132,6 +141,8 @@ impl Window {
         this.wire_theme_polling();
 
         this.restore_last_symbol();
+        // Fill the rest of the rail while the first chart is being looked at.
+        this.prefetch_watchlist();
         this
     }
 
@@ -422,8 +433,21 @@ impl Window {
             .set_setting(LAST_SUFFIX, instrument.suffix.as_deref().unwrap_or(""));
 
         // Cache first, so the chart is on screen before any request leaves.
-        let cached = self.store.load_bars(&key, native);
-        self.paint(&instrument, timeframe, cached);
+        let memo = self.series.borrow().get(&(key.clone(), timeframe)).cloned();
+        let shown = match memo {
+            Some(bars) => {
+                let empty = bars.is_empty();
+                self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
+                empty
+            }
+            None => {
+                let cached = self.store.load_bars(&key, native);
+                let empty = cached.is_empty();
+                self.paint(&key, &instrument, timeframe, cached);
+                empty
+            }
+        };
+        let cached_was_empty = shown;
         self.chart.set_stale(false);
 
         // The chart on screen overtakes everything queued behind it, and the
@@ -431,9 +455,42 @@ impl Window {
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.highlight(&instrument);
         }
-        self.loader.drop_prefetches();
+        // The chart on screen overtakes everything queued behind it. Queued
+        // prefetches are kept rather than dropped — they are still symbols we
+        // want, and re-queueing only reorders them by their new distance.
+        self.chart.set_loading(cached_was_empty);
         self.loader.fetch(Request { key, symbol, timeframe }, FOREGROUND);
         self.prefetch_neighbours(&instrument, timeframe);
+    }
+
+    /// Queue every symbol on the rail we have no bars for.
+    ///
+    /// Called once the window is up, and whenever the rail changes. Browsing is
+    /// faster than fetching, so waiting until something is selected is already
+    /// too late; this fills the whole list in the background while you are
+    /// looking at the first chart.
+    pub fn prefetch_watchlist(self: &Rc<Self>) {
+        let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() else { return };
+        let timeframe = *self.timeframe.borrow();
+        let daily = Timeframe::days(1);
+
+        for (index, instrument) in watchlist.flat_order().iter().enumerate() {
+            let Some(symbol) = self.provider.symbol_for(instrument) else { continue };
+            let key = format!("{}:{symbol}", self.provider.id());
+            let rank = BACKGROUND + index as u32;
+
+            if self.store.coverage(&key, timeframe.native()).is_none() {
+                self.loader.fetch(
+                    Request { key: key.clone(), symbol: symbol.clone(), timeframe },
+                    rank,
+                );
+            }
+            // The rail's change column reads daily bars, so every row needs
+            // them even if you never open it.
+            if timeframe.native() != daily && self.store.coverage(&key, daily).is_none() {
+                self.loader.fetch(Request { key, symbol, timeframe: daily }, rank + 10_000);
+            }
+        }
     }
 
     /// Queue the rest of the watchlist, nearest to the current symbol first.
@@ -483,26 +540,49 @@ impl Window {
         let Some(instrument) = instrument else { return };
         let Some(symbol) = self.provider.symbol_for(&instrument) else { return };
         if key != format!("{}:{symbol}", self.provider.id()) {
+            // Something we prefetched. Not our chart, but the rail's change
+            // column may now have numbers it did not have a moment ago.
+            if let Some(watchlist) = self.watchlist.borrow().as_ref() {
+                watchlist.rebuild();
+            }
             return;
         }
         let timeframe = *self.timeframe.borrow();
         if timeframe.native() != native {
             return;
         }
-        self.paint(&instrument, timeframe, bars);
+        self.paint(key, &instrument, timeframe, bars);
         self.chart.set_stale(stale);
+        self.chart.set_loading(false);
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.rebuild();
         }
     }
 
-    fn paint(self: &Rc<Self>, instrument: &Instrument, timeframe: Timeframe, bars: Vec<omacharts_engine::Bar>) {
+    /// Fold to the shown resolution, memoise, and draw.
+    fn paint(
+        self: &Rc<Self>,
+        key: &str,
+        instrument: &Instrument,
+        timeframe: Timeframe,
+        bars: Vec<omacharts_engine::Bar>,
+    ) {
         let bars = if timeframe.is_derived() {
             resample(&bars, timeframe, instrument.session_origin)
         } else {
             bars
         };
-        self.chart.set_series(instrument.clone(), timeframe, bars);
+        let bars = Rc::new(bars);
+        {
+            let mut series = self.series.borrow_mut();
+            // A watchlist's worth of series is a couple of megabytes; past that
+            // this is holding onto symbols nobody is going back to.
+            if series.len() > 96 {
+                series.clear();
+            }
+            series.insert((key.to_string(), timeframe), bars.clone());
+        }
+        self.chart.set_series(instrument.clone(), timeframe, (*bars).clone());
     }
 
     fn restore_last_symbol(self: &Rc<Self>) {

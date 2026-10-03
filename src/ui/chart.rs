@@ -52,6 +52,7 @@ struct State {
     anchored: bool,
     drag_origin: Option<(usize, f64)>,
     stale: bool,
+    loading: bool,
 }
 
 impl State {
@@ -95,6 +96,7 @@ impl ChartView {
             anchored: true,
             drag_origin: None,
             stale: false,
+            loading: false,
         }));
         let on_hover: Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>> = Rc::new(RefCell::new(None));
 
@@ -133,6 +135,16 @@ impl ChartView {
 
     pub fn set_stale(&self, stale: bool) {
         self.state.borrow_mut().stale = stale;
+        self.area.queue_draw();
+    }
+
+    /// Whether a fetch is outstanding for what is on screen.
+    ///
+    /// An empty chart that is still loading and an empty chart that came back
+    /// empty are different things, and telling the user they are the same is
+    /// how "no data" ends up meaning nothing.
+    pub fn set_loading(&self, loading: bool) {
+        self.state.borrow_mut().loading = loading;
         self.area.queue_draw();
     }
 
@@ -393,10 +405,10 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
 }
 
 fn draw_placeholder(cr: &cairo::Context, width: f64, height: f64, state: &State) {
-    let text = if state.instrument.is_none() {
-        "Press Ctrl+K to find a symbol"
-    } else {
-        "No data yet"
+    let text = match (&state.instrument, state.loading) {
+        (None, _) => "Press Ctrl+K to find a symbol",
+        (Some(_), true) => "Loading…",
+        (Some(_), false) => "No data for this symbol",
     };
     colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.8);
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);

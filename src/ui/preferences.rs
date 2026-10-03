@@ -108,33 +108,39 @@ fn theme_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     group.set_title("Theme");
     let theming = context.theming.borrow();
     group.set_description(Some(if theming.omarchy_available() {
-        "“Follow desktop” tracks your Omarchy theme as you change it. \
+        "“System” tracks your Omarchy theme as you change it. \
          The others are fixed, and stay put whatever the desktop does."
     } else {
         "How the whole app looks."
     }));
 
     let ids: Vec<String> = theming.themes().iter().map(|t| t.id.clone()).collect();
-    // The entry that tracks the desktop has to say so. Labelled with just the
-    // desktop theme's name it is indistinguishable from a fixed preset, and
-    // the difference between them is the whole point: one keeps changing.
+    // The entry that tracks the desktop is "System", the way every other
+    // setting on this platform spells it. Labelled with the desktop theme's
+    // own name it was indistinguishable from a fixed preset, and the
+    // difference between them is the whole point: one keeps changing.
     let names: Vec<String> = theming
         .themes()
         .iter()
         .map(|t| {
             if t.id == omacharts_engine::theme::OMARCHY_ID {
-                format!("Follow desktop · {}", t.name)
+                "System".to_string()
             } else {
                 t.name.clone()
             }
         })
         .collect();
+    let following = theming.theme().name.clone();
+    let is_system = theming.theme_id() == omacharts_engine::theme::OMARCHY_ID;
     let selected = ids.iter().position(|id| id == theming.theme_id()).unwrap_or(0);
     let source = theming.theme().source;
     drop(theming);
 
     let row = adw::ComboRow::new();
     row.set_title("Theme");
+    if is_system {
+        row.set_subtitle(&format!("Following {following}"));
+    }
     row.set_model(Some(&string_list(&names)));
     row.set_selected(selected as u32);
 
