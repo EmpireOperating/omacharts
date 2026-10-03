@@ -170,6 +170,7 @@ const LAST_SUFFIX: &str = "last_suffix";
 const LAST_TIMEFRAME: &str = "last_timeframe";
 const SHOW_WATCHLIST: &str = "show_watchlist";
 pub const SETTING_BAR_STYLE: &str = "bar_style";
+pub const SETTING_SHOW_GRID: &str = "show_grid";
 const SETTING_TIMEFRAMES: &str = "timeframes";
 
 pub struct Window {
@@ -335,6 +336,7 @@ impl Window {
 
         this.install_chart_actions();
         this.chart.set_bar_style(*this.bar_style.borrow());
+        this.chart.set_show_grid(this.show_grid());
         let menu_owner = this.clone();
         this.chart.set_context_menu_handler(move |x, y| menu_owner.chart_menu(x, y));
         this.wire_shortcuts();
@@ -1353,6 +1355,15 @@ impl Window {
 
     pub fn session(&self) -> Rc<RefCell<Session>> {
         self.session.clone()
+    }
+
+    pub fn show_grid(&self) -> bool {
+        self.store.setting_bool(SETTING_SHOW_GRID, true)
+    }
+
+    pub fn set_show_grid(self: &Rc<Self>, show: bool) {
+        self.store.set_setting_bool(SETTING_SHOW_GRID, show);
+        self.chart.set_show_grid(show);
     }
 
     pub fn bar_style(&self) -> BarStyle {

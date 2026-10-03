@@ -90,13 +90,28 @@ fn bars_group(window: &Rc<Window>) -> adw::PreferencesGroup {
         BarStyle::ALL.iter().position(|s| *s == window.bar_style()).unwrap_or(0) as u32
     );
 
-    let window = window.clone();
+    let window_for_style = window.clone();
     row.connect_selected_notify(move |row| {
         if let Some(style) = BarStyle::ALL.get(row.selected() as usize).copied() {
-            window.set_bar_style(style);
+            window_for_style.set_bar_style(style);
         }
     });
     group.add(&row);
+
+    let grid = adw::ActionRow::new();
+    grid.set_title("Gridlines");
+    grid.set_subtitle("The axes and their labels stay either way");
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(window.show_grid());
+    let window_for_grid = window.clone();
+    switch.connect_state_set(move |_, on| {
+        window_for_grid.set_show_grid(on);
+        glib::Propagation::Proceed
+    });
+    grid.add_suffix(&switch);
+    group.add(&grid);
+
     group
 }
 

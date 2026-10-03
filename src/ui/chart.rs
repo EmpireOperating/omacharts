@@ -74,6 +74,7 @@ struct State {
     drag: Option<Drag>,
     indicators: Vec<Drawn>,
     bar_style: BarStyle,
+    show_grid: bool,
     stale: bool,
     loading: bool,
     /// Multiplier on the auto-fitted price range. 1.0 shows exactly what the
@@ -219,6 +220,7 @@ impl ChartView {
             anchored: true,
             indicators: Vec::new(),
             bar_style: BarStyle::default(),
+            show_grid: true,
             drag: None,
             stale: false,
             loading: false,
@@ -264,6 +266,13 @@ impl ChartView {
             state.visible = 160;
         }
         drop(state);
+        self.area.queue_draw();
+    }
+
+    /// Show or hide the gridlines. The axes and their labels stay: without
+    /// them a chart is a shape with no scale.
+    pub fn set_show_grid(&self, show: bool) {
+        self.state.borrow_mut().show_grid = show;
         self.area.queue_draw();
     }
 
@@ -750,10 +759,12 @@ fn draw_price_grid(
     while price <= high {
         let y = to_y(price).round() + 0.5;
         if y > plot_y && y < plot_y + price_h {
-            colors::set_source(cr, &state.theme.ui.grid);
-            cr.move_to(plot_x, y);
-            cr.line_to(plot_x + plot_w, y);
-            let _ = cr.stroke();
+            if state.show_grid {
+                colors::set_source(cr, &state.theme.ui.grid);
+                cr.move_to(plot_x, y);
+                cr.line_to(plot_x + plot_w, y);
+                let _ = cr.stroke();
+            }
 
             colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
             cr.move_to(plot_x + plot_w + 6.0, y + 3.5);
@@ -812,10 +823,12 @@ fn draw_time_axis(
         if x < plot_x + 18.0 || x > plot_x + plot_w - 18.0 {
             continue;
         }
-        colors::set_source(cr, &state.theme.ui.grid);
-        cr.move_to(x.round() + 0.5, PAD);
-        cr.line_to(x.round() + 0.5, y);
-        let _ = cr.stroke();
+        if state.show_grid {
+            colors::set_source(cr, &state.theme.ui.grid);
+            cr.move_to(x.round() + 0.5, PAD);
+            cr.line_to(x.round() + 0.5, y);
+            let _ = cr.stroke();
+        }
 
         let label = format_axis_time(bar.ts, tick_seconds, state.timeframe.is_intraday());
         colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.9);
