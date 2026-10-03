@@ -586,6 +586,7 @@ impl Window {
             use gtk::gdk::Key;
             let ctrl = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+            let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
 
             match key {
                 // Find a symbol. Ctrl+K is what modern apps use; Ctrl+F is
@@ -610,7 +611,13 @@ impl Window {
                     this.chart.area.grab_focus();
                     return glib::Propagation::Stop;
                 }
-                Key::i if ctrl => {
+                // Ctrl+I goes to the indicators; Ctrl+Shift+, to the chart's
+                // settings, pairing with Ctrl+, for the app's.
+                Key::i | Key::I if ctrl => {
+                    this.open_indicators();
+                    return glib::Propagation::Stop;
+                }
+                Key::less | Key::comma if ctrl && shift => {
                     this.open_chart_settings();
                     return glib::Propagation::Stop;
                 }
@@ -841,6 +848,10 @@ impl Window {
         crate::ui::chart_settings::ChartSettings::present(self, self.store.clone());
     }
 
+    pub fn open_indicators(self: &Rc<Self>) {
+        crate::ui::chart_settings::ChartSettings::present_indicators(self, self.store.clone());
+    }
+
     /// Re-fold and repaint what is on screen, after something that changes
     /// how the bars are read rather than which bars they are.
     fn redraw_current(self: &Rc<Self>) {
@@ -875,7 +886,8 @@ impl Window {
                     ("Type a letter", "Find a symbol"),
                     ("Type a number", "Set the resolution"),
                     ("Ctrl+K", "Find a symbol"),
-                    ("Ctrl+I", "Chart settings and indicators"),
+                    ("Ctrl+I", "Indicators"),
+                    ("Ctrl+Shift+,", "Chart settings"),
                     ("Ctrl+,", "Preferences"),
                     ("? · Ctrl+?", "This list"),
                     ("Ctrl+W · Ctrl+Q", "Close"),
@@ -1283,6 +1295,7 @@ impl Window {
         menu.append_section(None, &sessions);
 
         let rest = gio::Menu::new();
+        rest.append(Some("Indicators…"), Some("chart.indicators"));
         rest.append(Some("Chart settings…"), Some("chart.settings"));
         menu.append_section(None, &rest);
 
@@ -1331,6 +1344,11 @@ impl Window {
         let this = self.clone();
         settings.connect_activate(move |_, _| this.open_chart_settings());
         actions.add_action(&settings);
+
+        let indicators = gio::SimpleAction::new("indicators", None);
+        let this = self.clone();
+        indicators.connect_activate(move |_, _| this.open_indicators());
+        actions.add_action(&indicators);
 
         let resolutions = gio::SimpleAction::new("edit-resolutions", None);
         let this = self.clone();

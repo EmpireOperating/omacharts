@@ -18,14 +18,33 @@ use crate::ui::window::Window;
 
 pub const SETTING_SESSION: &str = "chart_session";
 
+/// Where the dialog should land when it opens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Focus {
+    Chart,
+    Indicators,
+    Indicator(u32),
+}
+
 pub struct ChartSettings;
 
 impl ChartSettings {
+    /// The chart's own settings, on the first page.
     pub fn present(window: &Rc<Window>, store: Rc<Store>) {
-        ChartSettings::open(window, store, None);
+        ChartSettings::open(window, store, Focus::Chart);
     }
 
-    fn open(window: &Rc<Window>, store: Rc<Store>, focus: Option<u32>) {
+    /// Straight to the indicators.
+    pub fn present_indicators(window: &Rc<Window>, store: Rc<Store>) {
+        ChartSettings::open(window, store, Focus::Indicators);
+    }
+
+    /// Straight to one indicator's panel, for the gear beside it on the chart.
+    pub fn present_indicator(window: &Rc<Window>, store: Rc<Store>, id: u32) {
+        ChartSettings::open(window, store, Focus::Indicator(id));
+    }
+
+    fn open(window: &Rc<Window>, store: Rc<Store>, focus: Focus) {
         let dialog = adw::PreferencesDialog::new();
         dialog.set_title("Chart");
         dialog.set_content_width(560);
@@ -46,16 +65,17 @@ impl ChartSettings {
         rebuild_indicators(window, &dialog, &list);
 
         dialog.present(Some(&window.window));
-        if let Some(id) = focus {
-            open_indicator_panel(window, &dialog, &list, id);
+        match focus {
+            Focus::Chart => {}
+            Focus::Indicators => dialog.set_visible_page(&indicators_page),
+            Focus::Indicator(id) => {
+                dialog.set_visible_page(&indicators_page);
+                open_indicator_panel(window, &dialog, &list, id);
+            }
         }
     }
 
-    /// Open straight onto one indicator's panel, for the gear beside it on the
-    /// chart.
-    pub fn present_indicator(window: &Rc<Window>, store: Rc<Store>, id: u32) {
-        ChartSettings::open(window, store, Some(id));
-    }
+
 }
 
 fn bars_group(window: &Rc<Window>) -> adw::PreferencesGroup {
