@@ -149,25 +149,76 @@ Panel {
         RowLayout {
           Layout.fillWidth: true
 
-          Text {
-            text: "Watchlist"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(14)
-            font.bold: true
-            color: root.foreground
+          // The name of the app, and the way into it. It was a title doing
+          // nothing while a whole row at the bottom existed to say the same
+          // thing; this is one control instead of a label and a footer.
+          Item {
+            implicitWidth: openLabel.implicitWidth + Style.space(12)
+            implicitHeight: openLabel.implicitHeight + Style.space(6)
+
+            Rectangle {
+              anchors.fill: parent
+              radius: Style.space(6)
+              color: root.foreground
+              opacity: openHover.hovered ? 0.09 : 0
+              Behavior on opacity { NumberAnimation { duration: 90 } }
+            }
+
+            HoverHandler { id: openHover }
+            TapHandler { onTapped: { root.service.openApp(); root.close() } }
+
+            Text {
+              id: openLabel
+              anchors.centerIn: parent
+              text: "Omacharts"
+              font.family: root.fontFamily
+              font.pixelSize: Style.space(14)
+              font.bold: true
+              color: root.foreground
+            }
           }
 
           Item { Layout.fillWidth: true }
 
-          // A spinner rather than the word "updating": the refresh takes a
-          // moment and a word that long, appearing and disappearing beside the
-          // title, is more movement than the thing it is reporting.
-          BusyIndicator {
+          // A spinner rather than the word "updating": a word that long,
+          // appearing and disappearing beside the title, is more movement than
+          // the thing it is reporting.
+          //
+          // Drawn from rectangles rather than with BusyIndicator, which takes
+          // its appearance from a Qt Controls style the shell does not
+          // necessarily load — and an indicator that renders as nothing is
+          // worse than the word it replaced. Eight dots around a circle, each
+          // fainter than the one before, turning: the shape everything uses,
+          // and nothing here can fail to draw.
+          Item {
+            id: spinner
             visible: root.service.refreshing
-            running: visible
-            implicitWidth: Style.space(14)
-            implicitHeight: Style.space(14)
-            opacity: 0.45
+            implicitWidth: Style.space(13)
+            implicitHeight: Style.space(13)
+            Layout.alignment: Qt.AlignVCenter
+
+            Repeater {
+              model: 8
+              Rectangle {
+                width: Style.space(2.5)
+                height: width
+                radius: width / 2
+                color: root.dim
+                opacity: 0.25 + 0.75 * (index / 7)
+                x: spinner.width / 2 - width / 2
+                   + Math.cos(index * Math.PI / 4) * (spinner.width / 2 - width / 2)
+                y: spinner.height / 2 - height / 2
+                   + Math.sin(index * Math.PI / 4) * (spinner.height / 2 - height / 2)
+              }
+            }
+
+            RotationAnimation on rotation {
+              from: 0
+              to: 360
+              duration: 1200
+              loops: Animation.Infinite
+              running: spinner.visible
+            }
           }
         }
 
@@ -211,7 +262,7 @@ Panel {
             implicitHeight: modelData.header ? Style.space(24) : Style.space(40)
 
             Text {
-              visible: modelData.header
+              visible: !!modelData && !!modelData.header
               anchors.left: parent.left
               anchors.bottom: parent.bottom
               anchors.bottomMargin: Style.space(4)
@@ -227,7 +278,7 @@ Panel {
               anchors.leftMargin: -Style.space(6)
               anchors.rightMargin: -Style.space(6)
               radius: Style.space(6)
-              visible: !modelData.header
+              visible: !!modelData && !modelData.header
               color: root.foreground
               opacity: index === root.selectedIndex || hover.hovered ? 0.07 : 0
               Behavior on opacity { NumberAnimation { duration: 90 } }
@@ -235,12 +286,12 @@ Panel {
 
             HoverHandler {
               id: hover
-              enabled: !modelData.header
+              enabled: !!modelData && !modelData.header
               onHoveredChanged: if (hovered) root.selectedIndex = index
             }
 
             TapHandler {
-              enabled: !modelData.header
+              enabled: !!modelData && !modelData.header
               onTapped: {
                 root.service.openApp(modelData.symbol, modelData.suffix)
                 root.close()
@@ -248,7 +299,10 @@ Panel {
             }
 
             RowLayout {
-              visible: !modelData.header
+              // Coerced: a Repeater hands the delegate an undefined modelData
+              // for an instant while the model is being replaced, and QML
+              // complains once per row every time the list refreshes.
+              visible: !modelData || !modelData.header
               anchors.fill: parent
               spacing: Style.space(8)
 
@@ -326,37 +380,6 @@ Panel {
           }
         }
 
-        Rectangle {
-          Layout.fillWidth: true
-          implicitHeight: 1
-          color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
-        }
-
-        Item {
-          Layout.fillWidth: true
-          implicitHeight: Style.space(32)
-
-          Rectangle {
-            anchors.fill: parent
-            anchors.leftMargin: -Style.space(6)
-            anchors.rightMargin: -Style.space(6)
-            radius: Style.space(6)
-            color: root.foreground
-            opacity: openHover.hovered ? 0.07 : 0
-            Behavior on opacity { NumberAnimation { duration: 90 } }
-          }
-
-          HoverHandler { id: openHover }
-          TapHandler { onTapped: { root.service.openApp(); root.close() } }
-
-          Text {
-            anchors.centerIn: parent
-            text: "Open Omacharts"
-            font.family: root.fontFamily
-            font.pixelSize: Style.space(12)
-            color: root.foreground
-          }
-        }
       }
     }
   }
