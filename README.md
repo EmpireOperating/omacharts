@@ -4,7 +4,7 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 
 <p align="center">
   <a href="https://www.youtube.com/watch?v=uetKLwfoUrM">
-    <img src="assets/examples/video-poster.jpg" width="100%" alt="Watch Omacharts on YouTube">
+    <img src="https://img.youtube.com/vi/uetKLwfoUrM/maxresdefault.jpg" width="100%" alt="Watch Omacharts on YouTube">
   </a>
 </p>
 
