@@ -67,8 +67,7 @@ command surface in a form a script can read.
 ## From an agent
 
 Any agent can drive this app as well as a person can: `omacharts surface --json`
-describes every command and argument in a form meant to be parsed, and
-[AGENTS.md](AGENTS.md) covers the conventions, which Claude and Codex both read.
+describes every command and argument in a form meant to be parsed.
 
 What is left is discovery, so Omacharts ships a skill that makes an agent reach
 for it when you say "what's semis doing" or "set me up for the open". It

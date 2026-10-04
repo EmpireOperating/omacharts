@@ -1,6 +1,19 @@
 ---
 name: omacharts
-description: Drive Omacharts, the market-charting app for Omarchy, from the `omacharts` command — put symbols on screen, build and rearrange chart layouts, and read back what the user is looking at. Use it whenever somebody asks about a market or about their own charts: "what's semis doing", "pull up gold on the 15 minute", "chart SPY and QQQ side by side", "set me up for the open", "a 2x2 of the majors with RSI on each, linked", "put a 200-day average on this", "add AMD to my semis list", "what have I got open". Also for indicators (moving average, VWAP, volume profile, RSI, ATR), resolutions and sessions, bar styles and colours, watchlists and their sections, chartbooks, link groups, the instrument search, and the cached price data. Use it for any mention of omacharts, and whenever the user speaks about charts, watchlists, chartbooks or link groups as things already on their screen.
+description: >-
+  Drive Omacharts, the market-charting app for Omarchy, from the `omacharts`
+  command — put symbols on screen, build and rearrange chart layouts, and
+  read back what the user is looking at. Use it whenever somebody asks about
+  a market or about their own charts: "what's semis doing", "pull up gold on
+  the 15 minute", "chart SPY and QQQ side by side", "set me up for the
+  open", "a 2x2 of the majors with RSI on each, linked", "put a 200-day
+  average on this", "add AMD to my semis list", "what have I got open". Also
+  for indicators (moving average, VWAP, volume profile, RSI, ATR),
+  resolutions and sessions, bar styles and colours, watchlists and their
+  sections, chartbooks, link groups, the instrument search, and the cached
+  price data. Use it for any mention of omacharts, and whenever the user
+  speaks about charts, watchlists, chartbooks or link groups as things
+  already on their screen.
 ---
 
 # Omacharts
@@ -49,33 +62,47 @@ for the default watchlist. Otherwise "what's X doing" means putting it on screen
 
 The orders commands go in, which is the part a surface cannot express.
 
-**A 2×2 of the majors at 15m, RSI on each, linked.** Three splits make four
-charts out of one; splitting copies what the chart showed, so each position is
-set afterwards. `--link` last, and on every one of them, or only the chart you
-named follows the others:
+**A 2×2 of the majors at 15m, RSI on each.** Three splits make four charts out
+of one; splitting copies what the chart showed, so each position is set
+afterwards:
 
 ```
 omacharts chart split vertical
 omacharts chart split horizontal --chart pos:0
 omacharts chart split horizontal --chart pos:2
-omacharts chart set --chart pos:0 --symbol SPY --resolution 15m --link 2
-omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m --link 2
-omacharts chart set --chart pos:2 --symbol DIA --resolution 15m --link 2
-omacharts chart set --chart pos:3 --symbol IWM --resolution 15m --link 2
+omacharts chart set --chart pos:0 --symbol SPY --resolution 15m
+omacharts chart set --chart pos:1 --symbol QQQ --resolution 15m
+omacharts chart set --chart pos:2 --symbol DIA --resolution 15m
+omacharts chart set --chart pos:3 --symbol IWM --resolution 15m
 omacharts chart indicator add rsi --chart pos:0 --period 14
 omacharts chart indicator add rsi --chart pos:1 --period 14
 omacharts chart indicator add rsi --chart pos:2 --period 14
 omacharts chart indicator add rsi --chart pos:3 --period 14
 ```
 
-Joining a group takes what the group is already showing — unless the same
-command names a symbol, which is why `--symbol` and `--link` go together above
-rather than in two passes.
+**Do not link four charts showing four different symbols.** A group is charts
+that show the *same* instrument, so the four above belong in no group at all.
+Link groups are for one symbol across several resolutions — a daily, an hourly
+and a 5-minute that move together as you walk a watchlist:
+
+```
+omacharts chart split vertical
+omacharts chart set --chart pos:0 --symbol SPY --resolution 1D --link 2
+omacharts chart set --chart pos:1 --resolution 1h --link 2
+```
+
+**A chart put in a group leads it.** What that chart shows becomes the group's
+symbol, and the rest of the group follows — including charts in chartbooks that
+are not open. So `--link` goes on the chart that is already showing what you
+want the group on, which is why `--symbol` and `--link` go together on the first
+line above. `--link none` takes a chart out and changes nobody.
 
 **A watchlist drives a group too**, and that is the other half of what groups
 are for: picking a symbol in the list moves every chart in the group rather than
-the one chart that happens to be focused. A group drives at most one watchlist,
-and a second is refused rather than moved:
+the one chart that happens to be focused. From a command this only sets the
+group — which row a list is on is the rail's own state — so the list follows
+whatever its new group is showing. A group drives at most one watchlist, and a
+second is refused rather than moved:
 
 ```
 omacharts watchlist link Semis 3
