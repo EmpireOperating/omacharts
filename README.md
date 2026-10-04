@@ -11,13 +11,11 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 - **Fast.** Launches in under 200ms and keeps every series it has fetched, so
   arrowing down a watchlist redraws instantly rather than loading.
-- **Beautiful.** The chart is the protagonist. There is no header bar, the
-  controls appear when the pointer is near them and get out of the way when it
-  is not, and nothing is drawn that you did not ask for. It follows your
-  Omarchy theme as you change it, and generates an indicator palette for
-  whichever theme is active, so overlays come out distinguishable, legible
-  against the candles, and in keeping with everything else on screen. Any of
-  the 22 themes, including the awkward ones.
+- **Beautiful.** The chart is the protagonist and the UI is at its service. It
+  follows your Omarchy theme as you change it, and generates an indicator
+  palette for whichever theme is active, so overlays come out distinguishable,
+  legible against the candles, and in keeping with everything else on screen.
+  Any of the 22 themes, including the awkward ones.
 - **Configurable layout.** Split a chart horizontally or vertically, as deep as
   you like, and resize the panes with the mouse or the keyboard. Each chart
   keeps its own symbol, resolution, indicators and settings. Keep as many
