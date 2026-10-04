@@ -66,7 +66,8 @@ Rough order, and nothing here is a promise.
       can sit behind the same one, including the paid ones with real-time
       prices.
 - [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
-- [ ] **Many more**, one step at a time.
+
+Pull requests are welcome.
 
 ## Licence
 
