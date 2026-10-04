@@ -94,7 +94,12 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Dependencies
-        run: pacman -Syu --noconfirm git rust gtk4 libadwaita github-cli
+        run: |
+          pacman -Syu --noconfirm git rust gtk4 libadwaita github-cli
+          # The container is root and the checkout is not, so git refuses the
+          # directory — and `gh release upload` shells out to git to work out
+          # which repository it is in.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: actions/checkout@v4
         with:
           ref: main
