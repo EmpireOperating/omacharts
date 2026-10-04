@@ -4,7 +4,7 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 <p align="center">
   <img src="doc/screenshot.png" width="79%" align="top" alt="Omacharts">
-  <img src="doc/bar-widget.png" width="18%" align="top" alt="The Omarchy bar widget">
+  <img src="doc/bar-widget.png" width="18%" align="top" alt="The Omarchy plugin">
 </p>
 
 ## Features
@@ -27,8 +27,8 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   letter to find a symbol, a number to set a resolution. Press `?` to learn it all.
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI and ATR, each in its own resizable strip. More coming.
-- **A bar widget** for the Omarchy bar: your watchlist with sparklines, live,
-  still there after the window closes.
+- **Omarchy plugin.** Your watchlist in the bar, with sparklines, live, still
+  there after the window closes.
 - **Agent ready.** A rich CLI covers everything the window does, and says what
   it can do in a form a script or an agent can read.
 
