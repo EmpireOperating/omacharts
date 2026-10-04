@@ -56,6 +56,12 @@ pub const BINDINGS: &[Binding] = &[
     // instead only moves which layouts it is broken on. Punctuation can be
     // bound here, but only bare, the way `question` below is.
     global("chart.settings", &["<Ctrl><Shift>s"]),
+    // O, not P: printing a chart is a thing this will grow, and the key
+    // everything else on the desktop prints with has to still be free when it
+    // does. A screenshot of the chartbook is the same key with Shift, the way
+    // closing one already is.
+    global("chart.screenshot", &["<Ctrl>o"]),
+    global("win.screenshot", &["<Ctrl><Shift>o"]),
     global("chart.reset-view", &["<Alt>r"]),
     global("chart.split-h", &["<Ctrl>h"]),
     global("chart.maximize", &["<Ctrl>m"]),
@@ -157,6 +163,19 @@ mod tests {
                 assert!(!seen.contains(accel), "{accel} is claimed twice");
                 seen.push(accel);
             }
+        }
+    }
+
+    /// Screenshots went on Ctrl+O so that Ctrl+P stays what it is everywhere
+    /// else. Taking it later for anything but printing would be taking it from
+    /// printing, which is the one thing it was kept for.
+    #[test]
+    fn the_printing_keys_are_left_alone() {
+        for accel in ["<Ctrl>p", "<Ctrl><Shift>p"] {
+            assert!(
+                !BINDINGS.iter().any(|binding| binding.accels.contains(&accel)),
+                "{accel} is reserved for printing"
+            );
         }
     }
 

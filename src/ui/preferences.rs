@@ -13,7 +13,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use omacharts_engine::theme::{
     BarScheme, BarSlot, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
     THEME_BARS_ID, THEME_MONO_ID,
@@ -23,6 +23,7 @@ use crate::cache;
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::colors;
+use crate::ui::screenshot;
 
 pub struct Preferences;
 
@@ -491,7 +492,98 @@ fn build_general_page(context: &Rc<Context>) {
         context.general_page.add(&group);
     }
     context.general_page.add(&resolutions_group(context));
+    context.general_page.add(&screenshots_group(context));
     build_market_data(context);
+}
+
+/// Where Ctrl+O leaves its pictures, and whether it asks first.
+///
+/// Both rows derive their state rather than reading something written down at
+/// install time: nothing is stored until somebody changes it, so the day the
+/// default folder moves, everyone who never chose moves with it.
+fn screenshots_group(context: &Rc<Context>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Screenshots");
+
+    let folder = adw::ActionRow::new();
+    folder.set_title("Save to");
+    // The path is the whole point of the row, so it goes in the subtitle where
+    // there is room for it — on one line, because a deep path is wider than
+    // this dialog and a row that stretches it is worse than one that trails
+    // off.
+    folder.set_subtitle(&home_relative(&screenshot::folder(&context.store)));
+    folder.set_subtitle_lines(1);
+    folder.set_activatable(true);
+    folder.set_sensitive(screenshot::autosave(&context.store));
+
+    let auto = adw::ActionRow::new();
+    auto.set_title("Save automatically");
+    auto.set_subtitle("Off asks where each one goes");
+
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(screenshot::autosave(&context.store));
+    let store = context.store.clone();
+    let folder_row = folder.clone();
+    switch.connect_state_set(move |_, on| {
+        store.set_setting_bool(screenshot::SETTING_AUTOSAVE, on);
+        // Greyed out rather than taken away: a folder nothing is being saved
+        // to is still the folder it would be saved to, and hiding the row
+        // would leave no way to see what turning this back on would do.
+        folder_row.set_sensitive(on);
+        glib::Propagation::Proceed
+    });
+    auto.add_suffix(&switch);
+    group.add(&auto);
+
+    let choose: Rc<dyn Fn(&adw::ActionRow)> = {
+        let store = context.store.clone();
+        Rc::new(move |row: &adw::ActionRow| {
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Where screenshots are saved");
+            let current = screenshot::folder(&store);
+            if current.is_dir() {
+                dialog.set_initial_folder(Some(&gio::File::for_path(&current)));
+            }
+            let parent = row.root().and_downcast::<gtk::Window>();
+            let store = store.clone();
+            let row = row.clone();
+            dialog.select_folder(parent.as_ref(), gio::Cancellable::NONE, move |answer| {
+                let Some(path) = answer.ok().and_then(|file| file.path()) else { return };
+                // Choosing the default folder is choosing the default, not
+                // pinning today's answer: stored empty, it keeps following.
+                let chosen = if path == screenshot::default_folder() {
+                    String::new()
+                } else {
+                    path.to_string_lossy().to_string()
+                };
+                store.set_setting(screenshot::SETTING_FOLDER, &chosen);
+                row.set_subtitle(&home_relative(&screenshot::folder(&store)));
+            });
+        })
+    };
+
+    let button = gtk::Button::with_label("Change…");
+    button.set_valign(gtk::Align::Center);
+    let open = choose.clone();
+    let row = folder.clone();
+    button.connect_clicked(move |_| open(&row));
+    folder.add_suffix(&button);
+
+    let open = choose.clone();
+    folder.connect_activated(move |row| open(row));
+
+    group.add(&folder);
+    group
+}
+
+/// A path as somebody would say it, so a row showing one is readable.
+fn home_relative(path: &std::path::Path) -> String {
+    let home = crate::store::home();
+    match path.strip_prefix(&home) {
+        Ok(rest) if !home.as_os_str().is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
 }
 
 fn build_market_data(context: &Rc<Context>) {

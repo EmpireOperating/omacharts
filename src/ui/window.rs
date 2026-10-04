@@ -24,6 +24,7 @@ use crate::store::{Store, DEFAULT_WATCHLIST};
 use crate::theming::Theming;
 use crate::ui::chart::{Drawn, Echo};
 use crate::ui::pane::{self, ChartPane, Node};
+use crate::ui::screenshot;
 use omacharts_engine::link;
 use omacharts_engine::LinkGroup;
 use crate::ui::colors;
@@ -2406,6 +2407,7 @@ impl Window {
             let Some(tab) = this.book_tab(this.active.get()) else { return };
             let model = gio::Menu::new();
             shortcuts::append(&model, "Rename", "win.rename-chartbook");
+            shortcuts::append(&model, "Screenshot chartbook", "win.screenshot");
             shortcuts::append(&model, "Remove", "win.close-chartbook");
             popup_menu(&model, &tab, x, y);
         });
@@ -2843,6 +2845,19 @@ impl Window {
         let this = self.clone();
         close_book.connect_activate(move |_, _| this.close_chartbook());
         self.window.add_action(&close_book);
+
+        let shot = gio::SimpleAction::new("screenshot", None);
+        let this = self.clone();
+        shot.connect_activate(move |_, _| {
+            screenshot::take_chartbook(
+                &this.window,
+                &this.store,
+                &this.chart_host,
+                &this.book_label(this.active.get()),
+                &this.theming.borrow().theme(),
+            );
+        });
+        self.window.add_action(&shot);
 
         let keys = gtk::EventControllerKey::new();
         let this = self.clone();
@@ -3315,6 +3330,7 @@ impl Window {
                     ("Ctrl+N", "New chartbook"),
                     ("Ctrl+Shift+R", "Rename this chartbook"),
                     ("Ctrl+Shift+X", "Remove this chartbook"),
+                    ("Ctrl+Shift+O", "Screenshot this chartbook"),
                     ("Ctrl+Alt+← →", "Previous or next chartbook"),
                     ("Double-click a tab", "Rename it"),
                     ("Right-click a tab", "Rename or remove it"),
@@ -3342,6 +3358,7 @@ impl Window {
                     ("Ctrl+V", "Split vertically"),
                     ("Ctrl+X", "Close this chart"),
                     ("Ctrl+M", "Give this chart the window, or put it back"),
+                    ("Ctrl+O", "Screenshot this chart"),
                     ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
                     ("Alt+← → ↑ ↓", "Focus the chart that way"),
                     ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
@@ -4047,6 +4064,42 @@ impl Window {
 
     /// Right-clicking the chart offers the things you change most, and a way
     /// to everything else.
+    /// A picture of what is on screen, for a command.
+    ///
+    /// A window method because only a window has pixels: the stored
+    /// arrangement describes charts, and a screenshot is of the ones being
+    /// drawn. Always the focused chart, or the whole of the open chartbook —
+    /// a chart in a book that is not on screen has nothing to photograph.
+    pub fn screenshot(
+        self: &Rc<Self>,
+        whole_book: bool,
+        into: Option<&std::path::Path>,
+    ) -> Result<(String, std::path::PathBuf), String> {
+        let theme = self.theming.borrow().theme();
+        let book = self.book_label(self.active.get());
+        if whole_book {
+            let charts = self.panes.borrow().len();
+            let path =
+                screenshot::write_chartbook(&self.store, &self.chart_host, &book, &theme, into)?;
+            return Ok((format!("chartbook \"{book}\", {charts} charts"), path));
+        }
+        let pane = self.focused_pane();
+        let symbol = pane
+            .instrument
+            .borrow()
+            .as_ref()
+            .map(|instrument| instrument.display_symbol())
+            .unwrap_or_default();
+        let at = self.layout.borrow().leaves().iter().position(|leaf| *leaf == pane.id);
+        let path = screenshot::write_chart(&self.store, &pane, &theme, into)?;
+        let what = format!(
+            "pos:{} {symbol} {} in \"{book}\"",
+            at.unwrap_or(0),
+            pane.timeframe.get().label()
+        );
+        Ok((what, path))
+    }
+
     fn chart_menu(self: &Rc<Self>, x: f64, y: f64) {
         let menu = gio::Menu::new();
 
@@ -4103,6 +4156,7 @@ impl Window {
         rest.append_submenu(Some("Link group"), &groups);
         shortcuts::append(&rest, "Indicators…", "chart.indicators");
         shortcuts::append(&rest, "Chart settings…", "chart.settings");
+        shortcuts::append(&rest, "Screenshot chart", "chart.screenshot");
         menu.append_section(None, &rest);
 
         // Hung off the window rather than the chart it was opened on: a menu
@@ -4242,6 +4296,18 @@ impl Window {
         let this = self.clone();
         indicators.connect_activate(move |_, _| this.open_indicators());
         actions.add_action(&indicators);
+
+        let shot = gio::SimpleAction::new("screenshot", None);
+        let this = self.clone();
+        shot.connect_activate(move |_, _| {
+            screenshot::take_chart(
+                &this.window,
+                &this.store,
+                &this.focused_pane(),
+                &this.theming.borrow().theme(),
+            );
+        });
+        actions.add_action(&shot);
 
         let resolutions = gio::SimpleAction::new("edit-resolutions", None);
         let this = self.clone();
