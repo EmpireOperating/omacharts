@@ -379,12 +379,23 @@ fn rebuild_indicators(
     list.group.set_description(Some(if indicators.is_empty() {
         "Nothing yet."
     } else {
-        "Drag to reorder. Panes stack in the same order; colours come from the theme."
+        "Drag to reorder. The list is the chart, top to bottom; colours come from the theme."
     }));
 
-
-    for indicator in indicators.iter() {
+    // The price plot is a row of the list because strips can be stacked above it
+    // as well as below, and a list showing only the strips could not say which
+    // side of the price each one is on. A chart with no strips has no stack to
+    // describe, so it is left out there.
+    let stacked = indicators.iter().any(|i| i.kind.in_own_pane());
+    let price_at = if stacked { price_row_at(&indicators) } else { usize::MAX };
+    for (at, indicator) in indicators.iter().enumerate() {
+        if at == price_at {
+            list.push(&price_row(window, &refresh));
+        }
         list.push(&indicator_row(window, dialog, &refresh, &indicators, indicator));
+    }
+    if price_at == indicators.len() {
+        list.push(&price_row(window, &refresh));
     }
 
     if indicators.is_empty() {
@@ -399,6 +410,54 @@ fn rebuild_indicators(
         });
         list.push(&empty);
     }
+}
+
+/// Where the price plot sits in the list: above the first strip that is below
+/// it, and at the end when every strip is above it.
+///
+/// The strips above the price are listed before the strips below it, which is
+/// what every way of reordering them maintains — so one boundary is enough to
+/// place the price among them.
+fn price_row_at(indicators: &[Indicator]) -> usize {
+    indicators
+        .iter()
+        .position(|i| i.kind.in_own_pane() && !i.above_price)
+        .unwrap_or(indicators.len())
+}
+
+/// The price plot's own line in the list.
+///
+/// Not a thing you can configure or remove — it is the chart — so it carries
+/// nothing but its name. It is a place to drop a strip on, which is how a strip
+/// is moved across the price from here.
+fn price_row(window: &Rc<Window>, refresh: &Refresh) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title("Price");
+    row.set_subtitle("Candles, and everything drawn over them");
+    // No handle and no dot. Every other row wears both, so their absence is
+    // what says this row is the chart itself rather than another indicator —
+    // and a mark here would read as the handle it is not.
+    row.add_css_class("dim-label");
+
+    let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+    let window = window.clone();
+    let refresh = refresh.clone();
+    target.connect_drop(move |_, value, _, _| {
+        let Ok(moving) = value.get::<String>().unwrap_or_default().parse::<u32>() else {
+            return false;
+        };
+        let mut all = window.indicators();
+        // Dropped on the price: the strip changes sides, which is the one thing
+        // dropping it on another row cannot say.
+        if !indicators::cross_price(&mut all, moving) {
+            return false;
+        }
+        window.set_indicators(all);
+        refresh.run();
+        true
+    });
+    row.add_controller(target);
+    row
 }
 
 /// One line in the list: what it is, whether it is drawn, and a way in.
@@ -518,7 +577,18 @@ fn wire_reorder(window: &Rc<Window>, refresh: &Refresh, row: &adw::ActionRow, id
         // Taken out before the destination is used, so dropping downwards
         // lands after the row you dropped on and upwards lands in its place —
         // which is what the pointer was over either way.
-        let dragged = indicators.remove(from);
+        // A strip dropped next to a strip on the other side of the price has
+        // crossed it: the row it was dropped on says which side that is. Read
+        // before the drag is lifted out, because that shifts everything after
+        // it — the row dropped on included.
+        let landing = indicators
+            .get(to)
+            .filter(|onto| onto.kind.in_own_pane())
+            .map(|onto| onto.above_price);
+        let mut dragged = indicators.remove(from);
+        if let (true, Some(side)) = (dragged.kind.in_own_pane(), landing) {
+            dragged.above_price = side;
+        }
         indicators.insert(to, dragged);
         window.set_indicators(indicators);
         refresh.run();

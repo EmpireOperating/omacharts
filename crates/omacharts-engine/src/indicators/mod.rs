@@ -161,6 +161,15 @@ impl Kind {
         }
     }
 
+    /// Does this draw in a strip of its own rather than over the price?
+    ///
+    /// A computed series already knows — that is [`Output::pane_height`] — but
+    /// the order of the strips is edited where nothing has been computed: the
+    /// settings list, and the command line.
+    pub fn in_own_pane(self) -> bool {
+        matches!(self, Kind::Volume | Kind::Rsi | Kind::Atr)
+    }
+
     pub fn default_params(self) -> Params {
         match self {
             Kind::Sma => Params::MovingAverage { period: 50 },
@@ -242,6 +251,17 @@ pub struct Indicator {
     #[serde(default)]
     pub stroke: Stroke,
     pub visible: bool,
+    /// Whether this indicator's strip sits above the price plot rather than
+    /// below it. Nothing for an indicator that draws over the price.
+    ///
+    /// Which side of the price a strip falls on is this flag; the order of the
+    /// strips on one side is the order they are listed in. Together those say
+    /// where every strip sits, and no combination of them is undrawable — which
+    /// an index into the list saying "the price sits here" would not manage,
+    /// because removing an indicator above the price would silently promote the
+    /// one below it.
+    #[serde(default)]
+    pub above_price: bool,
 }
 
 impl Indicator {
@@ -253,6 +273,7 @@ impl Indicator {
             color: None,
             stroke: Stroke::default(),
             visible: true,
+            above_price: false,
         }
     }
 
@@ -356,12 +377,12 @@ pub enum Output {
     Profiles(Vec<Profile>),
     /// Volume per bar, with the share of the chart its pane takes.
     Volume { values: Vec<f64>, height: f64 },
-    /// A series drawn in its own strip under the price, on its own scale.
+    /// A series drawn in a strip of its own, on its own scale.
     Pane(Pane),
 }
 
 /// An indicator that cannot share the price scale, and so gets a strip of its
-/// own under the chart.
+/// own above or below the chart.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Pane {
     pub values: Vec<Option<f64>>,
@@ -386,6 +407,125 @@ pub const MIN_PANE_SHARE: f64 = 0.05;
 /// chart stays usable well past the point it looks odd, and somebody stacking
 /// a tall volume pane under a sliver of price is entitled to.
 pub const MAX_PANE_SHARE: f64 = 0.95;
+
+/// One row of a chart's vertical stack, top to bottom.
+///
+/// The price plot is a row like any other rather than a fixed first one,
+/// because a strip can be moved above it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Row {
+    Price,
+    /// The strip belonging to the indicator with this id.
+    Strip(u32),
+}
+
+/// The rows a chart stacks, top to bottom.
+///
+/// Only an indicator that is drawn and that needs a strip of its own is a row.
+/// An overlay is drawn on the price plot and a hidden indicator is drawn
+/// nowhere, so neither is something a strip can be moved past.
+pub fn stack(indicators: &[Indicator]) -> Vec<Row> {
+    let strips = |side: bool| {
+        indicators
+            .iter()
+            .filter(move |i| i.visible && i.kind.in_own_pane() && i.above_price == side)
+            .map(|i| Row::Strip(i.id))
+    };
+    strips(true).chain(std::iter::once(Row::Price)).chain(strips(false)).collect()
+}
+
+/// Which way a strip travels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Move {
+    Up,
+    Down,
+}
+
+/// Move one strip one row along the stack, past the price plot when the price
+/// plot is what is next to it.
+///
+/// `false`, and nothing touched, when the strip is already at that end of the
+/// stack — or is not a strip at all.
+///
+/// The strips are permuted within the slots they already occupy in the list,
+/// so reordering them never moves an overlay, and so cannot change which line
+/// is drawn over which on the price plot.
+pub fn move_pane(indicators: &mut [Indicator], id: u32, direction: Move) -> bool {
+    let rows = stack(indicators);
+    let Some(at) = rows.iter().position(|row| *row == Row::Strip(id)) else { return false };
+    let neighbour = match direction {
+        Move::Up => at.checked_sub(1),
+        Move::Down => (at + 1 < rows.len()).then_some(at + 1),
+    };
+    let Some(neighbour) = neighbour else { return false };
+
+    match rows[neighbour] {
+        Row::Price => cross_price(indicators, id),
+        // Two strips on the same side of the price simply trade places.
+        Row::Strip(other) => {
+            let (mut above, mut below) = (sided(indicators, true), sided(indicators, false));
+            let group = if above.contains(&id) { &mut above } else { &mut below };
+            let (Some(from), Some(to)) = (
+                group.iter().position(|x| *x == id),
+                group.iter().position(|x| *x == other),
+            ) else {
+                return false;
+            };
+            group.swap(from, to);
+            reslot(indicators, &above, &below);
+            true
+        }
+    }
+}
+
+/// Put a strip on the other side of the price plot, against the price itself.
+///
+/// It lands at the edge it arrived from rather than at the end of its new side,
+/// so crossing the price is one step and not a jump over whatever is already
+/// over there. `false` when there is no such strip.
+pub fn cross_price(indicators: &mut [Indicator], id: u32) -> bool {
+    let Some(was_above) =
+        indicators.iter().find(|i| i.id == id && i.kind.in_own_pane()).map(|i| i.above_price)
+    else {
+        return false;
+    };
+    let (mut above, mut below) = (sided(indicators, true), sided(indicators, false));
+    if was_above {
+        above.retain(|other| *other != id);
+        below.insert(0, id);
+    } else {
+        below.retain(|other| *other != id);
+        above.push(id);
+    }
+    reslot(indicators, &above, &below);
+    true
+}
+
+/// The ids of the strips on one side of the price, in the order they are
+/// listed.
+fn sided(indicators: &[Indicator], above: bool) -> Vec<u32> {
+    indicators
+        .iter()
+        .filter(|i| i.kind.in_own_pane() && i.above_price == above)
+        .map(|i| i.id)
+        .collect()
+}
+
+/// Put the strips back into the slots the strips already hold, in this order,
+/// each flagged by the side of the price it ended up on.
+fn reslot(indicators: &mut [Indicator], above: &[u32], below: &[u32]) {
+    let slots: Vec<usize> =
+        (0..indicators.len()).filter(|at| indicators[*at].kind.in_own_pane()).collect();
+    let ordered: Vec<Indicator> = above
+        .iter()
+        .chain(below)
+        .filter_map(|id| indicators.iter().find(|i| i.id == *id).cloned())
+        .collect();
+    for (slot, mut indicator) in slots.into_iter().zip(ordered) {
+        indicator.above_price = above.contains(&indicator.id);
+        indicators[slot] = indicator;
+    }
+}
 
 impl Output {
     /// The share of the chart's height this indicator wants for its own strip,
@@ -786,6 +926,177 @@ mod tests {
             "all four indicators over 12k bars took {per_repaint:?}"
         );
         eprintln!("all indicators over 12k bars: {per_repaint:?} per repaint");
+    }
+
+    /// Volume, RSI and ATR in that order, with a moving average among them to
+    /// prove an overlay is not a row.
+    fn stacked() -> Vec<Indicator> {
+        vec![
+            Indicator::new(1, Kind::Volume),
+            Indicator::new(2, Kind::Sma),
+            Indicator::new(3, Kind::Rsi),
+            Indicator::new(4, Kind::Atr),
+        ]
+    }
+
+    #[test]
+    fn strips_stack_under_the_price_in_the_order_they_are_listed() {
+        assert_eq!(
+            stack(&stacked()),
+            vec![Row::Price, Row::Strip(1), Row::Strip(3), Row::Strip(4)]
+        );
+    }
+
+    #[test]
+    fn an_overlay_is_not_a_row_the_arrows_can_move() {
+        let mut set = stacked();
+        assert!(!move_pane(&mut set, 2, Move::Up), "a moving average has no strip to move");
+        assert_eq!(stack(&set), stack(&stacked()), "and nothing else moved either");
+    }
+
+    #[test]
+    fn moving_a_strip_up_steps_past_the_strip_above_it() {
+        let mut set = stacked();
+        assert!(move_pane(&mut set, 4, Move::Up));
+        assert_eq!(
+            stack(&set),
+            vec![Row::Price, Row::Strip(1), Row::Strip(4), Row::Strip(3)]
+        );
+    }
+
+    #[test]
+    fn the_topmost_strip_under_the_price_steps_above_the_price_next() {
+        let mut set = stacked();
+        assert!(move_pane(&mut set, 1, Move::Up));
+        assert_eq!(
+            stack(&set),
+            vec![Row::Strip(1), Row::Price, Row::Strip(3), Row::Strip(4)]
+        );
+        assert!(set[0].above_price);
+    }
+
+    #[test]
+    fn a_strip_above_the_price_comes_back_down_the_way_it_went_up() {
+        let mut set = stacked();
+        move_pane(&mut set, 1, Move::Up);
+        assert!(move_pane(&mut set, 1, Move::Down));
+        assert_eq!(stack(&set), stack(&stacked()), "back where it started");
+        assert!(!set.iter().any(|i| i.above_price));
+    }
+
+    /// Two strips above the price keep their own order, and a third arriving
+    /// from below lands between the price and the one that was already lowest.
+    #[test]
+    fn a_strip_crossing_the_price_lands_at_the_edge_it_arrived_from() {
+        let mut set = stacked();
+        move_pane(&mut set, 1, Move::Up);
+        move_pane(&mut set, 3, Move::Up);
+        move_pane(&mut set, 3, Move::Up);
+        assert_eq!(
+            stack(&set),
+            vec![Row::Strip(3), Row::Strip(1), Row::Price, Row::Strip(4)],
+            "the second one to cross stopped at the price, then traded places"
+        );
+
+        move_pane(&mut set, 3, Move::Down);
+        assert_eq!(
+            stack(&set),
+            vec![Row::Strip(1), Row::Strip(3), Row::Price, Row::Strip(4)],
+            "and back down to the price's edge without leaving its own side"
+        );
+
+        move_pane(&mut set, 4, Move::Up);
+        assert_eq!(
+            stack(&set),
+            vec![Row::Strip(1), Row::Strip(3), Row::Strip(4), Row::Price],
+            "it joined the group at the price, not over the top of it"
+        );
+    }
+
+    #[test]
+    fn the_strip_at_either_end_of_the_stack_has_nowhere_further_to_go() {
+        let mut set = stacked();
+        assert!(!move_pane(&mut set, 4, Move::Down), "already the bottom row");
+        move_pane(&mut set, 1, Move::Up);
+        assert!(!move_pane(&mut set, 1, Move::Up), "already the top row");
+    }
+
+    /// The one case a chart with a single strip has: it cannot swap with
+    /// another strip, but it can still cross the price.
+    #[test]
+    fn the_only_strip_on_a_chart_can_still_cross_the_price() {
+        let mut set = vec![Indicator::new(1, Kind::Volume)];
+        assert!(!move_pane(&mut set, 1, Move::Down), "nothing below the bottom row");
+        assert!(move_pane(&mut set, 1, Move::Up));
+        assert_eq!(stack(&set), vec![Row::Strip(1), Row::Price]);
+        assert!(!move_pane(&mut set, 1, Move::Up), "and nothing above the top one");
+    }
+
+    /// A strip somebody has switched off is drawn nowhere, so clicking the
+    /// arrow on the strip above it has to step past it rather than trade
+    /// places with something invisible and look like it did nothing.
+    #[test]
+    fn a_hidden_strip_is_not_a_row_either() {
+        let mut set = stacked();
+        set[2].visible = false;
+        assert_eq!(stack(&set), vec![Row::Price, Row::Strip(1), Row::Strip(4)]);
+        assert!(move_pane(&mut set, 4, Move::Up));
+        assert_eq!(stack(&set), vec![Row::Price, Row::Strip(4), Row::Strip(1)]);
+
+        set[2].visible = true;
+        assert!(
+            stack(&set).contains(&Row::Strip(3)),
+            "and switching it back on puts it back in the stack"
+        );
+    }
+
+    /// Reordering strips must not touch the overlays: their order decides
+    /// which line is drawn over which on the price plot.
+    #[test]
+    fn reordering_strips_leaves_the_overlays_where_they_were() {
+        let mut set = vec![
+            Indicator::new(1, Kind::Volume),
+            Indicator::new(2, Kind::Sma),
+            Indicator::new(3, Kind::Rsi),
+            Indicator::new(4, Kind::Ema),
+            Indicator::new(5, Kind::Atr),
+        ];
+        let overlays = |set: &[Indicator]| -> Vec<(usize, u32)> {
+            set.iter()
+                .enumerate()
+                .filter(|(_, i)| !i.kind.in_own_pane())
+                .map(|(at, i)| (at, i.id))
+                .collect()
+        };
+        let before = overlays(&set);
+        move_pane(&mut set, 5, Move::Up);
+        move_pane(&mut set, 5, Move::Up);
+        move_pane(&mut set, 5, Move::Up);
+        assert_eq!(overlays(&set), before);
+    }
+
+    /// Nothing rewrites the stored workspace, so every indicator anybody has
+    /// was written before a strip could sit above the price. Reading one has
+    /// to leave the chart looking the way they left it.
+    #[test]
+    fn an_indicator_written_before_strips_could_sit_above_the_price_comes_back_below_it() {
+        let json = r#"{"id": 1, "kind": "rsi", "visible": true,
+            "params": {"kind": "rsi", "period": 14, "height": 0.16,
+                       "overbought": 70.0, "oversold": 30.0}}"#;
+        let indicator: Indicator = serde_json::from_str(json).expect("an older indicator");
+        assert!(!indicator.above_price);
+        let back: Indicator =
+            serde_json::from_str(&serde_json::to_string(&indicator).unwrap()).unwrap();
+        assert!(!back.above_price, "and it round trips as it is");
+    }
+
+    #[test]
+    fn a_strip_above_the_price_survives_being_written_down() {
+        let mut set = stacked();
+        move_pane(&mut set, 1, Move::Up);
+        let json = serde_json::to_string(&set).unwrap();
+        let back: Vec<Indicator> = serde_json::from_str(&json).unwrap();
+        assert_eq!(stack(&back), stack(&set));
     }
 
     #[test]

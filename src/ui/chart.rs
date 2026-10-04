@@ -26,19 +26,22 @@ use gtk::glib;
 const PRICE_AXIS_W: f64 = 64.0;
 const TIME_AXIS_H: f64 = 24.0;
 const PAD: f64 = 10.0;
-/// Space between the price chart and a pane, and between two panes.
+/// Space between two rows of the stack.
 const PANE_GAP: f64 = 6.0;
-/// The least of the chart price keeps, however many panes are stacked below.
+/// The least of the chart the price keeps, however many panes are stacked
+/// around it.
 ///
 /// Small on purpose. It is here to stop the price plot reaching zero height,
 /// where its own scale stops meaning anything — not to decide how much room a
 /// volume pane deserves. That is the chart owner's business, and a tall pane
-/// under a thin price is a legitimate thing to want.
+/// over or under a thin price is a legitimate thing to want.
 const MIN_PRICE_SHARE: f64 = 0.08;
-/// How near a pane's top edge the pointer has to be to grab it.
+/// How near the line between two rows the pointer has to be to grab it.
 const EDGE_GRAB: f64 = 4.0;
-/// The close box in a pane's top right corner.
-const PANE_CLOSE: f64 = 13.0;
+/// The box each of a pane's corner controls is drawn in.
+const PANE_CONTROL: f64 = 13.0;
+/// Left edge to left edge of two neighbouring corner controls.
+const CONTROL_PITCH: f64 = PANE_CONTROL + 2.0;
 
 /// Fewest bars we will zoom into, and the most we will draw at once.
 const MIN_VISIBLE: usize = 12;
@@ -122,15 +125,47 @@ enum Drag {
     Pan { first: usize, offset: f64 },
     PriceScale { zoom: f64 },
     TimeScale { visible: usize },
-    /// Pulling the line above a pane, to make that pane taller or shorter.
-    PaneEdge { id: u32, share: f64, total_h: f64 },
+    /// Pulling a line between two rows, to make the pane beside it taller or
+    /// shorter.
+    PaneEdge { id: u32, share: f64, total_h: f64, grows_downward: bool },
 }
 
-/// One indicator's strip: which indicator, and where it sits.
-struct PaneBox {
-    id: u32,
+/// One row of the chart's vertical stack: the price plot, or one indicator's
+/// strip.
+///
+/// The price is a row like any other rather than a fixed first one, because a
+/// strip can be moved above it.
+struct Row {
+    /// The indicator whose strip this is, or `None` for the price plot.
+    pane: Option<u32>,
     top: f64,
     height: f64,
+}
+
+impl Row {
+    /// Is the pointer anywhere in this row?
+    fn covers(&self, y: f64) -> bool {
+        y >= self.top && y <= self.top + self.height
+    }
+}
+
+/// One of the boxes a strip wears in its top right corner while the pointer is
+/// in it: a way up the stack, a way down it, and the way off the chart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Control {
+    Up,
+    Down,
+    Close,
+}
+
+/// A line between two rows, and the strip that line resizes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Edge {
+    id: u32,
+    /// Whether pulling the line down is what makes that strip taller. The line
+    /// above the price plot belongs to the strip above it, so it grows
+    /// downwards; every other line has its strip underneath.
+    grows_downward: bool,
 }
 
 /// Where everything goes.
@@ -141,44 +176,95 @@ struct PaneBox {
 struct Layout {
     plot_x: f64,
     plot_w: f64,
-    plot_y: f64,
+    /// The top of the whole stack, which is the top of the price plot only
+    /// while nothing has been moved above it.
+    top: f64,
     total_h: f64,
+    /// The price plot's own box, wherever in the stack it ended up.
+    price_y: f64,
     price_h: f64,
-    panes: Vec<PaneBox>,
+    rows: Vec<Row>,
 }
 
 impl Layout {
-    /// Where a pane's close box sits: its top right corner, inside the plot
-    /// rather than out over the price axis, which belongs to the price.
-    fn close_box(&self, pane: &PaneBox) -> (f64, f64) {
-        (self.plot_x + self.plot_w - PANE_CLOSE - 4.0, pane.top + 4.0)
+    /// Where one of a strip's corner boxes sits: its top right corner, inside
+    /// the plot rather than out over the price axis, which belongs to the
+    /// price.
+    ///
+    /// Reading right to left: close, down, up. Every strip reserves all three
+    /// places whether or not it offers all three, so the box under the pointer
+    /// stays where it is when the strip travels.
+    fn control_box(&self, row: &Row, control: Control) -> (f64, f64) {
+        let slot = match control {
+            Control::Close => 0.0,
+            Control::Down => 1.0,
+            Control::Up => 2.0,
+        };
+        let right = self.plot_x + self.plot_w - 4.0;
+        (right - PANE_CONTROL - slot * CONTROL_PITCH, row.top + 4.0)
     }
 
-    /// The pane whose close box is under this point, if the pointer is over
-    /// that pane at all. The box only exists while you are in the strip it
-    /// belongs to, so it cannot be clicked by accident from elsewhere.
-    fn close_at(&self, x: f64, y: f64) -> Option<u32> {
-        self.panes.iter().find_map(|pane| {
-            if y < pane.top || y > pane.top + pane.height {
+    /// Which boxes the row at `at` offers.
+    ///
+    /// The arrow at the end of the travel is left out rather than drawn dead.
+    /// This app withholds an affordance it cannot honour — there is no Maximize
+    /// with one chart — and a greyed arrow invites the click it would refuse.
+    fn controls(&self, at: usize) -> Vec<Control> {
+        let mut offered = Vec::new();
+        if at > 0 {
+            offered.push(Control::Up);
+        }
+        if at + 1 < self.rows.len() {
+            offered.push(Control::Down);
+        }
+        offered.push(Control::Close);
+        offered
+    }
+
+    /// The strip under this point and which of its boxes, if any.
+    ///
+    /// One answer for the drawing, the cursor and the click, so none of the
+    /// three can disagree about where the boxes are. A box only exists while
+    /// the pointer is in the strip it belongs to, so it cannot be clicked by
+    /// accident from elsewhere.
+    fn control_at(&self, x: f64, y: f64) -> Option<(u32, Control)> {
+        self.rows.iter().enumerate().find_map(|(at, row)| {
+            let id = row.pane?;
+            if !row.covers(y) {
                 return None;
             }
-            let (bx, by) = self.close_box(pane);
-            (x >= bx && x <= bx + PANE_CLOSE && y >= by && y <= by + PANE_CLOSE).then_some(pane.id)
+            self.controls(at)
+                .into_iter()
+                .find(|control| {
+                    let (bx, by) = self.control_box(row, *control);
+                    x >= bx && x <= bx + PANE_CONTROL && y >= by && y <= by + PANE_CONTROL
+                })
+                .map(|control| (id, control))
         })
     }
 
-    /// Is the pointer anywhere in this pane's strip?
-    fn covers(pane: &PaneBox, y: f64) -> bool {
-        y >= pane.top && y <= pane.top + pane.height
+    /// The separator above a row, which is also what you grab to resize the
+    /// strip beside it. The topmost row has nothing above it.
+    fn edge(&self, at: usize) -> Option<(f64, Edge)> {
+        if at == 0 {
+            return None;
+        }
+        let row = self.rows.get(at)?;
+        let y = row.top - PANE_GAP / 2.0;
+        // The line above the price plot resizes the strip above it: the price
+        // has no height of its own to change, being whatever the strips leave.
+        let edge = match row.pane {
+            Some(id) => Edge { id, grows_downward: false },
+            None => Edge { id: self.rows[at - 1].pane?, grows_downward: true },
+        };
+        Some((y, edge))
     }
 
-    /// The separator above a pane, which is also what you grab to resize it.
-    fn edge(pane: &PaneBox) -> f64 {
-        pane.top - PANE_GAP / 2.0
-    }
-
-    fn edge_at(&self, y: f64) -> Option<u32> {
-        self.panes.iter().find(|pane| (y - Layout::edge(pane)).abs() <= EDGE_GRAB).map(|p| p.id)
+    fn edge_at(&self, y: f64) -> Option<Edge> {
+        (0..self.rows.len())
+            .filter_map(|at| self.edge(at))
+            .find(|(line, _)| (y - line).abs() <= EDGE_GRAB)
+            .map(|(_, edge)| edge)
     }
 }
 
@@ -209,36 +295,79 @@ fn price_range(state: &State, bars: &[Bar]) -> Option<(f64, f64)> {
     Some(state.price_window(low, high))
 }
 
-/// Volume, RSI and ATR each want a strip of their own, stacked under the price
-/// in the order they are listed. Price keeps most of the chart whatever is
-/// below it: three panes sharing the window equally would leave the candles —
-/// the thing you came for — as a sliver.
+/// Volume, RSI and ATR each want a strip of their own. They stack in the order
+/// they are listed, under the price plot or — for the ones that say so — above
+/// it.
 fn layout(state: &State, width: f64, height: f64) -> Layout {
     let plot_x = PAD;
     let plot_w = (width - PRICE_AXIS_W - PAD).max(1.0);
-    let plot_y = PAD;
+    let top = PAD;
     let total_h = (height - TIME_AXIS_H - PAD).max(1.0);
 
-    let wanted: Vec<(u32, f64)> = state
-        .indicators
-        .iter()
-        .filter(|drawn| drawn.indicator.visible)
-        .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn.indicator.id, share)))
-        .collect();
-    let sum: f64 = wanted.iter().map(|(_, share)| share).sum();
+    let wanted = |above: bool| -> Vec<(u32, f64)> {
+        state
+            .indicators
+            .iter()
+            .filter(|drawn| drawn.indicator.visible && drawn.indicator.above_price == above)
+            .filter_map(|drawn| drawn.output.pane_height().map(|share| (drawn.indicator.id, share)))
+            .collect()
+    };
+    let stacked = plan_rows(&wanted(true), &wanted(false), top, total_h);
+    Layout {
+        plot_x,
+        plot_w,
+        top,
+        total_h,
+        price_y: stacked.price_y,
+        price_h: stacked.price_h,
+        rows: stacked.rows,
+    }
+}
+
+/// The rows and the price plot's box, as the shares alone decide them.
+struct Stacked {
+    rows: Vec<Row>,
+    price_y: f64,
+    price_h: f64,
+}
+
+/// Lay the stack out: the strips above the price, the price, then the strips
+/// below, each separated by one gap.
+///
+/// Price keeps most of the chart whatever is stacked around it — three strips
+/// sharing the window equally would leave the candles, the thing you came for,
+/// as a sliver — and `MIN_PRICE_SHARE` is the floor it keeps wherever in the
+/// stack it has ended up. The strips are what have heights; the price is
+/// whatever they leave, which is why moving one above it changes nothing about
+/// how tall anything is.
+///
+/// Taken out of [`layout`] so the arithmetic can be read and tested without a
+/// window: shares in, pixels out.
+fn plan_rows(above: &[(u32, f64)], below: &[(u32, f64)], top: f64, total_h: f64) -> Stacked {
+    let sum: f64 = above.iter().chain(below).map(|(_, share)| share).sum();
     let squeeze = if sum > 1.0 - MIN_PRICE_SHARE { (1.0 - MIN_PRICE_SHARE) / sum } else { 1.0 };
-    let heights: Vec<f64> =
-        wanted.iter().map(|(_, share)| total_h * share * squeeze).collect();
-    let used = heights.iter().sum::<f64>() + PANE_GAP * wanted.len() as f64;
+    let height_of = |share: f64| total_h * share * squeeze;
+    // One gap per strip: a strip has a line above it, except the topmost row,
+    // which hands its gap to the line above the price instead.
+    let used: f64 = above.iter().chain(below).map(|(_, share)| height_of(*share) + PANE_GAP).sum();
     let price_h = (total_h - used).max(1.0);
 
-    let mut panes = Vec::new();
-    let mut top = plot_y + price_h + PANE_GAP;
-    for ((id, _), height) in wanted.iter().zip(&heights) {
-        panes.push(PaneBox { id: *id, top, height: *height });
-        top += height + PANE_GAP;
+    let mut rows = Vec::with_capacity(above.len() + below.len() + 1);
+    let mut y = top;
+    for (id, share) in above {
+        let height = height_of(*share);
+        rows.push(Row { pane: Some(*id), top: y, height });
+        y += height + PANE_GAP;
     }
-    Layout { plot_x, plot_w, plot_y, total_h, price_h, panes }
+    let price_y = y;
+    rows.push(Row { pane: None, top: price_y, height: price_h });
+    y += price_h + PANE_GAP;
+    for (id, share) in below {
+        let height = height_of(*share);
+        rows.push(Row { pane: Some(*id), top: y, height });
+        y += height + PANE_GAP;
+    }
+    Stacked { rows, price_y, price_h }
 }
 
 /// Which part of the widget a point is over.
@@ -350,6 +479,10 @@ pub struct ChartView {
     on_pane_resize: Handler<dyn Fn(u32, f64)>,
     /// Told when a strip's close box was clicked.
     on_pane_close: Handler<dyn Fn(u32)>,
+    /// Told when one of a strip's arrows was clicked, so the indicators can be
+    /// reordered where they are stored — the chart draws the stack it is handed
+    /// and does not keep an order of its own.
+    on_pane_move: Handler<dyn Fn(u32, indicators::Move)>,
     /// Right-clicking the price axis, which has its own short menu.
     on_axis_menu: Handler<dyn Fn(f64, f64)>,
 }
@@ -391,6 +524,7 @@ impl ChartView {
             on_context_menu: Rc::new(RefCell::new(None)),
             on_pane_resize: Rc::new(RefCell::new(None)),
             on_pane_close: Rc::new(RefCell::new(None)),
+            on_pane_move: Rc::new(RefCell::new(None)),
             on_axis_menu: Rc::new(RefCell::new(None)),
         });
         view.wire_drawing();
@@ -465,6 +599,10 @@ impl ChartView {
 
     pub fn set_pane_close_handler(&self, handler: impl Fn(u32) + 'static) {
         *self.on_pane_close.borrow_mut() = Some(Box::new(handler));
+    }
+
+    pub fn set_pane_move_handler(&self, handler: impl Fn(u32, indicators::Move) + 'static) {
+        *self.on_pane_move.borrow_mut() = Some(Box::new(handler));
     }
 
     pub fn set_axis_menu_handler(&self, handler: impl Fn(f64, f64) + 'static) {
@@ -583,11 +721,11 @@ impl ChartView {
                 let s = state.borrow();
                 layout(&s, area.width() as f64, area.height() as f64).edge_at(y).is_some()
             };
-            let over_close = {
+            let over_control = {
                 let s = state.borrow();
-                layout(&s, area.width() as f64, area.height() as f64).close_at(x, y).is_some()
+                layout(&s, area.width() as f64, area.height() as f64).control_at(x, y).is_some()
             };
-            area.set_cursor_from_name(Some(match (over_edge, over_close) {
+            area.set_cursor_from_name(Some(match (over_edge, over_control) {
                 (true, _) => "ns-resize",
                 (_, true) => "pointer",
                 _ => "default",
@@ -667,26 +805,41 @@ impl ChartView {
     }
 
     fn wire_drag(&self) {
-        // Before the drag gesture, so clicking a strip's close box closes it
-        // rather than starting a pan under the pointer.
-        let close = gtk::GestureClick::new();
-        close.set_button(gtk::gdk::BUTTON_PRIMARY);
-        close.set_propagation_phase(gtk::PropagationPhase::Capture);
+        // Before the drag gesture, so clicking a strip's corner acts on the
+        // strip rather than starting a pan under the pointer.
+        let controls = gtk::GestureClick::new();
+        controls.set_button(gtk::gdk::BUTTON_PRIMARY);
+        controls.set_propagation_phase(gtk::PropagationPhase::Capture);
         let state = self.state.clone();
         let area = self.area.clone();
         let on_close = self.on_pane_close.clone();
-        close.connect_pressed(move |gesture, _, x, y| {
+        let on_move = self.on_pane_move.clone();
+        controls.connect_pressed(move |gesture, _, x, y| {
             let hit = {
                 let s = state.borrow();
-                layout(&s, area.width() as f64, area.height() as f64).close_at(x, y)
+                layout(&s, area.width() as f64, area.height() as f64).control_at(x, y)
             };
-            let Some(id) = hit else { return };
+            let Some((id, control)) = hit else { return };
             gesture.set_state(gtk::EventSequenceState::Claimed);
-            if let Some(handler) = on_close.borrow().as_ref() {
-                handler(id);
+            match control {
+                Control::Close => {
+                    if let Some(handler) = on_close.borrow().as_ref() {
+                        handler(id);
+                    }
+                }
+                Control::Up | Control::Down => {
+                    let direction = if control == Control::Up {
+                        indicators::Move::Up
+                    } else {
+                        indicators::Move::Down
+                    };
+                    if let Some(handler) = on_move.borrow().as_ref() {
+                        handler(id, direction);
+                    }
+                }
             }
         });
-        self.area.add_controller(close);
+        self.area.add_controller(controls);
 
         let drag = gtk::GestureDrag::new();
 
@@ -698,14 +851,19 @@ impl ChartView {
             // The edge wins over whatever region it crosses, because that is
             // what the cursor was already promising.
             let plan = layout(&s, area.width() as f64, area.height() as f64);
-            if let Some(id) = plan.edge_at(y) {
+            if let Some(edge) = plan.edge_at(y) {
                 let share = s
                     .indicators
                     .iter()
-                    .find(|d| d.indicator.id == id)
+                    .find(|d| d.indicator.id == edge.id)
                     .and_then(|d| d.output.pane_height())
                     .unwrap_or(0.18);
-                s.drag = Some(Drag::PaneEdge { id, share, total_h: plan.total_h });
+                s.drag = Some(Drag::PaneEdge {
+                    id: edge.id,
+                    share,
+                    total_h: plan.total_h,
+                    grows_downward: edge.grows_downward,
+                });
                 return;
             }
             s.drag = Some(
@@ -761,10 +919,12 @@ impl ChartView {
                     let factor = 2f64.powf(offset_y / DRAG_PER_DOUBLING);
                     s.price_zoom = (zoom * factor).clamp(MIN_PRICE_ZOOM, MAX_PRICE_ZOOM);
                 }
-                Drag::PaneEdge { id, share, total_h } => {
-                    // Pulling the line up grows the pane under it: the boundary
-                    // goes where the hand goes.
-                    let next = (share - offset_y / total_h)
+                Drag::PaneEdge { id, share, total_h, grows_downward } => {
+                    // The boundary goes where the hand goes, so the pane that
+                    // owns the line grows towards it: pulling up grows the pane
+                    // under the line, and pulling down the one above it.
+                    let travel = if grows_downward { offset_y } else { -offset_y };
+                    let next = (share + travel / total_h)
                         .clamp(indicators::MIN_PANE_SHARE, indicators::MAX_PANE_SHARE);
                     if let Some(drawn) = s.indicators.iter_mut().find(|d| d.indicator.id == id) {
                         drawn.output.set_pane_height(next);
@@ -896,7 +1056,7 @@ fn notify_hover(
                         index,
                         price: match range {
                             Some((low, high)) => {
-                                high - (y - plan.plot_y) / plan.price_h * (high - low)
+                                high - (y - plan.price_y) / plan.price_h * (high - low)
                             }
                             None => bar.close,
                         },
@@ -931,7 +1091,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let bars = &state.bars[first..first + visible];
 
     let plan = layout(state, width, height);
-    let (plot_x, plot_w, plot_y, price_h) = (plan.plot_x, plan.plot_w, plan.plot_y, plan.price_h);
+    let (plot_x, plot_w, price_y, price_h) = (plan.plot_x, plan.plot_w, plan.price_y, plan.price_h);
 
     let mut max_volume: f64 = 0.0;
     for b in bars {
@@ -942,7 +1102,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         return;
     };
 
-    let to_y = |price: f64| plot_y + price_h * (high - price) / (high - low);
+    let to_y = |price: f64| price_y + price_h * (high - price) / (high - low);
     let bar_w = plot_w / visible as f64;
 
     // One answer for how precisely prices are written, used by the gridlines,
@@ -952,7 +1112,7 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let kind = state.instrument.as_ref().map(|i| i.kind);
     let decimals = omacharts_engine::price_decimals(step, (low + high) / 2.0, kind);
 
-    draw_price_grid(cr, state, plot_x, plot_w, plot_y, price_h, low, high, &to_y);
+    draw_price_grid(cr, state, plot_x, plot_w, price_y, price_h, low, high, &to_y);
     draw_time_axis(cr, state, bars, plot_x, plot_w, height, bar_w, first);
     // Shaded things go under the candles; lines go over. A band drawn on top
     // of the bars hides the thing it is describing.
@@ -960,27 +1120,28 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     draw_candles(cr, state, bars, plot_x, bar_w, &to_y);
     draw_indicator_lines(cr, state, first, visible, plot_x, bar_w, &to_y);
 
-    for pane_box in &plan.panes {
-        let Some(drawn) = state.indicators.iter().find(|d| d.indicator.id == pane_box.id) else {
+    for (at, row) in plan.rows.iter().enumerate() {
+        draw_row_edge(cr, state, &plan, at);
+        let Some(id) = row.pane else { continue };
+        let Some(drawn) = state.indicators.iter().find(|d| d.indicator.id == id) else {
             continue;
         };
-        draw_pane_edge(cr, state, &plan, pane_box);
-        // The way out of a strip, offered only while the pointer is in it:
-        // four panes each wearing a permanent close button is four things
+        // The way around and out of a strip, offered only while the pointer is
+        // in it: four panes each wearing permanent buttons is a dozen things
         // competing with the chart.
-        if state.pointer.map(|(_, y)| Layout::covers(pane_box, y)).unwrap_or(false) {
-            draw_pane_close(cr, state, &plan, pane_box);
+        if state.pointer.map(|(_, y)| row.covers(y)).unwrap_or(false) {
+            draw_pane_controls(cr, state, &plan, row, at);
         }
         match &drawn.output {
             Output::Volume { .. } => {
                 if max_volume > 0.0 {
                     draw_volume(
-                        cr, state, bars, plot_x, bar_w, pane_box.top, pane_box.height, max_volume,
+                        cr, state, bars, plot_x, bar_w, row.top, row.height, max_volume,
                     );
                 }
                 // Named like the others now that it is one strip among several.
                 // Three unlabelled boxes under a chart is a puzzle.
-                draw_pane_name(cr, state, drawn, plot_x, pane_box.top);
+                draw_pane_name(cr, state, drawn, plot_x, row.top);
             }
             Output::Pane(pane) => draw_pane(
                 cr,
@@ -990,8 +1151,8 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
                 plot_x,
                 plot_w,
                 bar_w,
-                pane_box.top,
-                pane_box.height,
+                row.top,
+                row.height,
                 width,
                 first,
                 visible,
@@ -1000,12 +1161,12 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         }
     }
 
-    draw_last_price(cr, state, plot_x, plot_w, width, decimals, &to_y);
+    draw_last_price(cr, state, plot_x, plot_w, price_y, width, decimals, &to_y);
 
     if let Some((px, py)) = state.pointer {
         draw_crosshair(
-            cr, state, px, py, plot_x, plot_w, plot_y, price_h, width, height, bar_w, first, low,
-            high, &to_y,
+            cr, state, px, py, plot_x, plot_w, plan.top, price_y, price_h, width, height, bar_w,
+            first, low, high, &to_y,
         );
     }
 
@@ -1015,7 +1176,8 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     if state.pointer.is_none() {
         if let Some(echo) = state.echo {
             draw_echo(
-                cr, state, bars, plot_x, plot_w, bar_w, plot_y, price_h, height, echo, &to_y,
+                cr, state, bars, plot_x, plot_w, bar_w, plan.top, price_y, price_h, height, echo,
+                &to_y,
             );
         }
     }
@@ -1292,14 +1454,15 @@ fn draw_volume(
     }
 }
 
-/// The line between the chart and a pane, or between two panes.
+/// The line between two rows of the stack.
 ///
 /// Faint on purpose: it is there to say where one box ends and the next
 /// begins, not to be read. It is also the handle — the pointer turns into a
 /// resize cursor within a few pixels of it — so it has to be visible enough to
 /// aim at.
-fn draw_pane_edge(cr: &cairo::Context, state: &State, plan: &Layout, pane: &PaneBox) {
-    let y = Layout::edge(pane).round() + 0.5;
+fn draw_row_edge(cr: &cairo::Context, state: &State, plan: &Layout, at: usize) {
+    let Some((line, _)) = plan.edge(at) else { return };
+    let y = line.round() + 0.5;
     cr.save().ok();
     cr.set_line_width(1.0);
     colors::set_source_alpha(cr, &state.theme.ui.border, 0.9);
@@ -1309,20 +1472,49 @@ fn draw_pane_edge(cr: &cairo::Context, state: &State, plan: &Layout, pane: &Pane
     cr.restore().ok();
 }
 
-/// The × that takes a strip off the chart.
-fn draw_pane_close(cr: &cairo::Context, state: &State, plan: &Layout, pane: &PaneBox) {
-    let (x, y) = plan.close_box(pane);
-    let inset = 3.5;
+/// A strip's corner: the ways up and down the stack, and the way off the chart.
+fn draw_pane_controls(cr: &cairo::Context, state: &State, plan: &Layout, row: &Row, at: usize) {
     cr.save().ok();
     cr.set_line_width(1.2);
     cr.set_line_cap(cairo::LineCap::Round);
+    cr.set_line_join(cairo::LineJoin::Round);
     colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.75);
-    cr.move_to(x + inset, y + inset);
-    cr.line_to(x + PANE_CLOSE - inset, y + PANE_CLOSE - inset);
-    cr.move_to(x + PANE_CLOSE - inset, y + inset);
-    cr.line_to(x + inset, y + PANE_CLOSE - inset);
-    let _ = cr.stroke();
+    for control in plan.controls(at) {
+        let (x, y) = plan.control_box(row, control);
+        match control {
+            Control::Close => draw_close(cr, x, y),
+            Control::Up => draw_chevron(cr, x, y, true),
+            Control::Down => draw_chevron(cr, x, y, false),
+        }
+    }
     cr.restore().ok();
+}
+
+/// The × that takes a strip off the chart.
+fn draw_close(cr: &cairo::Context, x: f64, y: f64) {
+    let inset = 3.5;
+    cr.move_to(x + inset, y + inset);
+    cr.line_to(x + PANE_CONTROL - inset, y + PANE_CONTROL - inset);
+    cr.move_to(x + PANE_CONTROL - inset, y + inset);
+    cr.line_to(x + inset, y + PANE_CONTROL - inset);
+    let _ = cr.stroke();
+}
+
+/// One step up or down the stack.
+///
+/// A chevron rather than a filled triangle, so it carries the same weight as
+/// the × beside it: two strokes of the same width in the same box. Its points
+/// sit on half pixels, which is what keeps a 6-pixel mark from smearing.
+fn draw_chevron(cr: &cairo::Context, x: f64, y: f64, up: bool) {
+    let cx = (x + PANE_CONTROL / 2.0).floor() + 0.5;
+    let near = (y + 4.5).floor() + 0.5;
+    let far = (y + 8.5).floor() + 0.5;
+    let (apex, arms) = if up { (near, far) } else { (far, near) };
+    let arm = 3.0;
+    cr.move_to(cx - arm, arms);
+    cr.line_to(cx, apex);
+    cr.line_to(cx + arm, arms);
+    let _ = cr.stroke();
 }
 
 /// What a strip is, written in its own top-left corner.
@@ -1456,13 +1648,14 @@ fn draw_last_price(
     state: &State,
     plot_x: f64,
     plot_w: f64,
+    price_y: f64,
     width: f64,
     decimals: usize,
     to_y: &impl Fn(f64) -> f64,
 ) {
     let Some(last) = state.bars.last() else { return };
     let y = to_y(last.close).round() + 0.5;
-    if y < PAD {
+    if y < price_y {
         return;
     }
     let rising = last.close >= last.open;
@@ -1496,7 +1689,8 @@ fn draw_crosshair(
     py: f64,
     plot_x: f64,
     plot_w: f64,
-    plot_y: f64,
+    top: f64,
+    price_y: f64,
     price_h: f64,
     width: f64,
     height: f64,
@@ -1506,7 +1700,7 @@ fn draw_crosshair(
     high: f64,
     to_y: &impl Fn(f64) -> f64,
 ) {
-    if px < plot_x || px > plot_x + plot_w || py < plot_y || py > height - TIME_AXIS_H {
+    if px < plot_x || px > plot_x + plot_w || py < top || py > height - TIME_AXIS_H {
         return;
     }
     let crosshair = &state.theme.ui.crosshair;
@@ -1519,16 +1713,16 @@ fn draw_crosshair(
     cr.set_dash(&[2.0, 3.0], 0.0);
     cr.set_line_width(1.0);
     colors::set_source_alpha(cr, crosshair, 0.55);
-    cr.move_to(snapped_x, plot_y);
+    cr.move_to(snapped_x, top);
     cr.line_to(snapped_x, height - TIME_AXIS_H);
     cr.move_to(plot_x, py.round() + 0.5);
     cr.line_to(plot_x + plot_w, py.round() + 0.5);
     let _ = cr.stroke();
     cr.restore().ok();
 
-    // Price under the pointer, only while it is over the price pane.
-    if py <= plot_y + price_h {
-        let price = high - (py - plot_y) / price_h * (high - low);
+    // Price under the pointer, only while it is over the price plot.
+    if py >= price_y && py <= price_y + price_h {
+        let price = high - (py - price_y) / price_h * (high - low);
         let step = nice_step(high - low, (price_h / 52.0).max(2.0) as usize);
         let decimals = omacharts_engine::price_decimals(
             step,
@@ -1612,7 +1806,8 @@ fn draw_echo(
     plot_x: f64,
     plot_w: f64,
     bar_w: f64,
-    plot_y: f64,
+    top: f64,
+    price_y: f64,
     price_h: f64,
     height: f64,
     echo: Echo,
@@ -1625,12 +1820,12 @@ fn draw_echo(
 
     if let Some(index) = nearest_bar(bars, echo.ts) {
         let x = (plot_x + (index as f64 + 0.5) * bar_w).round() + 0.5;
-        cr.move_to(x, plot_y);
+        cr.move_to(x, top);
         cr.line_to(x, height - TIME_AXIS_H);
         let _ = cr.stroke();
     }
 
-    cr.rectangle(plot_x, plot_y, plot_w, price_h);
+    cr.rectangle(plot_x, price_y, plot_w, price_h);
     cr.clip();
     let y = to_y(echo.price).round() + 0.5;
     cr.move_to(plot_x, y);
@@ -1703,9 +1898,8 @@ fn draw_indicator_fills(
             Output::Profiles(profiles) => {
                 draw_profiles(cr, state, drawn, profiles, first, visible, plot_x, bar_w, to_y);
             }
-            // Drawn as its own pane, after the price plot.
-            // Both draw in their own strip, where the price scale does not
-            // reach, so nothing to do over the candles.
+            // These draw in a strip of their own, where the price scale does
+            // not reach, so there is nothing to do over the candles.
             Output::Volume { .. } | Output::Pane(_) | Output::Line(_) => {}
         }
     }
@@ -1989,6 +2183,176 @@ fn format_time_full(ts: i64, timeframe: Timeframe) -> String {
 mod tests {
     use super::*;
 
+    /// A chart 500 pixels of stack tall, with its rows in this order. `None`
+    /// is the price plot, which is always one of them.
+    fn with_rows(order: &[Option<u32>]) -> Layout {
+        let at = order.iter().position(|row| row.is_none()).expect("the price is always a row");
+        let share = |rows: &[Option<u32>]| -> Vec<(u32, f64)> {
+            rows.iter().flatten().map(|id| (*id, 0.15)).collect()
+        };
+        let stacked = plan_rows(&share(&order[..at]), &share(&order[at + 1..]), PAD, 500.0);
+        Layout {
+            plot_x: PAD,
+            plot_w: 400.0,
+            top: PAD,
+            total_h: 500.0,
+            price_y: stacked.price_y,
+            price_h: stacked.price_h,
+            rows: stacked.rows,
+        }
+    }
+
+    fn order(plan: &Layout) -> Vec<Option<u32>> {
+        plan.rows.iter().map(|row| row.pane).collect()
+    }
+
+    fn bottom(plan: &Layout) -> f64 {
+        plan.rows.last().map(|row| row.top + row.height).unwrap_or_default()
+    }
+
+    #[test]
+    fn strips_stack_in_the_order_they_are_given_around_the_price() {
+        let plan = with_rows(&[Some(1), None, Some(2), Some(3)]);
+        assert_eq!(order(&plan), vec![Some(1), None, Some(2), Some(3)]);
+        // Top to bottom, with a gap between each.
+        for pair in plan.rows.windows(2) {
+            assert!(
+                (pair[1].top - (pair[0].top + pair[0].height) - PANE_GAP).abs() < 1e-9,
+                "rows should be one gap apart"
+            );
+        }
+    }
+
+    #[test]
+    fn a_strip_above_the_price_starts_at_the_top_of_the_chart() {
+        let plan = with_rows(&[Some(1), Some(2), None]);
+        assert_eq!(plan.rows[0].top, PAD, "nothing sits above the first row");
+        assert!(plan.price_y > plan.rows[1].top, "and the price has moved down to the bottom");
+    }
+
+    /// The price plot is whatever the strips leave, so somebody dragging a
+    /// strip to fill the window would otherwise take the candles to nothing —
+    /// wherever in the stack the price has ended up.
+    #[test]
+    fn the_price_keeps_its_floor_however_tall_the_strip_above_it_is() {
+        for order in [vec![Some(1), None], vec![None, Some(1)]] {
+            let at = order.iter().position(|row| row.is_none()).unwrap();
+            let share = |rows: &[Option<u32>]| -> Vec<(u32, f64)> {
+                rows.iter().flatten().map(|id| (*id, indicators::MAX_PANE_SHARE)).collect()
+            };
+            let stacked = plan_rows(&share(&order[..at]), &share(&order[at + 1..]), PAD, 500.0);
+            // The floor, less the one gap that has to come out of somewhere.
+            assert!(
+                stacked.price_h + PANE_GAP + 0.5 >= 500.0 * MIN_PRICE_SHARE,
+                "the price was squeezed to {}",
+                stacked.price_h
+            );
+        }
+    }
+
+    /// The axis belongs to the whole stack, not to the price plot, so the rows
+    /// have to end exactly where [`layout`] leaves room for it — whichever row
+    /// is last.
+    #[test]
+    fn the_stack_ends_where_the_time_axis_starts_wherever_the_price_sits() {
+        for rows in [
+            vec![None],
+            vec![None, Some(1)],
+            vec![Some(1), None],
+            vec![Some(1), None, Some(2), Some(3)],
+            vec![Some(1), Some(2), Some(3), None],
+        ] {
+            let plan = with_rows(&rows);
+            let ends_at = bottom(&plan);
+            assert!((ends_at - (PAD + 500.0)).abs() < 1e-9, "{rows:?} ended at {ends_at}");
+        }
+    }
+
+    #[test]
+    fn the_strip_at_either_end_of_the_stack_is_offered_no_way_out_of_it() {
+        let plan = with_rows(&[Some(1), None, Some(2)]);
+        let first = plan.controls(0);
+        assert_eq!(first, vec![Control::Down, Control::Close], "nothing above the first row");
+        assert_eq!(plan.controls(2), vec![Control::Up, Control::Close], "nothing below the last");
+    }
+
+    /// One strip and the price is still two rows, so there is always somewhere
+    /// to go: the strip can cross the price even with nothing else on the
+    /// chart.
+    #[test]
+    fn the_only_strip_on_a_chart_is_still_offered_the_way_across_the_price() {
+        let under = with_rows(&[None, Some(1)]);
+        assert_eq!(under.controls(1), vec![Control::Up, Control::Close]);
+        let over = with_rows(&[Some(1), None]);
+        assert_eq!(over.controls(0), vec![Control::Down, Control::Close]);
+    }
+
+    /// Whichever arrows a strip offers, they sit in the same places: the boxes
+    /// are reserved rather than packed, so the one you are pointing at does not
+    /// move out from under the pointer when the strip travels.
+    #[test]
+    fn a_corner_control_sits_in_the_same_place_whichever_are_offered() {
+        let plan = with_rows(&[Some(1), None, Some(2)]);
+        let top = plan.control_box(&plan.rows[0], Control::Down);
+        let middle = plan.control_box(&plan.rows[2], Control::Down);
+        assert_eq!(top.0, middle.0, "the same column in every strip");
+        let (close, down, up) = (
+            plan.control_box(&plan.rows[0], Control::Close).0,
+            plan.control_box(&plan.rows[0], Control::Down).0,
+            plan.control_box(&plan.rows[0], Control::Up).0,
+        );
+        assert!(up < down && down < close, "up, down, close, reading left to right");
+        assert!(close + PANE_CONTROL < plan.plot_x + plan.plot_w, "inside the plot");
+    }
+
+    /// The hover highlight, the cursor and the click all ask the same question,
+    /// so the only thing that could put them out of step is the boxes moving
+    /// between the drawing and the hit test.
+    #[test]
+    fn a_click_in_the_middle_of_a_box_finds_that_box() {
+        let plan = with_rows(&[Some(1), None, Some(2)]);
+        for (at, id) in [(0usize, 1u32), (2, 2)] {
+            for control in plan.controls(at) {
+                let (x, y) = plan.control_box(&plan.rows[at], control);
+                let hit = plan.control_at(x + PANE_CONTROL / 2.0, y + PANE_CONTROL / 2.0);
+                assert_eq!(hit, Some((id, control)), "row {at} {control:?}");
+            }
+        }
+        // And an arrow that is not offered is not clickable either.
+        let (x, y) = plan.control_box(&plan.rows[0], Control::Up);
+        assert_eq!(plan.control_at(x + PANE_CONTROL / 2.0, y + PANE_CONTROL / 2.0), None);
+    }
+
+    #[test]
+    fn a_strips_corner_is_only_live_inside_that_strip() {
+        let plan = with_rows(&[None, Some(1)]);
+        let (x, y) = plan.control_box(&plan.rows[1], Control::Close);
+        assert!(plan.control_at(x + 6.0, y + 6.0).is_some());
+        // The same column, up in the price plot, where there is no close box.
+        assert_eq!(plan.control_at(x + 6.0, plan.price_y + 6.0), None);
+    }
+
+    /// The price plot has no height of its own — it is whatever the strips
+    /// leave — so the line above it has to resize the strip above it instead.
+    #[test]
+    fn the_line_above_the_price_resizes_the_strip_above_it() {
+        let plan = with_rows(&[Some(1), None, Some(2)]);
+        let price_line = plan.edge(1).expect("the price has a line above it");
+        assert_eq!(price_line.1, Edge { id: 1, grows_downward: true });
+        let strip_line = plan.edge(2).expect("so does the strip under it");
+        assert_eq!(strip_line.1, Edge { id: 2, grows_downward: false });
+        assert!(plan.edge(0).is_none(), "the topmost row has no line above it");
+    }
+
+    #[test]
+    fn a_line_is_grabbed_from_either_side_of_it() {
+        let plan = with_rows(&[None, Some(1)]);
+        let (line, edge) = plan.edge(1).unwrap();
+        assert_eq!(plan.edge_at(line - EDGE_GRAB + 0.5), Some(edge));
+        assert_eq!(plan.edge_at(line + EDGE_GRAB - 0.5), Some(edge));
+        assert_eq!(plan.edge_at(line + EDGE_GRAB * 4.0), None);
+    }
+
     #[test]
     fn steps_are_round_numbers() {
         assert_eq!(nice_step(100.0, 5), 20.0);
@@ -2078,3 +2442,4 @@ mod tests {
         assert_eq!(decimals_for(0.0001), 4);
     }
 }
+
