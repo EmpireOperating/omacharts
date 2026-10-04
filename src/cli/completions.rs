@@ -100,7 +100,7 @@ fn fish() -> String {
 pub fn man() -> String {
     let mut out = format!(
         ".TH OMACHARTS 1 \"\" \"omacharts {}\" \"User Commands\"\n\
-         .SH NAME\nomacharts \\- fast, beautiful market charts for Omarchy\n\
+         .SH NAME\nomacharts \\- fast, beautiful charting software for Omarchy\n\
          .SH SYNOPSIS\n.B omacharts\n[\\fISYMBOL\\fR]\n.br\n.B omacharts\n\
          \\fICOMMAND\\fR \\fISUBCOMMAND\\fR [\\fIARGUMENTS\\fR]\n\
          .SH DESCRIPTION\nEverything the window can do can be done from here. A command\n\

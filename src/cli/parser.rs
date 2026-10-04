@@ -16,7 +16,7 @@ use super::spec::{self, SURFACE};
 /// written, and says where the rest is — including the machine-readable
 /// surface, because something driving this from a script should not have to
 /// discover that by reading prose meant for a person.
-const ABOUT: &str = "Fast, beautiful market charts for Omarchy.";
+const ABOUT: &str = "Fast, beautiful charting software for Omarchy.";
 
 const AFTER: &str = "\
 Examples:

@@ -1,5 +1,5 @@
 pkgbase = omacharts
-	pkgdesc = Fast, beautiful market charts for Omarchy
+	pkgdesc = Fast, beautiful charting software for Omarchy
 	pkgver = 0.1.0
 	pkgrel = 1
 	url = https://github.com/jorgemanrubia/omacharts
