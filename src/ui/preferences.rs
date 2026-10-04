@@ -488,7 +488,7 @@ fn build_general_page(context: &Rc<Context>) {
     // First thing in the dialog: whether Omacharts is in the bar is the one
     // setting about the app rather than about a chart, and it is the one
     // people come looking for.
-    for group in desktop_group() {
+    if let Some(group) = desktop_group() {
         context.general_page.add(&group);
     }
     context.general_page.add(&resolutions_group(context));

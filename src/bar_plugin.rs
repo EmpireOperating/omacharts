@@ -184,12 +184,9 @@ pub fn add_to_layout(config: &mut serde_json::Value) -> bool {
         // A shell.json with no right-hand side is unusual but not broken;
         // make one rather than refusing.
         None => {
-            let bar = config.as_object_mut().map(|root| {
-                root.entry("bar").or_insert_with(|| serde_json::json!({}));
-                root
-            });
-            let Some(bar) = bar else { return false };
-            let layout = bar["bar"]
+            let Some(root) = config.as_object_mut() else { return false };
+            root.entry("bar").or_insert_with(|| serde_json::json!({}));
+            let layout = root["bar"]
                 .as_object_mut()
                 .map(|b| b.entry("layout").or_insert_with(|| serde_json::json!({})));
             let Some(layout) = layout else { return false };

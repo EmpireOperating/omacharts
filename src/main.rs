@@ -163,10 +163,10 @@ fn main() -> glib::ExitCode {
         // bar widget current is housekeeping, and housekeeping does not get to
         // sit in front of the first frame.
         glib::idle_add_local_once(|| {
-            if let Some(home) = glib::home_dir().to_str().map(std::path::PathBuf::from) {
-                if let Err(error) = omacharts::bar_plugin::refresh(&home) {
-                    eprintln!("omacharts: bar widget not updated: {error}");
-                }
+            if let Some(home) = glib::home_dir().to_str().map(std::path::PathBuf::from)
+                && let Err(error) = omacharts::bar_plugin::refresh(&home)
+            {
+                eprintln!("omacharts: bar widget not updated: {error}");
             }
         });
 

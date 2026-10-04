@@ -184,10 +184,10 @@ impl Timeframe {
     /// so "60m" and "1h" are the same thing rather than two chart states.
     pub fn normalised(self) -> Timeframe {
         match self.unit {
-            Unit::Minute if self.count % 1440 == 0 => Timeframe::days(self.count / 1440),
-            Unit::Minute if self.count % 60 == 0 => Timeframe::hours(self.count / 60),
-            Unit::Hour if self.count % 24 == 0 => Timeframe::days(self.count / 24),
-            Unit::Day if self.count % 7 == 0 => Timeframe::weeks(self.count / 7),
+            Unit::Minute if self.count.is_multiple_of(1440) => Timeframe::days(self.count / 1440),
+            Unit::Minute if self.count.is_multiple_of(60) => Timeframe::hours(self.count / 60),
+            Unit::Hour if self.count.is_multiple_of(24) => Timeframe::days(self.count / 24),
+            Unit::Day if self.count.is_multiple_of(7) => Timeframe::weeks(self.count / 7),
             _ => self,
         }
     }
@@ -206,7 +206,7 @@ impl Timeframe {
                 let base = Timeframe::SERVED_MINUTES
                     .into_iter()
                     .rev()
-                    .find(|m| self.count % m == 0)
+                    .find(|m| self.count.is_multiple_of(*m))
                     .unwrap_or(1);
                 Timeframe::minutes(base)
             }
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn a_repaired_open_never_escapes_its_own_bar() {
         // A weekend gap: yesterday closed well above today's whole range.
-        let series = vec![
+        let series = [
             Bar { ts: 0, open: 2.0, high: 2.0, low: 2.0, close: 2.0, volume: 0.0 },
             Bar { ts: 86_400, open: 1.0, high: 1.05, low: 0.95, close: 1.0, volume: 0.0 },
         ];

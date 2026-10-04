@@ -1050,7 +1050,7 @@ impl ChartView {
 
 fn notify_hover(
     state: &Rc<RefCell<State>>,
-    on_hover: &Rc<RefCell<Option<Box<dyn Fn(Option<Hover>)>>>>,
+    on_hover: &Handler<dyn Fn(Option<Hover>)>,
     area: &gtk::DrawingArea,
 ) {
     let hover = {
@@ -1186,13 +1186,13 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     // Another chart's pointer, if nothing is pointing at this one. The real
     // crosshair wins: an echo under your own pointer is a second line saying
     // the same thing.
-    if state.pointer.is_none() {
-        if let Some(echo) = state.echo {
-            draw_echo(
-                cr, state, bars, plot_x, plot_w, bar_w, plan.top, price_y, price_h, height, echo,
-                &to_y,
-            );
-        }
+    if state.pointer.is_none()
+        && let Some(echo) = state.echo
+    {
+        draw_echo(
+            cr, state, bars, plot_x, plot_w, bar_w, plan.top, price_y, price_h, height, echo,
+            &to_y,
+        );
     }
 
     if let Some(trouble) = state.trouble {

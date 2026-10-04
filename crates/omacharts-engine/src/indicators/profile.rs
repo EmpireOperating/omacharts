@@ -240,6 +240,9 @@ fn one(
             continue;
         }
         // Split across the rows the bar touches, by how much of it is in each.
+        // `row` is a price coordinate here, not just an index — `take(last + 1)
+        // .skip(first)` would say the same thing far less plainly than `first..=last`.
+        #[allow(clippy::needless_range_loop)]
         for row in first..=last {
             let row_low = low + row as f64 * step;
             let row_high = row_low + step;

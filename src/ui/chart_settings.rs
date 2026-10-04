@@ -1191,10 +1191,10 @@ fn band_groups(
         let refresh_for_show = refresh.clone();
         switch.connect_state_set(move |_, on| {
             update(&window_for_show, id, move |indicator| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.enabled = on;
-                    }
+                if let Params::Vwap { bands, .. } = &mut indicator.params
+                    && let Some(band) = bands.get_mut(index)
+                {
+                    band.enabled = on;
                 }
             });
             refresh_for_show.run();
@@ -1212,10 +1212,10 @@ fn band_groups(
         deviations.connect_value_notify(move |row| {
             let value = row.value();
             update(&window_for_dev, id, move |indicator| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.deviations = value;
-                    }
+                if let Params::Vwap { bands, .. } = &mut indicator.params
+                    && let Some(band) = bands.get_mut(index)
+                {
+                    band.deviations = value;
                 }
             });
             refresh_for_dev.run();
@@ -1232,10 +1232,10 @@ fn band_groups(
         let refresh_for_fill = refresh.clone();
         fill.connect_state_set(move |_, on| {
             update(&window_for_fill, id, move |indicator| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.fill = on;
-                    }
+                if let Params::Vwap { bands, .. } = &mut indicator.params
+                    && let Some(band) = bands.get_mut(index)
+                {
+                    band.fill = on;
                 }
             });
             refresh_for_fill.run();
@@ -1258,10 +1258,10 @@ fn band_groups(
                 0.02,
                 0.6,
                 move |indicator, share| {
-                    if let Params::Vwap { bands, .. } = &mut indicator.params {
-                        if let Some(band) = bands.get_mut(index) {
-                            band.fill_alpha = Some(share);
-                        }
+                    if let Params::Vwap { bands, .. } = &mut indicator.params
+                        && let Some(band) = bands.get_mut(index)
+                    {
+                        band.fill_alpha = Some(share);
                     }
                 },
             ),
@@ -1299,10 +1299,10 @@ fn band_groups(
             &current,
             band.color.clone(),
             move |indicator, choice| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.color = choice;
-                    }
+                if let Params::Vwap { bands, .. } = &mut indicator.params
+                    && let Some(band) = bands.get_mut(index)
+                {
+                    band.color = choice;
                 }
             },
             id,
@@ -1310,10 +1310,10 @@ fn band_groups(
 
         for row in stroke_rows(window, refresh, &ink, id, "", band.stroke, {
             move |indicator: &mut Indicator, stroke: Stroke| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.stroke = stroke;
-                    }
+                if let Params::Vwap { bands, .. } = &mut indicator.params
+                    && let Some(band) = bands.get_mut(index)
+                {
+                    band.stroke = stroke;
                 }
             }
         }) {
@@ -1565,10 +1565,8 @@ fn rows_rows(
         });
         if let Some(spin) = spin_weak.upgrade() {
             spin.set_sensitive(!on);
-            if on {
-                if let Some(drawn) = window_for_switch.profile_rows(id) {
-                    spin.set_value(drawn as f64);
-                }
+            if on && let Some(drawn) = window_for_switch.profile_rows(id) {
+                spin.set_value(drawn as f64);
             }
         }
         refresh_for_switch.run();

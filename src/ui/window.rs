@@ -1183,6 +1183,14 @@ fn opening_candidates(
 /// corner has to step around them before either has been allocated.
 const CORNER_WIDTH: i32 = 78;
 
+/// Bars already folded to a resolution, keyed by cache key and that
+/// resolution, and shared with every pane drawing them.
+type SeriesCache = Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>;
+
+/// A dialog's "draw yourself again", handed to the rows it rebuilds. Optional
+/// because it cannot exist until the rows it refers to do.
+type Rebuild = Rc<RefCell<Option<Box<dyn Fn()>>>>;
+
 pub struct Window {
     pub window: adw::ApplicationWindow,
     /// Every chart on screen. One of them is focused, and that is the one the
@@ -1253,7 +1261,7 @@ pub struct Window {
     /// symbol has been fetched, switching to it is a read and a draw. This
     /// removes even the read, which is what makes arrowing back and forth over
     /// the same few symbols feel like nothing is happening at all.
-    series: Rc<RefCell<HashMap<(String, Timeframe), Rc<Vec<omacharts_engine::Bar>>>>>,
+    series: SeriesCache,
     /// The split, so the keyboard can show and hide the rail.
     ///
     /// A GtkPaned rather than an AdwOverlaySplitView: the rail is a table of
@@ -1868,13 +1876,13 @@ impl Window {
             self.chart_host.remove(&child);
         }
         for pane in self.panes.borrow().iter() {
-            if let Some(parent) = pane.root.parent() {
-                if let Some(paned) = parent.downcast_ref::<gtk::Paned>() {
-                    if paned.start_child().as_ref() == Some(pane.root.upcast_ref()) {
-                        paned.set_start_child(None::<&gtk::Widget>);
-                    } else {
-                        paned.set_end_child(None::<&gtk::Widget>);
-                    }
+            if let Some(parent) = pane.root.parent()
+                && let Some(paned) = parent.downcast_ref::<gtk::Paned>()
+            {
+                if paned.start_child().as_ref() == Some(pane.root.upcast_ref()) {
+                    paned.set_start_child(None::<&gtk::Widget>);
+                } else {
+                    paned.set_end_child(None::<&gtk::Widget>);
                 }
             }
         }
@@ -3306,7 +3314,7 @@ impl Window {
             "What the strip offers. Typing a resolution on the chart adds it here too.",
         ));
 
-        let rebuild: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let rebuild: Rebuild = Rc::new(RefCell::new(None));
 
         let entry = gtk::Entry::new();
         entry.set_placeholder_text(Some("3m, 45m, 2h, 1D"));
@@ -3535,10 +3543,10 @@ impl Window {
                     if let Some(dialog) = this.window.visible_dialog() {
                         // A pushed page pops rather than taking the dialog
                         // with it, which is what Escape means inside one.
-                        if let Some(prefs) = dialog.downcast_ref::<adw::PreferencesDialog>() {
-                            if prefs.pop_subpage() {
-                                return glib::Propagation::Stop;
-                            }
+                        if let Some(prefs) = dialog.downcast_ref::<adw::PreferencesDialog>()
+                            && prefs.pop_subpage()
+                        {
+                            return glib::Propagation::Stop;
                         }
                         dialog.close();
                         return glib::Propagation::Stop;
@@ -4277,6 +4285,10 @@ impl Window {
         let first = position.saturating_sub(PREFETCH_WINDOW);
         let last = (position + PREFETCH_WINDOW).min(order.len().saturating_sub(1));
 
+        // `index` is a position in the rail, not just a subscript: it is what
+        // says which neighbour to skip and how far away the rest are, so
+        // enumerate() would hand back the same number by a longer route.
+        #[allow(clippy::needless_range_loop)]
         for index in first..=last {
             if index == position {
                 continue;
