@@ -37,8 +37,8 @@ On Arch, install the package from the latest
 [release](https://github.com/jorgemanrubia/omacharts/releases/latest):
 
 ```sh
-curl -LO https://github.com/jorgemanrubia/omacharts/releases/latest/download/omacharts-0.1.0-1-x86_64.pkg.tar.zst
-sudo pacman -U omacharts-0.1.0-1-x86_64.pkg.tar.zst
+curl -LO https://github.com/jorgemanrubia/omacharts/releases/latest/download/omacharts-0.1.1-1-x86_64.pkg.tar.zst
+sudo pacman -U omacharts-0.1.1-1-x86_64.pkg.tar.zst
 ```
 
 Or build it yourself from a clone, which is the same package:

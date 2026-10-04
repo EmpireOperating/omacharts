@@ -164,6 +164,13 @@ fn span(bars: &[Bar]) -> f64 {
 /// This is what the user means by rows that suit the price: forty-odd rows
 /// across an Apple session is nine cents a row, which hides exactly the shelf
 /// a profile is read for.
+///
+/// The widest period has a say as well as the typical one. The step is one
+/// step for the whole chart, but the row count is capped per period, so a
+/// period that moved much further than the median would run out of rows and
+/// be drawn across a fraction of its own range — a sliver, with everything
+/// above it clamped into the top row. Picking a step that fits the widest
+/// period inside [`MAX_ROWS`] is what keeps every period whole.
 fn auto_step(bars: &[Bar], periods: &[(usize, usize)], kind: Option<InstrumentKind>) -> f64 {
     let price = bars[bars.len() / 2].close.abs().max(f64::MIN_POSITIVE);
     let tick = 10f64.powi(-(price_decimals(0.0, price, kind) as i32));
@@ -177,6 +184,7 @@ fn auto_step(bars: &[Bar], periods: &[(usize, usize)], kind: Option<InstrumentKi
     }
     spans.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let typical = spans[spans.len() / 2];
+    let widest = *spans.last().unwrap_or(&typical);
 
     // 1, 2 and 5 ticks, then the same at every power of ten — the increments
     // an exchange and a trader both think in.
@@ -184,8 +192,9 @@ fn auto_step(bars: &[Bar], periods: &[(usize, usize)], kind: Option<InstrumentKi
     for decade in 0..12 {
         for base in [1.0, 2.0, 5.0] {
             multiple = base * 10f64.powi(decade);
-            if typical / (multiple * tick) <= TARGET_ROWS {
-                return multiple * tick;
+            let step = multiple * tick;
+            if typical / step <= TARGET_ROWS && widest / step <= MAX_ROWS as f64 {
+                return step;
             }
         }
     }
@@ -503,5 +512,66 @@ mod tests {
         let bars = vec![bar(0, 9.0, 11.0, 50.0)];
         assert_eq!(compute(&bars, Reset::Session, 0, Some(0), 0.7, None)[0].rows.len(), 4);
         assert_eq!(compute(&bars, Reset::Session, 0, Some(10_000), 0.7, None)[0].rows.len(), 400);
+    }
+
+    /// A quarter on a daily chart, on an instrument whose history is mostly
+    /// much quieter than its present — which is every stock that has grown.
+    ///
+    /// The step is one step for the whole chart, chosen from the median
+    /// period. The row count is capped per period. Together those two meant a
+    /// period that moved far further than the median ran out of rows: it was
+    /// drawn across eight dollars of its own hundred-and-fifty-dollar range,
+    /// with everything above clamped into the top row, so every other row
+    /// came out at a width of zero and the profile was invisible.
+    #[test]
+    fn a_period_that_moved_further_than_the_rest_is_still_drawn_whole() {
+        let day = 86_400i64;
+        let start = 1_735_689_600i64;
+        let mut bars = Vec::new();
+        // Years at twenty dollars, then a quarter that ranges over a hundred.
+        for i in 0..1600i64 {
+            let p = 20.0 + ((i % 11) as f64 * 0.4);
+            bars.push(Bar {
+                ts: start + i * day,
+                open: p,
+                high: p + 0.5,
+                low: p - 0.5,
+                close: p,
+                volume: 5_000_000.0,
+            });
+        }
+        for i in 1600..1780i64 {
+            let p = 520.0 + ((i - 1600) as f64 * 1.4) + ((i % 7) as f64 * 6.0);
+            bars.push(Bar {
+                ts: start + i * day,
+                open: p,
+                high: p + 8.0,
+                low: p - 8.0,
+                close: p + 1.0,
+                volume: 20_000_000.0,
+            });
+        }
+
+        let profiles = compute(&bars, Reset::Quarter, 0, None, 0.7, None);
+        let last = profiles.last().expect("a quarter to draw");
+        let bars_in = &bars[last.first_bar..=last.last_bar];
+        let low = bars_in.iter().fold(f64::MAX, |a, b| a.min(b.low));
+        let high = bars_in.iter().fold(f64::MIN, |a, b| a.max(b.high));
+
+        let covered = last.rows.last().unwrap().high - last.rows.first().unwrap().low;
+        assert!(
+            covered >= (high - low) * 0.99,
+            "the profile covers {covered:.2} of a {:.2} range",
+            high - low
+        );
+
+        // And it is a profile rather than one block: the rows that are not the
+        // point of control still have a width worth drawing.
+        let visible = last
+            .rows
+            .iter()
+            .filter(|r| r.volume / last.max_volume >= 0.01)
+            .count();
+        assert!(visible > 10, "only {visible} rows would be drawn");
     }
 }
