@@ -27,7 +27,9 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI and ATR, each in its own resizable strip. More coming.
 - **Omarchy plugin.** Your watchlist in the bar, with sparklines, live, still
-  there after the window closes.
+  there after the window closes. It installs itself the first time you run
+  Omacharts on an Omarchy desktop, and `omacharts plugin` puts it back, brings
+  it up to date or takes it out again.
 - **Agent ready.** A rich CLI covers everything the window does, and says what
   it can do in a form a script or an agent can read.
 
