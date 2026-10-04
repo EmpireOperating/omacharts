@@ -15,8 +15,12 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   whichever theme is active, so overlays come out distinguishable, legible
   against the candles, and in keeping with everything else on screen. Any of
   the 22 themes, including the awkward ones.
-- **Tiled charts.** Split horizontally or vertically, as deep as you like. Each
-  chart keeps its own symbol, resolution, indicators and settings.
+- **Configurable layout.** Split a chart horizontally or vertically, as deep as
+  you like, and resize the panes with the mouse or the keyboard. Each chart
+  keeps its own symbol, resolution, indicators and settings. Keep as many
+  arrangements as you want as chartbooks, each with its own watchlist, and
+  switch between them from the strip along the bottom. It all comes back the
+  way you left it.
 - **Linked or parked.** Linked charts follow the watchlist together; unlink one
   and it stays where you left it.
 - **Keyboard first.** Hotkeys for the whole app: split and close charts,
