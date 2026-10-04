@@ -282,17 +282,12 @@ mod tests {
     /// apart on screen, which is the whole affordance gone. 0.06 is where
     /// `delta_e` puts two lines that read as the same line.
     ///
-    /// The exceptions are not link groups going wrong; they are two
-    /// hand-written palettes in which Teal and Cyan were always near-twins,
-    /// and two indicators in those colours have always been as hard to
-    /// separate as two badges are. They are listed rather than waved through
-    /// so that a *new* collision — from a palette edit, or a ninth group
-    /// wearing something different — fails this.
+    /// Two badges the eye cannot separate are two badges that say nothing, so
+    /// this holds for every built-in palette with no exceptions. It carried
+    /// three for a while — Teal against Cyan in Paper and Daylight, where the
+    /// swatches were always near-twins — until those palettes were retuned.
     #[test]
-    fn no_two_groups_look_alike_beyond_the_palettes_that_always_did() {
-        const KNOWN: [&str; 3] =
-            ["Daylight: Teal/Cyan", "Paper: Teal/Cyan", "Paper: Teal/Green"];
-
+    fn no_two_groups_ever_look_alike() {
         let mut tight = Vec::new();
         for theme in builtin_themes() {
             let colours: Vec<(LinkGroup, String)> = ALL
@@ -310,7 +305,7 @@ mod tests {
             }
         }
         tight.sort();
-        assert_eq!(tight, KNOWN, "the set of colours that look alike has moved");
+        assert!(tight.is_empty(), "these groups read as one colour: {tight:?}");
     }
 
     /// The neutral group has to stay clear of all eight hues, and a theme

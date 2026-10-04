@@ -579,8 +579,14 @@ fn paper() -> Theme {
             crosshair: "#a85b2a".into(),
             accent: "#a85b2a".into(),
         },
+        // Teal is darker than the rest on purpose. sRGB is at its narrowest
+        // between green and blue, so a teal and a cyan at the lightness
+        // everything else sits at cannot be given enough chroma to tell apart
+        // — the old #0f766e and Cyan read as one colour, and so did it and
+        // Green. Lightness is the only axis left, and spending it downwards
+        // buys contrast on pale stock rather than costing it.
         swatches: swatches([
-            "#1f6feb", "#b8860b", "#7d3c98", "#0f766e", "#b03a2e", "#2f7d52", "#c2601c", "#1f7a8c",
+            "#1f6feb", "#b8860b", "#7d3c98", "#0d665f", "#b03a2e", "#2f7d52", "#c2601c", "#1f7a8c",
         ]),
     }
 }
@@ -604,8 +610,11 @@ fn daylight() -> Theme {
             crosshair: "#0969da".into(),
             accent: "#0969da".into(),
         },
+        // Teal is darker than the rest for the reason Paper's is: at a shared
+        // lightness the gamut has no chroma to spare between green and blue,
+        // and the old #1b7c83 was a cyan with the saturation turned down.
         swatches: swatches([
-            "#0969da", "#9a6700", "#8250df", "#1b7c83", "#cf222e", "#1a7f37", "#bc4c00", "#0a7ea4",
+            "#0969da", "#9a6700", "#8250df", "#0f6a71", "#cf222e", "#1a7f37", "#bc4c00", "#0a7ea4",
         ]),
     }
 }
@@ -1075,6 +1084,30 @@ mod tests {
                 let (a, b) = (theme.series(n), theme.series(n + 1));
                 let distance = rgb_distance(&a, &b);
                 assert!(distance > 0.25, "{} {n}: {a} vs {b} ({distance:.3})", theme.name);
+            }
+        }
+    }
+
+    /// Two swatches that look alike are two indicators you cannot tell apart,
+    /// and the palettes where this went wrong were the light ones: the gamut
+    /// is narrowest between green and blue, so Teal and Cyan ended up as the
+    /// same colour at slightly different saturations.
+    #[test]
+    fn no_two_swatches_in_a_palette_look_alike() {
+        for theme in builtin_themes() {
+            for (i, a) in theme.swatches.iter().enumerate() {
+                for b in &theme.swatches[i + 1..] {
+                    let distance = delta_e(&a.hex, &b.hex);
+                    assert!(
+                        distance > 0.06,
+                        "{}: {} {} reads as {} {} ({distance:.3})",
+                        theme.name,
+                        a.name,
+                        a.hex,
+                        b.name,
+                        b.hex
+                    );
+                }
             }
         }
     }
