@@ -124,7 +124,6 @@ fn resolutions_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 
     let row = adw::ActionRow::new();
     row.set_title("Preset resolutions");
-    row.set_subtitle("What every chart's strip offers. Typing one on a chart adds it here too.");
     row.set_activatable(true);
 
     let button = gtk::Button::with_label("Edit…");
@@ -498,10 +497,6 @@ fn build_general_page(context: &Rc<Context>) {
 fn build_market_data(context: &Rc<Context>) {
     let group = adw::PreferencesGroup::new();
     group.set_title("Market data");
-    group.set_description(Some(
-        "Bars are downloaded once and kept, so a chart you have opened before \
-         opens instantly.",
-    ));
 
     let provider = adw::ActionRow::new();
     provider.set_title("Provider");
