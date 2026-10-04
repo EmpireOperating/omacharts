@@ -189,6 +189,16 @@ impl SymbolSearch {
         self.dialog.present(Some(parent));
         self.entry.grab_focus();
         self.entry.set_position(-1);
+        // The first time the picker opens, `present` is also realizing and
+        // mapping it, and the focus that mapping installs arrives after this
+        // function has returned. An entry that gains focus selects what it
+        // holds, so the letter that summoned the picker was selected and the
+        // next keystroke replaced it instead of following it — the first time
+        // only, because afterwards the dialog is already built and the focus
+        // above is the one that sticks. Collapsing the selection once more,
+        // after everything settles, puts the cursor at the end either way.
+        let entry = self.entry.clone();
+        glib::idle_add_local_once(move || entry.set_position(-1));
     }
 }
 
