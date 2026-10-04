@@ -21,8 +21,7 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   arrangements as you want as chartbooks, each with its own watchlist, and
   switch between them from the strip along the bottom. It all comes back the
   way you left it.
-- **Linked or parked.** Linked charts follow the watchlist together; unlink one
-  and it stays where you left it.
+- **Linked or parked.** Link charts and watchlists as you need to.
 - **Keyboard first.** Hotkeys for the whole app: split and close charts,
   resize them, walk the chartbooks, step the resolution, rotate the
   watchlists. Type a letter to find a symbol, a number to set a resolution.
