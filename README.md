@@ -47,10 +47,10 @@ cargo build --release
 
 ## Data
 
-A feed sits behind one interface, and the app is built to take several. Yahoo
-Finance's public endpoint is the only one implemented so far: no account, no
-key, cached locally in SQLite, delayed about 15 minutes, which is invisible on
-the timeframes this is built for. Not affiliated with Yahoo.
+Omacharts is prepared to work with multiple data providers, but at launch only
+Yahoo Finance is supported. Its public endpoint needs no account and no key,
+and is cached locally in SQLite. Prices are delayed about 15 minutes, which is
+invisible on the timeframes this is built for. Not affiliated with Yahoo.
 
 Help adding more feeds would be very welcome, paid or free. The provider
 interface is small and everything above it is already written against it.
