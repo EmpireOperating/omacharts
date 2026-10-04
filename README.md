@@ -11,10 +11,10 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 - **Fast.** Instant load, rendering and interactions. The pillar for everything
   else.
-- **Beautiful.** The chart is the protagonist and the user interface is at its
-  service. It follows your Omarchy theme as you change it, and generates an
-  indicator palette for whichever theme is active, so things look great without
-  you having to be an artist.
+- **Beautiful.** The charts are the protagonists and the user interface is at
+  their service. It follows your Omarchy theme as you change it, and generates
+  an indicator palette for whichever theme is active, so things look great
+  without you having to be an artist.
 - **Configurable layout.** Split a chart horizontally or vertically, as deep as
   you like, and resize the panes with the mouse or the keyboard. Each chart
   keeps its own symbol, resolution, indicators and settings. Keep as many
