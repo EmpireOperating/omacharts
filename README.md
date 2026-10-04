@@ -59,12 +59,14 @@ Futures are continuous contracts only.
 
 Rough order, and nothing here is a promise.
 
-- **Printing.** A chart on paper, or into a PDF.
-- **Beautiful annotations.** Trendlines, levels and notes that stay where you
-  put them, and look like they belong on the chart rather than on top of it.
-- **More data feeds.** Yahoo is one provider behind one interface. Others can
-  sit behind the same one, including the paid ones with real-time prices.
-- **More indicators.** MACD and Bollinger bands are the obvious gaps.
+- [ ] **Printing.** A chart on paper, or into a PDF.
+- [ ] **Beautiful annotations.** Trendlines, levels and notes that stay where
+      you put them, and look like they belong on the chart rather than on top
+      of it.
+- [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
+      can sit behind the same one, including the paid ones with real-time
+      prices.
+- [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
 
 ## Licence
 
