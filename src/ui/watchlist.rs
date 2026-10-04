@@ -2054,9 +2054,23 @@ mod tests {
     /// Written as the clearing alone because a rail needs a window; a
     /// regression here hangs this test rather than failing it, which is the
     /// one way this can go wrong.
+    ///
+    /// Ignored by default, so run it deliberately:
+    ///
+    /// ```sh
+    /// cargo test clearing_the_rail -- --ignored
+    /// ```
+    ///
+    /// It needs a real display and GTK all to itself. A build machine has no
+    /// display, and libtest hands every test its own thread, so whichever GTK
+    /// test gets there first owns GTK and this one dies on the first widget it
+    /// touches — a segfault that says nothing about the rail. The bounded walk
+    /// itself is six lines; what this pins down is that GTK really does refuse
+    /// to take the popover off, which is the part no amount of reasoning can
+    /// settle.
     #[test]
+    #[ignore = "needs a display and GTK to itself; see the note above"]
     fn clearing_the_rail_finishes_with_a_popover_anchored_on_the_list() {
-        // The same bargain the shortcut tests make.
         if !crate::ui::gtk_ready() {
             return;
         }
