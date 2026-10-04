@@ -53,6 +53,7 @@ pub const BINDINGS: &[Binding] = &[
     global("chart.split-h", &["<Ctrl>h"]),
     global("chart.maximize", &["<Ctrl>m"]),
     global("win.new-chartbook", &["<Ctrl>t"]),
+    global("win.rename-chartbook", &["<Ctrl><Shift>r"]),
     // Paste and cut. The keys are the keys; what changes is whether
     // the keyboard is in something you can type into.
     careful("chart.split-v", &["<Ctrl>v"]),

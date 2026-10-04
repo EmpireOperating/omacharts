@@ -21,16 +21,60 @@ use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
 
 /// What a new install starts with, so the rail is never an empty column.
+///
+/// Things somebody opening a charting app for the first time recognises.
+/// Futures are not on the list for that reason — ES and CL are in the
+/// inventory and one search away, but a front-month contract greeting a
+/// first-time user says this app is not for them.
 pub const DEFAULTS: &[(&str, &[&str])] = &[
     // The liquid ETFs rather than the indices themselves: they are what people
     // actually watch and trade, they carry real volume so the profile and the
     // volume pane have something to show, and an index has neither.
     ("Indexes", &["SPY", "QQQ", "DIA"]),
     ("US Stocks", &["NVDA", "AAPL", "MSFT", "AMZN", "META", "GOOGL", "TSLA", "AMD", "SHOP"]),
-    ("Futures", &["ES", "NQ", "GC", "CL"]),
     ("Currencies", &["EURUSD", "GBPUSD", "AUDUSD"]),
     ("Crypto", &["BTC", "ETH", "SOL"]),
 ];
+
+/// Move a section's symbols into a watchlist of their own, and return it.
+///
+/// Apart from the rail because it is all the part that can go wrong, and the
+/// rail needs a window to exist. `None` when the watchlist could not be made,
+/// which leaves the section exactly where it was.
+///
+/// The order is the point: the symbols move first and the section goes last,
+/// so an interrupted promotion can leave them in both places and never in
+/// neither.
+fn promote_section_in(store: &Store, from: i64, section: i64, name: &str) -> Option<i64> {
+    let entries: Vec<Entry> = store
+        .watchlist_sections(from)
+        .into_iter()
+        .find(|candidate| candidate.id == section)
+        .map(|candidate| candidate.entries)?;
+
+    let watchlist = store.add_watchlist(name)?;
+    let root = store.root_section(watchlist);
+    for entry in &entries {
+        store.move_entry_to_section(section, root, entry, None);
+    }
+    store.remove_section(section);
+    Some(watchlist)
+}
+
+/// The watchlist `delta` steps along from `current`, wrapping at both ends.
+///
+/// `None` when there is nowhere to go: one watchlist has nothing to rotate
+/// to, and a `current` that is not in the list at all is a rail pointed at
+/// something that has been deleted, which a keystroke should not quietly
+/// resolve by jumping somewhere arbitrary.
+fn next_in_rotation(ids: &[i64], current: i64, delta: i32) -> Option<i64> {
+    if ids.len() < 2 {
+        return None;
+    }
+    let at = ids.iter().position(|id| *id == current)? as i32;
+    let next = (at + delta).rem_euclid(ids.len() as i32) as usize;
+    Some(ids[next])
+}
 
 /// The last close and the move onto it, when the cache holds enough to say.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -154,6 +198,11 @@ pub struct Watchlist {
     active: Cell<i64>,
     /// Names the watchlist on screen and offers the rest.
     switcher: gtk::MenuButton,
+    /// Told whenever the rail starts showing a different watchlist, so the
+    /// window can write the choice down against the chartbook it belongs to.
+    /// One hook for every way of switching, because a second route to the
+    /// same state is a second route that can forget to save.
+    on_switch: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 const SETTING_COLUMNS: &str = "watchlist_columns";
@@ -230,6 +279,7 @@ impl Watchlist {
             quiet: Cell::new(false),
             active: Cell::new(active),
             switcher: switcher.clone(),
+            on_switch: RefCell::new(None),
         });
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -279,6 +329,33 @@ impl Watchlist {
         self.active.set(id);
         self.store.set_setting(SETTING_ACTIVE, &id.to_string());
         self.rebuild();
+        self.announce_switch();
+    }
+
+    /// Hear about the rail being pointed at a different watchlist.
+    pub fn connect_switched(&self, on_switch: impl Fn() + 'static) {
+        *self.on_switch.borrow_mut() = Some(Rc::new(on_switch));
+    }
+
+    /// Borrowed out before it is called: switching rebuilds the rail, and a
+    /// handler that touched it while the borrow was held would panic.
+    fn announce_switch(&self) {
+        let handler = self.on_switch.borrow().clone();
+        if let Some(handler) = handler {
+            handler();
+        }
+    }
+
+    /// Walk to the watchlist before or after this one, round the ends.
+    ///
+    /// Through `set_active_watchlist` like every other way of switching, so
+    /// the choice is written down against the chartbook rather than only
+    /// being on screen.
+    pub fn rotate_watchlist(self: &Rc<Self>, delta: i32) {
+        let ids: Vec<i64> = self.watchlists().into_iter().map(|(id, _)| id).collect();
+        if let Some(next) = next_in_rotation(&ids, self.active.get(), delta) {
+            self.set_active_watchlist(next);
+        }
     }
 
     /// Every watchlist, in display order, as id and name.
@@ -304,7 +381,9 @@ impl Watchlist {
 
     /// Does the keyboard currently live here?
     pub fn has_focus(&self) -> bool {
-        self.list.focus_child().is_some() || self.list.has_focus()
+        // Whether the keyboard is in the rail now, which is not the same
+        // question as `focus_child`, which answers what held it last.
+        self.widget.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN)
     }
 
     pub fn columns(&self) -> Vec<Column> {
@@ -670,6 +749,12 @@ impl Watchlist {
         add.connect_activate(move |_, _| this.add_symbol_to(id));
         actions.add_action(&add);
 
+        let promote = gio::SimpleAction::new("promote", None);
+        let this = self.clone();
+        let promoted = name.to_string();
+        promote.connect_activate(move |_, _| this.promote_section(id, &promoted));
+        actions.add_action(&promote);
+
         let remove = gio::SimpleAction::new("remove", None);
         let this = self.clone();
         let name = name.to_string();
@@ -680,8 +765,11 @@ impl Watchlist {
         actions.add_action(&remove);
         anchor.insert_action_group("section", Some(&actions));
 
+        // Only named sections are given a header at all, so the root — which
+        // has no name to lend a watchlist — never reaches this menu.
         let model = gio::Menu::new();
         model.append(Some("Add symbol…"), Some("section.add"));
+        model.append(Some("Turn into a watchlist"), Some("section.promote"));
         let destructive = gio::Menu::new();
         destructive.append(Some("Remove section…"), Some("section.remove"));
         model.append_section(None, &destructive);
@@ -1013,6 +1101,27 @@ impl Watchlist {
         stack
     }
 
+    /// Make a section into a watchlist of its own, and show it.
+    ///
+    /// Nothing is destroyed, so nothing is confirmed: the symbols move. They
+    /// move *before* the section goes, so the worst an interrupted promotion
+    /// can do is leave them in both places — losing them is not among the
+    /// outcomes. A watchlist that cannot be made at all leaves the section
+    /// exactly where it was.
+    ///
+    /// They land in the new watchlist's root rather than in a section of the
+    /// same name. The name has become the watchlist's, and saying it twice
+    /// would be a list called Energy whose only section is called Energy.
+    fn promote_section(self: &Rc<Self>, id: i64, name: &str) {
+        let Some(watchlist) = promote_section_in(&self.store, self.active.get(), id, name) else {
+            return;
+        };
+        self.set_active_watchlist(watchlist);
+        // The rail is showing the new list already; this is for the bar
+        // widget, which may have been reading the one the section came from.
+        self.changed();
+    }
+
     /// Deleting a watchlist takes its symbols with it, so it asks first.
     fn confirm_remove_watchlist(self: &Rc<Self>, id: i64, name: &str) {
         let count: usize = self
@@ -1043,13 +1152,17 @@ impl Watchlist {
             this.store.remove_watchlist(id);
             // Whatever was being looked at has gone, and the one that is
             // always there is where there is always something to see.
-            if this.active.get() == id {
+            let fell_back = this.active.get() == id;
+            if fell_back {
                 this.active.set(DEFAULT_WATCHLIST);
                 this.store.set_setting(SETTING_ACTIVE, &DEFAULT_WATCHLIST.to_string());
             }
             // Not `changed()`: the bar widget shows the default watchlist, and
             // that is the one watchlist this cannot have deleted.
             this.rebuild();
+            if fell_back {
+                this.announce_switch();
+            }
         });
         dialog.present(Some(&self.widget));
     }
@@ -1220,6 +1333,88 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The symbols move and the name goes with them, which is the whole of
+    /// what the menu item promises. They land in the new list's root rather
+    /// than in a section of the same name: a watchlist called Energy whose
+    /// only section is called Energy says it twice.
+    #[test]
+    fn a_section_turned_into_a_watchlist_takes_its_symbols_and_its_name() {
+        let store = Store::memory().unwrap();
+        let section = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(section, "CL", None);
+        store.add_to_section(section, "NG", None);
+
+        let made = promote_section_in(&store, DEFAULT_WATCHLIST, section, "Energy")
+            .expect("the watchlist should be made");
+
+        assert!(store.watchlists().iter().any(|(id, name)| *id == made && name == "Energy"));
+        let sections = store.watchlist_sections(made);
+        assert_eq!(sections.len(), 1, "the symbols go in the root, not in a section");
+        assert!(sections[0].root);
+        let symbols: Vec<&str> = sections[0].entries.iter().map(|e| e.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["CL", "NG"]);
+
+        // And it is gone from where it was, rather than left behind empty.
+        assert!(
+            !store.watchlist_sections(DEFAULT_WATCHLIST).iter().any(|s| s.id == section),
+            "the section should not still be in the list it came from",
+        );
+    }
+
+    /// Two lists called Energy are allowed — nothing resolves a watchlist by
+    /// its name — and a section that is not there cannot be promoted at all.
+    #[test]
+    fn promoting_tolerates_a_name_already_taken_and_refuses_a_section_that_is_not_there() {
+        let store = Store::memory().unwrap();
+        let first = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(first, "CL", None);
+        let second = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(second, "NG", None);
+
+        let one = promote_section_in(&store, DEFAULT_WATCHLIST, first, "Energy").unwrap();
+        let two = promote_section_in(&store, DEFAULT_WATCHLIST, second, "Energy").unwrap();
+        assert_ne!(one, two, "held by id, so the name may repeat");
+
+        assert_eq!(promote_section_in(&store, DEFAULT_WATCHLIST, 9_999, "Nowhere"), None);
+    }
+
+    /// A handful of lists, so running off one end should land on the other
+    /// rather than stopping — the user asked for rotation, and a key that
+    /// stops working at the edge is a key you have to think about.
+    #[test]
+    fn rotating_past_either_end_comes_round_again() {
+        let ids = [1, 4, 7];
+        assert_eq!(next_in_rotation(&ids, 1, 1), Some(4));
+        assert_eq!(next_in_rotation(&ids, 7, 1), Some(1), "off the end is the start");
+        assert_eq!(next_in_rotation(&ids, 1, -1), Some(7), "and back the other way");
+        assert_eq!(next_in_rotation(&ids, 4, -1), Some(1));
+    }
+
+    /// One watchlist has nowhere to rotate to, and a rail pointed at one that
+    /// has been deleted should not be resolved by jumping somewhere arbitrary.
+    /// Both have to say so rather than pick, because the caller turns `None`
+    /// into leaving the key for somebody else.
+    #[test]
+    fn there_is_nowhere_to_rotate_from_one_watchlist_or_from_none_of_them() {
+        assert_eq!(next_in_rotation(&[1], 1, 1), None);
+        assert_eq!(next_in_rotation(&[], 1, 1), None);
+        assert_eq!(next_in_rotation(&[1, 2], 9, 1), None, "showing something deleted");
+    }
+
+    /// The keys have to walk the order the switcher lists, or the two
+    /// disagree about what "next" means.
+    #[test]
+    fn rotation_follows_the_order_the_switcher_shows() {
+        let ids = [3, 1, 2];
+        let mut seen = vec![3];
+        let mut at = 3;
+        for _ in 0..2 {
+            at = next_in_rotation(&ids, at, 1).unwrap();
+            seen.push(at);
+        }
+        assert_eq!(seen, ids.to_vec(), "display order, not sorted order");
+    }
 
     #[test]
     fn the_symbol_column_is_always_first_and_never_hidden() {

@@ -177,7 +177,6 @@ mod tests {
         assert_eq!(book.focused, 2, "which chart had the keyboard survives");
         assert_eq!(book.panes.len(), 2);
         assert_eq!(book.name, "", "nothing named it, so it is still unnamed");
-        assert_eq!(book.watchlist, None);
         // The shape, dividers and all: a layout that comes back centred is
         // not the layout anybody left.
         assert_eq!(book.layout.leaves(), vec![1, 2]);
@@ -202,7 +201,9 @@ mod tests {
                 show_grid: true,
                 linked: false,
             }],
-            watchlist: Some("commodities".to_string()),
+            watchlist: Some(4),
+            sidebar_shown: Some(false),
+            sidebar_width: Some(330),
         };
         let json =
             serde_json::to_string(&Workspace { books: vec![one, two], active: 1 }).unwrap();
@@ -213,9 +214,41 @@ mod tests {
         assert_eq!(back.books[0].panes.len(), 2, "the first book kept its split");
         assert_eq!(back.books[1].name, "Energy");
         assert_eq!(back.books[1].layout.leaves(), vec![7]);
-        // Stored now so that a book saved before there are several watchlists
-        // still remembers the choice once there is one to make.
-        assert_eq!(back.books[1].watchlist.as_deref(), Some("commodities"));
+    }
+
+    /// A book is what you were looking at, and half of that is the list
+    /// beside the charts. Coming back to an arrangement of energy charts
+    /// next to yesterday's list is the same surprise as coming back to the
+    /// wrong charts.
+    #[test]
+    fn a_book_remembers_the_rail_it_was_left_with() {
+        let one = parse_workspace(ONE_ARRANGEMENT).unwrap().books.remove(0);
+        let json = serde_json::to_string(&Workspace { books: vec![one], active: 0 }).unwrap();
+        let mut book = parse_workspace(&json).unwrap().books.remove(0);
+        book.watchlist = Some(4);
+        book.sidebar_shown = Some(false);
+        book.sidebar_width = Some(330);
+
+        let json = serde_json::to_string(&Workspace { books: vec![book], active: 0 }).unwrap();
+        let back = &parse_workspace(&json).expect("a book with a rail should parse").books[0];
+        assert_eq!(back.watchlist, Some(4), "which list it was showing");
+        assert_eq!(back.sidebar_shown, Some(false), "whether it was open at all");
+        assert_eq!(back.sidebar_width, Some(330), "and how wide");
+    }
+
+    /// Every book written before the rail belonged to one says nothing about
+    /// it, and has to come back saying nothing rather than failing to come
+    /// back — a missing field is not a reason to lose somebody's charts.
+    #[test]
+    fn a_book_written_before_the_rail_belonged_to_it_still_loads() {
+        let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
+        let book = &workspace.books[0];
+        assert_eq!(book.panes.len(), 2, "the charts come back either way");
+        // None rather than a default, so the fallback can be the window's own
+        // settings rather than a number invented here.
+        assert_eq!(book.watchlist, None);
+        assert_eq!(book.sidebar_shown, None);
+        assert_eq!(book.sidebar_width, None);
     }
 
     /// The two shapes have to be told apart by what is in them, because both
@@ -294,6 +327,11 @@ const SETTING_SIDEBAR_WIDTH: &str = "sidebar_width";
 /// Whether the bar widget has been put in the bar once already.
 const SETTING_WIDGET_OFFERED: &str = "bar_widget_offered";
 const DEFAULT_SIDEBAR_WIDTH: i32 = 280;
+/// How narrow and how wide the rail may be dragged. Below the first its
+/// columns stop fitting; above the second it is taking room from the chart
+/// without showing anything more.
+const MIN_SIDEBAR_WIDTH: i32 = 160;
+const MAX_SIDEBAR_WIDTH: i32 = 900;
 pub const SETTING_BAR_STYLE: &str = "bar_style";
 pub const SETTING_SHOW_GRID: &str = "show_grid";
 const SETTING_TIMEFRAMES: &str = "timeframes";
@@ -334,11 +372,24 @@ struct Chartbook {
     layout: Node,
     focused: u32,
     panes: Vec<StoredPane>,
-    /// Which watchlist this book shows. Wired up separately — multiple
-    /// watchlists are being built elsewhere, and this is here so that a book
-    /// saved now still remembers the choice once there is one to make.
+    /// The rail, as this book left it: which watchlist it was showing,
+    /// whether it was open at all, and how wide.
+    ///
+    /// Part of the book rather than of the window, because a book is what you
+    /// were looking at and the list beside the charts is half of that — an
+    /// arrangement of energy charts wants the energy list, and finding
+    /// yesterday's list beside it is the same surprise as finding the wrong
+    /// charts.
+    ///
+    /// `None` in a book written before the rail belonged to one. Those fall
+    /// back to the window's settings, which is where the choice used to live
+    /// and is still where a brand new book takes its from.
     #[serde(default)]
-    watchlist: Option<String>,
+    watchlist: Option<i64>,
+    #[serde(default)]
+    sidebar_shown: Option<bool>,
+    #[serde(default)]
+    sidebar_width: Option<i32>,
 }
 
 /// Everything the window had open, as one stored value.
@@ -431,6 +482,15 @@ pub struct Window {
     /// and the button is what does it: showing the rail through the button is
     /// what keeps its pressed state honest and the corner clearance correct.
     watchlist_toggle: RefCell<Option<gtk::ToggleButton>>,
+    /// How wide the rail should be.
+    ///
+    /// Kept here rather than measured off the handle when it is wanted,
+    /// because the handle only means anything once the window has been laid
+    /// out — and a chartbook gets written down at moments when it has not.
+    sidebar_width: Cell<i32>,
+    /// A width has been put back, so what the handle says from here on is
+    /// somebody's choice rather than a guess from a window with no size yet.
+    sidebar_placed: Cell<bool>,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
@@ -478,14 +538,11 @@ impl Window {
         chart_host.set_hexpand(true);
         chart_host.set_vexpand(true);
 
-        // Beside the charts rather than inside `chart_host`, which is emptied
-        // and refilled every time the tree changes.
+        // Its own widget rather than something inside `chart_host`, which is
+        // emptied and refilled every time the tree changes.
         let book_strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         book_strip.add_css_class("chartbook-strip");
         book_strip.set_visible(false);
-        let chart_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        chart_area.append(&chart_host);
-        chart_area.append(&book_strip);
 
         let this = Rc::new(Window {
             window: window.clone(),
@@ -505,6 +562,8 @@ impl Window {
             book_strip: book_strip.clone(),
             corner: RefCell::new(None),
             watchlist_toggle: RefCell::new(None),
+            sidebar_width: Cell::new(DEFAULT_SIDEBAR_WIDTH),
+            sidebar_placed: Cell::new(false),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -520,6 +579,11 @@ impl Window {
         });
 
         let watchlist = this.build_watchlist();
+        // Which list the rail is showing is part of the chartbook, so every
+        // way of changing it has to write the book down. One hook, because a
+        // second route to the same state is a second route that can forget.
+        let saver = this.clone();
+        watchlist.connect_switched(move || saver.save_soon());
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
 
         let split = &this.split;
@@ -531,16 +595,25 @@ impl Window {
         split.set_shrink_end_child(false);
         watchlist.widget.set_visible(store.setting_bool(SHOW_WATCHLIST, true));
 
-        split.set_start_child(Some(&chart_area));
+        split.set_start_child(Some(&chart_host));
 
         // No header bar: the window's controls float over its top-right
         // corner, and the chart gets the row the bar used to take.
         let corner = this.build_corner(&this.split);
         *this.corner.borrow_mut() = Some(corner.clone());
+        // The strip runs under the whole window, rail included. A row of tabs
+        // stopping where the rail began would read as part of the chart area,
+        // and a chartbook is not: the rail belongs to one as much as the
+        // charts do.
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        split.set_vexpand(true);
+        root.append(split);
+        root.append(&book_strip);
+
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(split));
+        overlay.set_child(Some(&root));
         overlay.add_overlay(&corner);
-        this.restore_sidebar_width();
+        this.watch_sidebar_width();
         window.set_content(Some(&overlay));
 
         // The first chart. Everything else is a split of this one.
@@ -587,7 +660,7 @@ impl Window {
         // A window that restored nothing still has a chartbook: the one it
         // just built. Everything below here can assume there is always one.
         if this.books.borrow().is_empty() {
-            let book = this.capture_book(String::new(), None);
+            let book = this.capture_book(String::new());
             this.books.borrow_mut().push(book);
             this.active.set(0);
         }
@@ -721,11 +794,23 @@ impl Window {
 
         // Clicking anywhere on a chart focuses it, which is what makes the
         // next keystroke land where you are looking.
+        //
+        // The keyboard has to come with it, and GTK does not move it for a
+        // drawing area the way it would for a button. Without this the ring
+        // moved to the chart you clicked while the keyboard stayed wherever
+        // it was — which made Ctrl+B close the rail you had just clicked
+        // away from, because the rail still held the keyboard and Ctrl+B
+        // reads that to decide between focusing and closing.
         let focuser = self.clone();
         let click = gtk::GestureClick::new();
         click.set_button(0);
         click.set_propagation_phase(gtk::PropagationPhase::Capture);
-        click.connect_pressed(move |_, _, _, _| focuser.focus(id));
+        click.connect_pressed(move |_, _, _, _| {
+            focuser.focus(id);
+            if let Some(pane) = focuser.pane(id) {
+                pane.view.area.grab_focus();
+            }
+        });
         pane.root.add_controller(click);
 
         self.panes.borrow_mut().push(pane.clone());
@@ -1139,9 +1224,10 @@ impl Window {
 
     /// The charts on screen, written down as a chartbook.
     ///
-    /// The name and the watchlist are not live state — nothing on screen
-    /// carries them — so they are handed in by whoever already knows them.
-    fn capture_book(&self, name: String, watchlist: Option<String>) -> Chartbook {
+    /// The name is the one thing nothing on screen carries, so it is handed
+    /// in by whoever already knows it. Everything else, the rail included, is
+    /// read off the window as it stands.
+    fn capture_book(&self, name: String) -> Chartbook {
         let panes: Vec<StoredPane> = self
             .panes
             .borrow()
@@ -1166,7 +1252,9 @@ impl Window {
             layout: self.layout.borrow().clone(),
             focused: self.focused.get(),
             panes,
-            watchlist,
+            watchlist: self.watchlist.borrow().as_ref().map(|rail| rail.active_watchlist()),
+            sidebar_shown: Some(self.shows_sidebar()),
+            sidebar_width: Some(self.sidebar_width.get()),
         }
     }
 
@@ -1178,11 +1266,8 @@ impl Window {
         {
             let mut books = self.books.borrow_mut();
             let active = self.active.get().min(books.len().saturating_sub(1));
-            let (name, watchlist) = books
-                .get(active)
-                .map(|book| (book.name.clone(), book.watchlist.clone()))
-                .unwrap_or_default();
-            let live = self.capture_book(name, watchlist);
+            let name = books.get(active).map(|book| book.name.clone()).unwrap_or_default();
+            let live = self.capture_book(name);
             match books.get_mut(active) {
                 Some(book) => *book = live,
                 None => books.push(live),
@@ -1227,6 +1312,10 @@ impl Window {
         // leaves come out before anything is built from them, which turns an
         // unmountable grid back into the chart it actually described.
         let Some(book_layout) = book.layout.deduped() else { return false };
+        // Taken before the panes are consumed below, and applied after the
+        // charts are up: showing the rail moves a chart's own corner out from
+        // under the window's controls, which needs the charts to exist.
+        let rail = (book.watchlist, book.sidebar_shown, book.sidebar_width);
         let wanted = book_layout.leaves();
         if wanted.is_empty() || wanted.iter().any(|id| !book.panes.iter().any(|p| p.id == *id)) {
             return false;
@@ -1278,7 +1367,27 @@ impl Window {
         }
         self.sync_header();
         self.rebuild_indicator_legend();
+        self.apply_sidebar(rail.0, rail.1, rail.2);
         true
+    }
+
+    /// Put the rail back the way a chartbook left it.
+    ///
+    /// A book that says nothing about the rail was written before the rail
+    /// belonged to one, and takes the window's settings — the same ones a
+    /// window with nothing written down at all opens with.
+    fn apply_sidebar(
+        self: &Rc<Self>,
+        watchlist: Option<i64>,
+        shown: Option<bool>,
+        width: Option<i32>,
+    ) {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        if let (Some(rail), Some(id)) = (rail, watchlist) {
+            rail.set_active_watchlist(id);
+        }
+        self.set_rail_shown(shown.unwrap_or_else(|| self.store.setting_bool(SHOW_WATCHLIST, true)));
+        self.want_sidebar_width(width.unwrap_or_else(|| self.stored_sidebar_width()));
     }
 
     // -- chartbooks --------------------------------------------------------
@@ -1358,7 +1467,12 @@ impl Window {
             layout: Node::leaf(0),
             focused: 0,
             panes: Vec::new(),
+            // The rail is left exactly as it is, and the save at the end
+            // writes down what that turned out to be: a new book opens beside
+            // the list you were already reading, not beside a default.
             watchlist: None,
+            sidebar_shown: None,
+            sidebar_width: None,
         });
         self.active.set(at);
         self.mount_single_chart(instrument);
@@ -1484,6 +1598,22 @@ impl Window {
             child = child.next_sibling()?;
         }
         child.downcast::<gtk::Box>().ok()
+    }
+
+    /// Put the chartbook on screen into the same editable tab a double-click
+    /// opens, so there is one rename rather than two that have to agree.
+    ///
+    /// Which book that is, is read now rather than captured when the action
+    /// was wired: the active one moves, and this area has already produced
+    /// one bug from holding on to something that had stopped being true.
+    ///
+    /// A single chartbook has no strip and therefore no tab, and this does
+    /// nothing — the same bargain the window already strikes with Maximize
+    /// and Close chart. Offering a dialog for that one case would make it a
+    /// different interaction from the ordinary one, which is the thing
+    /// sharing the inline edit is for.
+    fn rename_active_book(self: &Rc<Self>) {
+        self.begin_rename(self.active.get());
     }
 
     /// Swap a tab's name for a box to type a new one in.
@@ -1622,10 +1752,13 @@ impl Window {
             if let Some(rail) = split_weak.upgrade().and_then(|split| split.end_child()) {
                 rail.set_visible(toggle.is_active());
             }
+            // Also the window's own, which is what seeds the next chartbook
+            // and what a window with nothing written down opens with.
             store.set_setting_bool(SHOW_WATCHLIST, toggle.is_active());
             // Closing the rail drops these controls onto the top-right chart,
             // where its own corner is.
             this.sync_corner_clearance();
+            this.save_soon();
         });
 
         *self.watchlist_toggle.borrow_mut() = Some(toggle.clone());
@@ -1862,6 +1995,11 @@ impl Window {
         new_book.connect_activate(move |_, _| this.new_chartbook());
         self.window.add_action(&new_book);
 
+        let rename_book = gio::SimpleAction::new("rename-chartbook", None);
+        let this = self.clone();
+        rename_book.connect_activate(move |_, _| this.rename_active_book());
+        self.window.add_action(&rename_book);
+
         let close_book = gio::SimpleAction::new("close-chartbook", None);
         let this = self.clone();
         close_book.connect_activate(move |_, _| this.close_chartbook());
@@ -1959,6 +2097,17 @@ impl Window {
                 }
                 Key::Right if ctrl && alt => {
                     this.step_chartbook(1);
+                    return glib::Propagation::Stop;
+                }
+                // Up and down with Shift walks the watchlists, but only with
+                // the keyboard in the rail: it is the one binding in this
+                // grid that is not global, and over a chart these keys belong
+                // to whatever else wants them rather than to a list you are
+                // not looking at.
+                Key::Up | Key::Down if ctrl && alt && shift => {
+                    if !this.rotate_watchlist(if key == Key::Up { -1 } else { 1 }) {
+                        return glib::Propagation::Proceed;
+                    }
                     return glib::Propagation::Stop;
                 }
                 Key::Up if ctrl && alt => {
@@ -2296,6 +2445,7 @@ impl Window {
                 "Chartbooks",
                 &[
                     ("Ctrl+T", "New chartbook"),
+                    ("Ctrl+Shift+R", "Rename this chartbook"),
                     ("Ctrl+W", "Close this chartbook, or the window"),
                     ("Ctrl+Alt+← →", "Previous or next chartbook"),
                     ("Double-click a tab", "Rename it"),
@@ -2307,6 +2457,10 @@ impl Window {
                     ("Ctrl+B", "Open, focus, then close"),
                     ("↑ ↓", "Next or previous symbol"),
                     ("Ctrl+↑ ↓", "Next or previous section"),
+                    // The one binding in this grid that is not global, so the
+                    // row says where it works: pressed over a chart it does
+                    // nothing, and nothing is hard to ask a question about.
+                    ("Ctrl+Alt+Shift+↑ ↓", "Previous or next watchlist, in the sidebar"),
                     ("Delete", "Remove the symbol"),
                 ],
             ),
@@ -3080,8 +3234,19 @@ impl Window {
             .unwrap_or(false)
     }
 
+    /// Is the rail on screen?
+    ///
+    /// Asked of the corner button rather than of the rail itself, because a
+    /// widget reports itself invisible until every ancestor is on screen —
+    /// and a chartbook is written down before the window has been shown,
+    /// which recorded the rail as closed on every launch. The button knows
+    /// from the moment it is built, and it is already the one thing that
+    /// opens and closes the rail.
     fn shows_sidebar(&self) -> bool {
-        self.split.end_child().map(|rail| rail.is_visible()).unwrap_or(false)
+        match self.watchlist_toggle.borrow().as_ref() {
+            Some(toggle) => toggle.is_active(),
+            None => self.split.end_child().map(|rail| rail.is_visible()).unwrap_or(false),
+        }
     }
 
     fn set_show_sidebar(&self, show: bool) {
@@ -3103,52 +3268,87 @@ impl Window {
         }
     }
 
-    /// Put the rail back at the width it was left at.
-    ///
-    /// Stored as a width rather than a handle position, because the position
-    /// is measured from the other side and would move the rail every time the
-    /// window was resized.
-    fn restore_sidebar_width(self: &Rc<Self>) {
-        let width = self
-            .store
+    /// The width the window was last left at, for a book that has no opinion
+    /// and for a window with nothing written down at all.
+    fn stored_sidebar_width(&self) -> i32 {
+        self.store
             .setting(SETTING_SIDEBAR_WIDTH)
             .and_then(|v| v.parse::<i32>().ok())
             .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
-            .clamp(160, 900);
+            .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+    }
 
-        // Nothing is written down until the stored width has been put back.
-        // Mapping reports a position measured against a window that has not
-        // been laid out yet, and saving that overwrote the width every launch
-        // with whatever the default happened to produce.
-        let placed = Rc::new(Cell::new(false));
+    /// Ask for a rail this wide — now if the window has a size, and otherwise
+    /// the moment it gets one.
+    fn want_sidebar_width(self: &Rc<Self>, width: i32) {
+        self.sidebar_width.set(width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH));
+        self.place_sidebar();
+    }
 
-        let split = self.split.clone();
-        let placed_for_put = placed.clone();
-        let put_back = move || {
-            if placed_for_put.get() {
-                return;
-            }
-            let total = split.width();
-            if total > width + 200 {
-                placed_for_put.set(true);
-                split.set_position(total - width);
-            }
-        };
-        put_back();
-        let on_map = put_back.clone();
-        self.split.connect_map(move |_| on_map());
+    /// Move the handle to where the wanted width puts it.
+    ///
+    /// A width rather than a handle position, because the position is
+    /// measured from the other side and would move the rail every time the
+    /// window was resized.
+    fn place_sidebar(&self) {
+        let total = self.split.width();
+        let width = self.sidebar_width.get();
+        if total > width + 200 {
+            self.sidebar_placed.set(true);
+            self.split.set_position(total - width);
+        }
+    }
 
-        let store = self.store.clone();
-        self.split.connect_position_notify(move |paned| {
-            if !placed.get() {
-                put_back();
-                return;
-            }
-            if paned.width() > 0 && paned.position() > 0 {
-                let width = (paned.width() - paned.position()).clamp(160, 900);
-                store.set_setting(SETTING_SIDEBAR_WIDTH, &width.to_string());
+    /// Follow the handle, and keep what it is dragged to.
+    ///
+    /// Nothing is recorded until a width has been put back once. A window
+    /// that has not been laid out reports a position measured against no
+    /// width at all, and recording that overwrote the rail every launch with
+    /// whatever the default happened to produce.
+    fn watch_sidebar_width(self: &Rc<Self>) {
+        self.sidebar_width.set(self.stored_sidebar_width());
+        self.place_sidebar();
+
+        let this = self.clone();
+        self.split.connect_map(move |_| {
+            if !this.sidebar_placed.get() {
+                this.place_sidebar();
             }
         });
+
+        let this = self.clone();
+        self.split.connect_position_notify(move |paned| {
+            if !this.sidebar_placed.get() {
+                this.place_sidebar();
+                return;
+            }
+            if paned.width() <= 0 || paned.position() <= 0 {
+                return;
+            }
+            let width =
+                (paned.width() - paned.position()).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            if width == this.sidebar_width.get() {
+                return;
+            }
+            this.sidebar_width.set(width);
+            // Also the window's own, which is what seeds the next chartbook
+            // and what a window with nothing written down opens at.
+            this.store.set_setting(SETTING_SIDEBAR_WIDTH, &width.to_string());
+            this.save_soon();
+        });
+    }
+
+    /// Walk the rail to the watchlist before or after the one it is showing.
+    ///
+    /// `false` when the keyboard is not in the rail, so the key falls through
+    /// to whatever else wants it. Matching and then doing nothing would eat
+    /// Ctrl+Alt+Shift and the arrows everywhere in the app, which is worse
+    /// than not having the binding at all.
+    fn rotate_watchlist(self: &Rc<Self>, delta: i32) -> bool {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        let Some(rail) = rail.filter(|rail| rail.has_focus()) else { return false };
+        rail.rotate_watchlist(delta);
+        true
     }
 
     pub fn toggle_watchlist(self: &Rc<Self>) {
