@@ -35,7 +35,7 @@ struct Context {
     /// there and merely reached from here.
     on_edit_resolutions: Rc<dyn Fn()>,
     page: adw::PreferencesPage,
-    data_page: adw::PreferencesPage,
+    general_page: adw::PreferencesPage,
     groups: RefCell<Vec<adw::PreferencesGroup>>,
 }
 
@@ -56,12 +56,13 @@ impl Preferences {
         page.set_title("Appearance");
         page.set_icon_name(Some("applications-graphics-symbolic"));
 
-        let data_page = adw::PreferencesPage::new();
-        data_page.set_title("Data");
-        data_page.set_icon_name(Some("folder-download-symbolic"));
+        let general_page = adw::PreferencesPage::new();
+        general_page.set_title("General");
+        general_page.set_icon_name(Some("preferences-system-symbolic"));
 
+        // General first: what the app does, before what it looks like.
+        dialog.add(&general_page);
         dialog.add(&page);
-        dialog.add(&data_page);
 
         let context = Rc::new(Context {
             store,
@@ -69,11 +70,11 @@ impl Preferences {
             on_change,
             on_edit_resolutions,
             page,
-            data_page,
+            general_page,
             groups: RefCell::new(Vec::new()),
         });
         rebuild(&context);
-        build_data_page(&context);
+        build_general_page(&context);
 
         dialog.present(Some(parent));
     }
@@ -106,9 +107,7 @@ fn rebuild(context: &Rc<Context>) {
         }
     }
 
-    groups.push(resolutions_group(context));
-    // Where the app shows up outside its own window belongs with how it looks,
-    // not with where its data comes from.
+    // Where the app shows up outside its own window belongs with how it looks.
     groups.extend(desktop_group());
 
     for group in &groups {
@@ -489,7 +488,14 @@ fn bar_colors_group(context: &Rc<Context>, group_name: &str) -> adw::Preferences
     group
 }
 
-fn build_data_page(context: &Rc<Context>) {
+/// Everything that is not about how the app looks: what the charts offer, and
+/// where their data comes from.
+fn build_general_page(context: &Rc<Context>) {
+    context.general_page.add(&resolutions_group(context));
+    build_market_data(context);
+}
+
+fn build_market_data(context: &Rc<Context>) {
     let group = adw::PreferencesGroup::new();
     group.set_title("Market data");
     group.set_description(Some(
@@ -573,7 +579,7 @@ fn build_data_page(context: &Rc<Context>) {
     });
     group.add(&limit);
 
-    context.data_page.add(&group);
+    context.general_page.add(&group);
 }
 
 /// The bar widget: one switch, and the truth about what it did.
