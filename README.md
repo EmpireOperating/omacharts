@@ -86,14 +86,22 @@ omacharts watchlist add Semis NVDA AMD AVGO TSM MU
 See [doc/cli.md](doc/cli.md), or `omacharts surface --json` for the whole
 command surface in a form a script can read.
 
-## From Claude
+## From an agent
 
 Because the whole command surface is machine-readable, an agent can drive this
-app as well as a person can. It just has to know the app is there, so Omacharts
-ships a skill that makes Claude reach for it when you say "what's semis doing"
-or "set me up for the open", from anywhere on the machine.
+app as well as a person can. Nothing about that is tied to one agent: any of
+them can run a command and read `omacharts surface --json`, which describes
+every command, argument and allowed value in a form meant to be parsed rather
+than skimmed. [AGENTS.md](AGENTS.md) covers the conventions, and is read by
+Claude and Codex alike.
 
-Install it as a plugin, which keeps it updated with the app:
+What is left is discovery. An agent has to know the app is there before it
+thinks to ask, so Omacharts ships a skill for Claude that makes it reach for
+Omacharts when you say "what's semis doing" or "set me up for the open", from
+anywhere on the machine. The equivalent for another agent is a few lines
+pointing it at `omacharts surface --json`; the surface does the rest.
+
+Install the skill as a plugin, which keeps it updated with the app:
 
 ```sh
 claude plugin marketplace add /usr/share/omacharts/claude-plugin
