@@ -23,6 +23,12 @@
 //! The one thing deliberately dropped that is not a control is the focus ring,
 //! which is the window's answer to "where is the keyboard" and is not part of
 //! what the chart shows. It goes with the rest of the furniture.
+//!
+//! Where it goes is the clipboard, always. That is what somebody pressing the
+//! key wants nine times out of ten — the picture lands in the chat, the note,
+//! the issue — and it is the one destination no setting governs. Keeping a PNG
+//! as well is the part that is optional, because a folder quietly filling with
+//! images you pasted once is a cost somebody should be able to decline.
 
 use std::path::{Path, PathBuf};
 
@@ -39,8 +45,8 @@ use crate::ui::pane::ChartPane;
 /// answer for everyone who never chose.
 pub const SETTING_FOLDER: &str = "screenshot_folder";
 
-/// Whether a screenshot goes straight to that folder, or asks. Unset means on.
-pub const SETTING_AUTOSAVE: &str = "screenshot_autosave";
+/// Whether a PNG is kept as well as copied. Unset means on.
+pub const SETTING_SAVE_FILE: &str = "screenshot_save_file";
 
 /// The folder made inside the user's pictures directory. Capitalised the way
 /// the application is.
@@ -69,18 +75,29 @@ const CONTROLS: &[&str] = &[
 
 /// A rendered screenshot, not yet anywhere.
 ///
-/// Held as a texture with a name rather than written immediately because what
-/// happens next depends on a setting: straight to the folder, or into a file
-/// chooser. Rendering first and deciding after is what makes the picture the
-/// chart as it was when the key was pressed, rather than as it is once a
-/// dialog has opened over it.
+/// A texture and a name, because those are the two things its destinations
+/// want: the clipboard takes the texture, and a file needs something to be
+/// called. The display comes along because the clipboard belongs to it rather
+/// than to any window, which is also why putting an image there cannot disturb
+/// what is on screen.
 pub struct Shot {
     texture: gdk::Texture,
+    display: gdk::Display,
     /// What to call the file, without a folder and without `.png`.
     stem: String,
 }
 
 impl Shot {
+    /// Put it on the clipboard.
+    ///
+    /// The texture itself, not an encoding of it: GDK registers serializers
+    /// from `GdkTexture` to `image/png` and the other image types, so a
+    /// receiver that wants PNG bytes is offered them and one that can take the
+    /// texture directly avoids the round trip.
+    pub fn copy(&self) {
+        self.display.clipboard().set_texture(&self.texture);
+    }
+
     /// Write it next to whatever else is in `folder`, under a name nothing
     /// else there has.
     pub fn save_into(&self, folder: &Path) -> Result<PathBuf, String> {
@@ -99,10 +116,6 @@ impl Shot {
             .save_to_png(path)
             .map_err(|error| format!("{} could not be written: {error}", path.display()))
     }
-
-    pub fn suggested_name(&self) -> String {
-        format!("{}.png", self.stem)
-    }
 }
 
 // -- what the GUI calls ----------------------------------------------------
@@ -117,8 +130,7 @@ pub fn take_chart(
     pane: &ChartPane,
     theme: &Theme,
 ) {
-    let shot = chart(pane, theme).map(|shot| (shot, "chart"));
-    deliver(window, store, shot);
+    deliver(window, store, chart(pane, theme), "Chart");
 }
 
 /// Ctrl+Shift+O: a picture of every chart in the arrangement, as laid out.
@@ -129,45 +141,37 @@ pub fn take_chartbook(
     book: &str,
     theme: &Theme,
 ) {
-    let shot = chartbook(area, book, theme).map(|shot| (shot, "chartbook"));
-    deliver(window, store, shot);
+    deliver(window, store, chartbook(area, book, theme), "Chartbook");
 }
 
-/// Put it where the settings say, or ask, and say what happened either way.
+/// Copy it, keep it if that is wanted, and say in one line what happened.
 fn deliver(
     window: &adw::ApplicationWindow,
     store: &Store,
-    shot: Result<(Shot, &'static str), String>,
+    shot: Result<Shot, String>,
+    what: &str,
 ) {
-    let (shot, what) = match shot {
+    let shot = match shot {
         Ok(shot) => shot,
-        Err(error) => return announce(window, Err(error)),
+        Err(error) => return tell(window, "Screenshot not taken", &error, true),
     };
-    let folder = folder(store);
-    if autosave(store) {
-        return announce(window, shot.save_into(&folder).map(|path| (path, what)));
-    }
+    // First, and whatever happens next. A screenshot that reached the
+    // clipboard is a screenshot, whether or not a file was also kept.
+    shot.copy();
 
-    let dialog = gtk::FileDialog::new();
-    dialog.set_title(&format!("Save the {what} screenshot"));
-    dialog.set_initial_name(Some(&shot.suggested_name()));
-    // The folder it would have gone to, which is still the most likely answer
-    // when somebody turned the automatic part off — they chose to be asked
-    // where, not to start from nowhere.
-    if make_folder(&folder).is_ok() {
-        dialog.set_initial_folder(Some(&gio::File::for_path(&folder)));
+    let copied = format!("{what} screenshot copied");
+    if !save_file(store) {
+        return tell(window, &copied, "Ready to paste", false);
     }
-    let window = window.clone();
-    dialog.save(Some(&window.clone()), None::<&gio::Cancellable>, move |answer| {
-        // Cancelling leaves nothing behind. The texture goes with this
-        // closure, which is the whole of what was made.
-        let Ok(file) = answer else { return };
-        let Some(path) = file.path() else { return };
-        announce(&window, shot.save_as(&path).map(|()| (path, what)));
-    });
+    match shot.save_into(&folder(store)) {
+        Ok(path) => tell(window, &copied, &format!("Also saved to {}", readable(&path)), false),
+        // The picture is not lost — it is on the clipboard — so this says what
+        // was wanted and then what went wrong, in that order.
+        Err(error) => tell(window, &copied, &format!("Not saved: {error}"), true),
+    }
 }
 
-/// Say where it went, outside the window.
+/// One line, outside the window.
 ///
 /// A desktop notification rather than anything drawn in the window: it is what
 /// every other screenshot tool on this desktop does, it cannot appear in a
@@ -175,46 +179,37 @@ fn deliver(
 /// it. A banner inside the app would mean an `AdwToastOverlay` around the
 /// content, which is a reasonable thing to want for its own sake but is not
 /// something this should invent on its way past.
-fn announce(window: &adw::ApplicationWindow, saved: Result<(PathBuf, &'static str), String>) {
+fn tell(window: &adw::ApplicationWindow, headline: &str, body: &str, wrong: bool) {
     let Some(app) = window.application() else { return };
-    let notification = match &saved {
-        Ok((path, what)) => {
-            let notification = gio::Notification::new(&format!("{} screenshot saved", title(what)));
-            notification.set_body(Some(&readable(path)));
-            notification
-        }
-        Err(error) => {
-            let notification = gio::Notification::new("Screenshot not saved");
-            notification.set_body(Some(error));
-            notification.set_priority(gio::NotificationPriority::High);
-            notification
-        }
-    };
+    let notification = gio::Notification::new(headline);
+    notification.set_body(Some(body));
+    if wrong {
+        notification.set_priority(gio::NotificationPriority::High);
+    }
     // One id, so a run of screenshots replaces its own notification rather
     // than stacking six of them down the corner of the screen.
     app.send_notification(Some("omacharts-screenshot"), &notification);
 }
 
-fn title(what: &str) -> &'static str {
-    if what == "chartbook" { "Chartbook" } else { "Chart" }
-}
-
 // -- what a command calls --------------------------------------------------
 
-/// A command's screenshot of one chart: always a file, never a question.
+/// A command's screenshot of one chart: a file, and the clipboard only if the
+/// command said so.
 ///
-/// Separate from [`take_chart`] rather than sharing a flag with it, because
-/// the difference has to be structural. A script that tripped a file chooser
-/// would hang until somebody clicked something, and an agent would hang
-/// forever — so the chooser lives behind a window parameter these two
-/// functions do not have, and the autosave setting is not read here at all.
+/// Where the keyboard means "give me this image", a command means "write this
+/// file", and the difference is not a default to be flipped. A loop taking
+/// fifty screenshots would stamp fifty times on whatever somebody had copied,
+/// and an agent working in the background has no business owning the
+/// clipboard at all — so the setting that governs the window is not read here,
+/// and copying happens only when `clipboard` says to.
 pub fn write_chart(
     store: &Store,
     pane: &ChartPane,
     theme: &Theme,
     into: Option<&Path>,
+    clipboard: bool,
 ) -> Result<PathBuf, String> {
-    write(chart(pane, theme)?, store, into)
+    write(chart(pane, theme)?, store, into, clipboard)
 }
 
 /// The same for the whole arrangement.
@@ -224,11 +219,20 @@ pub fn write_chartbook(
     book: &str,
     theme: &Theme,
     into: Option<&Path>,
+    clipboard: bool,
 ) -> Result<PathBuf, String> {
-    write(chartbook(area, book, theme)?, store, into)
+    write(chartbook(area, book, theme)?, store, into, clipboard)
 }
 
-fn write(shot: Shot, store: &Store, into: Option<&Path>) -> Result<PathBuf, String> {
+fn write(
+    shot: Shot,
+    store: &Store,
+    into: Option<&Path>,
+    clipboard: bool,
+) -> Result<PathBuf, String> {
+    if clipboard {
+        shot.copy();
+    }
     match into {
         // A directory given where a file was expected is a thing a script does
         // on purpose, so it means "name it yourself, in here".
@@ -249,7 +253,8 @@ pub fn chart(pane: &ChartPane, theme: &Theme) -> Result<Shot, String> {
         .map(|instrument| instrument.display_symbol())
         .unwrap_or_default();
     let stem = chart_stem(&symbol, &pane.timeframe.get().label(), &now());
-    Ok(Shot { texture: render(pane.root.upcast_ref(), theme)?, stem })
+    let root: &gtk::Widget = pane.root.upcast_ref();
+    Ok(Shot { texture: render(root, theme)?, display: root.display(), stem })
 }
 
 /// Every chart in the arrangement, as laid out, dividers and all.
@@ -259,7 +264,8 @@ pub fn chartbook(
     theme: &Theme,
 ) -> Result<Shot, String> {
     let stem = book_stem(book, &now());
-    Ok(Shot { texture: render(area.as_ref(), theme)?, stem })
+    let root = area.as_ref();
+    Ok(Shot { texture: render(root, theme)?, display: root.display(), stem })
 }
 
 /// Draw `root` and everything under it except the controls.
@@ -368,8 +374,8 @@ pub fn default_folder() -> PathBuf {
     pictures().join(FOLDER)
 }
 
-pub fn autosave(store: &Store) -> bool {
-    store.setting_bool(SETTING_AUTOSAVE, true)
+pub fn save_file(store: &Store) -> bool {
+    store.setting_bool(SETTING_SAVE_FILE, true)
 }
 
 /// The user's pictures directory.
@@ -520,6 +526,19 @@ fn now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clipboard is not a setting and the file is, so a fresh install
+    /// keeps one — and the switch that turns it off has to be the only thing
+    /// that can.
+    #[test]
+    fn a_png_is_kept_unless_somebody_says_otherwise() {
+        let store = Store::memory().expect("a store");
+        assert!(save_file(&store), "a fresh install keeps the file");
+        store.set_setting_bool(SETTING_SAVE_FILE, false);
+        assert!(!save_file(&store), "and stops when it is told to");
+        store.set_setting_bool(SETTING_SAVE_FILE, true);
+        assert!(save_file(&store));
+    }
 
     #[test]
     fn a_chart_is_named_by_what_it_shows_and_when() {

@@ -496,7 +496,13 @@ fn build_general_page(context: &Rc<Context>) {
     build_market_data(context);
 }
 
-/// Where Ctrl+O leaves its pictures, and whether it asks first.
+/// Whether a screenshot is kept as a file, and where.
+///
+/// The group says what always happens, because the clipboard is the one part
+/// of this with no control beside it: nothing else here would ever tell you a
+/// screenshot is already waiting to be pasted, and somebody who turns the
+/// switch below off needs to know they are declining the file rather than the
+/// screenshot.
 ///
 /// Both rows derive their state rather than reading something written down at
 /// install time: nothing is stored until somebody changes it, so the day the
@@ -504,6 +510,7 @@ fn build_general_page(context: &Rc<Context>) {
 fn screenshots_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     group.set_title("Screenshots");
+    group.set_description(Some("Screenshots are always copied to the clipboard."));
 
     let folder = adw::ActionRow::new();
     folder.set_title("Save to");
@@ -514,27 +521,29 @@ fn screenshots_group(context: &Rc<Context>) -> adw::PreferencesGroup {
     folder.set_subtitle(&home_relative(&screenshot::folder(&context.store)));
     folder.set_subtitle_lines(1);
     folder.set_activatable(true);
-    folder.set_sensitive(screenshot::autosave(&context.store));
+    folder.set_sensitive(screenshot::save_file(&context.store));
 
-    let auto = adw::ActionRow::new();
-    auto.set_title("Save automatically");
-    auto.set_subtitle("Off asks where each one goes");
+    // "Also", because the line above says what already happened. No subtitle:
+    // the row is one word away from the sentence it continues, and repeating
+    // it underneath would be the third way of saying one thing.
+    let keep = adw::ActionRow::new();
+    keep.set_title("Also save a PNG");
 
     let switch = gtk::Switch::new();
     switch.set_valign(gtk::Align::Center);
-    switch.set_active(screenshot::autosave(&context.store));
+    switch.set_active(screenshot::save_file(&context.store));
     let store = context.store.clone();
     let folder_row = folder.clone();
     switch.connect_state_set(move |_, on| {
-        store.set_setting_bool(screenshot::SETTING_AUTOSAVE, on);
+        store.set_setting_bool(screenshot::SETTING_SAVE_FILE, on);
         // Greyed out rather than taken away: a folder nothing is being saved
         // to is still the folder it would be saved to, and hiding the row
         // would leave no way to see what turning this back on would do.
         folder_row.set_sensitive(on);
         glib::Propagation::Proceed
     });
-    auto.add_suffix(&switch);
-    group.add(&auto);
+    keep.add_suffix(&switch);
+    group.add(&keep);
 
     let choose: Rc<dyn Fn(&adw::ActionRow)> = {
         let store = context.store.clone();

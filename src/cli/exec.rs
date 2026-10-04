@@ -907,9 +907,14 @@ fn screenshot(
         )
     })?;
     let into = arg(m, "output").map(std::path::PathBuf::from);
-    let (of, path) = live.screenshot(whole_book, into.as_deref())?;
+    let clipboard = flag(m, "clipboard");
+    let (of, path) = live.screenshot(whole_book, into.as_deref(), clipboard)?;
     Ok(match as_json {
-        true => format!("{}\n", json!({ "of": of, "path": path.display().to_string() })),
+        true => format!(
+            "{}\n",
+            json!({ "of": of, "path": path.display().to_string(), "clipboard": clipboard })
+        ),
+        false if clipboard => format!("saved {of} to {}, and copied it\n", path.display()),
         false => format!("saved {of} to {}\n", path.display()),
     })
 }
@@ -2755,6 +2760,7 @@ mod tests {
             &self,
             _whole_book: bool,
             _into: Option<&std::path::Path>,
+            _clipboard: bool,
         ) -> Result<(String, std::path::PathBuf), Fault> {
             Err(Fault::new(crate::cli::EXIT_ERROR, "a test has nothing on screen".to_string()))
         }

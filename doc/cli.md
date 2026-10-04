@@ -373,6 +373,52 @@ otherwise.
 A `chart set` with one bad value changes nothing at all — everything is
 checked before anything is written, so you never get a half-applied chart.
 
+## Taking a picture of a chart
+
+```
+omacharts chart screenshot
+omacharts chartbook screenshot --output /tmp/book.png
+```
+
+`chart screenshot` photographs the focused chart; `chartbook screenshot`
+photographs the whole arrangement, every chart as laid out with the dividers
+between them. The image is the chart and what names it — the candles, the
+scales, the symbol, the resolution and the indicator legend — and none of the
+controls drawn over it, nor the sidebar, nor the tab strip. Taking one changes
+nothing on screen.
+
+These are the only two commands that cannot be answered from the stored
+arrangement, because a screenshot is of pixels and a saved layout has none.
+With nothing running they exit `6`.
+
+```
+$ omacharts chart screenshot
+saved pos:0 NVDA 1h in "Macro" to ~/Pictures/Omacharts/NVDA-1h-20261004-143012.png
+  [exit 0]
+```
+
+Without `--output` the file goes to the folder in the settings, named after the
+symbol, the resolution and the time. `--output` naming a directory rather than
+a file puts it there under that same name.
+
+The window's own key copies the image to the clipboard every time. A command
+does not, unless you ask for it:
+
+```
+omacharts chart screenshot --clipboard
+```
+
+That split is deliberate: a loop taking fifty screenshots would otherwise stamp
+fifty times on whatever you had copied. Note that a clipboard offer belongs to
+the process that made it — unless a clipboard manager is running to take a copy,
+what Omacharts puts there is gone when Omacharts quits.
+
+Two settings govern the file. `screenshot_folder` is where it goes; unset means
+`<Pictures>/Omacharts`, which is made the first time a screenshot needs it.
+`screenshot_save_file` is whether the window keeps one at all — turning it off
+leaves the keyboard copying to the clipboard and writing nothing. Neither
+setting touches a command: `chart screenshot` always writes a file.
+
 ## Preferences
 
 Settings are read and written by name — `config list` shows every one that has

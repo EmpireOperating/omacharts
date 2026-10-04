@@ -86,6 +86,168 @@ fn watchlist_action(open: bool, focused: bool) -> WatchlistAction {
     }
 }
 
+/// Every shortcut the sheet lists, grouped the way it lists them.
+///
+/// Out here rather than inside the sheet so that the filtering the box at
+/// the top does can be tested against the rows people actually read. The key
+/// text is written the way the sheet prints it, glyphs and all; what somebody
+/// types instead of a glyph is `key_synonyms`' problem.
+const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "Finding things",
+        &[
+            ("Type a letter", "Find a symbol"),
+            ("Type a number", "Set the resolution"),
+            ("Ctrl+K", "Find a symbol"),
+            ("Ctrl+I", "Indicators"),
+            ("Ctrl+Shift+I", "Add an indicator"),
+            ("Ctrl+Shift+S", "Chart settings"),
+            ("Ctrl+,", "Preferences"),
+            ("F10", "Main menu"),
+            ("? · Ctrl+?", "This list"),
+            ("Ctrl+Q", "Quit"),
+        ],
+    ),
+    (
+        "Chartbooks",
+        &[
+            ("Ctrl+N", "New chartbook"),
+            ("Ctrl+Shift+R", "Rename this chartbook"),
+            ("Ctrl+Shift+X", "Remove this chartbook"),
+            ("Ctrl+Shift+O", "Screenshot this chartbook"),
+            ("Ctrl+Alt+← →", "Previous or next chartbook"),
+            ("Double-click a tab", "Rename it"),
+            ("Right-click a tab", "Rename or remove it"),
+        ],
+    ),
+    (
+        "Watchlist",
+        &[
+            ("Ctrl+B", "Open, focus, then close"),
+            ("↑ ↓", "Next or previous symbol"),
+            ("Ctrl+↑ ↓", "Next or previous section"),
+            // The one binding in this grid that is not global, so the
+            // row says where it works: pressed over a chart it does
+            // nothing, and nothing is hard to ask a question about.
+            ("Ctrl+Alt+Shift+↑ ↓", "Previous or next watchlist, in the sidebar"),
+            ("Ctrl+N", "Add a symbol, in the sidebar"),
+            ("Ctrl+Shift+N", "Add a section, in the sidebar"),
+            ("Delete", "Remove the symbol"),
+        ],
+    ),
+    (
+        "Charts",
+        &[
+            ("Ctrl+H", "Split horizontally"),
+            ("Ctrl+V", "Split vertically"),
+            ("Ctrl+X", "Close this chart"),
+            ("Ctrl+M", "Give this chart the window, or put it back"),
+            ("Ctrl+O", "Screenshot this chart"),
+            ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
+            ("Alt+← → ↑ ↓", "Focus the chart that way"),
+            ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
+        ],
+    ),
+    (
+        "Chart",
+        &[
+            ("Ctrl+Shift+← →", "Previous or next resolution"),
+            ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
+            ("← →", "Pan"),
+            ("+ −", "Zoom"),
+            ("End", "Jump to the latest bar"),
+            ("Alt+R", "Reset the view"),
+            ("Esc", "Back to the chart"),
+        ],
+    ),
+];
+
+/// Whether one shortcut row answers what was typed into the sheet's box.
+///
+/// Both halves of a row are searched, because people arrive holding either
+/// one: somebody after the split types "split", and somebody who half
+/// remembers the chord types "ctrl shift o". The section's title counts as
+/// part of every row in it, so "watchlist" finds the rail's keys on the rows
+/// whose own description never says the word.
+///
+/// Every word typed has to be found somewhere in the row, in any order:
+/// "shift ctrl o" and "Ctrl+Shift+O" are the same question asked twice. A word
+/// matches a key it is the start of — "del" finds Delete — or a word of the
+/// description it is the start of, and from three characters anywhere inside
+/// the description as well, which is what makes "list" find a watchlist.
+///
+/// A single character is only ever a key. "ctrl shift o" would otherwise drag
+/// in every row whose description contains the word "or", which is most of the
+/// rows that begin with Ctrl+Shift — the exact pile the chord was typed to get
+/// out of.
+fn shortcut_matches(section: &str, keys: &str, what: &str, query: &str) -> bool {
+    let typed = chord_parts(query);
+    if typed.is_empty() {
+        return true;
+    }
+    let keys = chord_parts(keys);
+    let described = format!("{what} {section}").to_lowercase();
+    typed.iter().all(|word| {
+        let key_side = keys.iter().any(|key| {
+            key.starts_with(word)
+                || key_synonyms(key).iter().any(|name| name.starts_with(word.as_str()))
+        });
+        let letters = word.chars().count();
+        key_side
+            || (letters > 1
+                && (described.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(word))
+                    || (letters >= 3 && described.contains(word))))
+    })
+}
+
+/// A chord in the pieces somebody might type, however they write it.
+///
+/// "Ctrl+Shift+O", "ctrl shift o" and "Ctrl-Shift-O" all come out the same, so
+/// the sheet does not insist on the one spelling it happens to print.
+///
+/// A chunk that is nothing but separators is a key rather than punctuation —
+/// the zoom keys are "+" and "−" — and splitting those apart would leave those
+/// rows with no key to find at all. The typographic minus is folded onto the
+/// hyphen for the same reason: it is not on anybody's keyboard.
+fn chord_parts(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    for chunk in text.split(|c: char| c.is_whitespace() || c == '·') {
+        let chunk = chunk.to_lowercase();
+        if chunk.is_empty() {
+            continue;
+        }
+        let pieces: Vec<&str> = chunk
+            .split(['+', '-', '−'])
+            .filter(|piece| !piece.is_empty())
+            .collect();
+        if pieces.is_empty() {
+            parts.push(chunk.replace('−', "-"));
+        } else {
+            parts.extend(pieces.into_iter().map(str::to_string));
+        }
+    }
+    parts
+}
+
+/// What somebody types for a key the sheet draws as a glyph or an
+/// abbreviation.
+///
+/// The arrows are the ones that matter: "↑" cannot be typed, and a sheet whose
+/// arrow keys are unfindable is a sheet that is missing half the chart's keys.
+fn key_synonyms(part: &str) -> &'static [&'static str] {
+    match part {
+        "←" => &["left", "arrow"],
+        "→" => &["right", "arrow"],
+        "↑" => &["up", "arrow"],
+        "↓" => &["down", "arrow"],
+        "ctrl" => &["control"],
+        "esc" => &["escape"],
+        "+" => &["plus"],
+        "-" => &["minus"],
+        _ => &[],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,6 +584,98 @@ mod tests {
 
         books.remove(1);
         assert_eq!(book_using(&books, 0, 8), None);
+    }
+
+    /// Every row the sheet would show for what was typed, as "keys — what".
+    fn found(query: &str) -> Vec<String> {
+        SHORTCUT_SECTIONS
+            .iter()
+            .flat_map(|(section, rows)| {
+                rows.iter()
+                    .filter(move |(keys, what)| shortcut_matches(section, keys, what, query))
+                    .map(|(keys, what)| format!("{keys} — {what}"))
+            })
+            .collect()
+    }
+
+    /// The sheet is a reference, and a reference that hides rows the moment it
+    /// is opened is a reference with a bug in it.
+    #[test]
+    fn an_empty_box_shows_every_row() {
+        let rows: usize = SHORTCUT_SECTIONS.iter().map(|(_, rows)| rows.len()).sum();
+        assert_eq!(found("").len(), rows);
+        assert_eq!(found("   ").len(), rows);
+    }
+
+    #[test]
+    fn what_a_key_does_finds_the_key_that_does_it() {
+        assert_eq!(
+            found("split"),
+            vec!["Ctrl+H — Split horizontally", "Ctrl+V — Split vertically"]
+        );
+        assert_eq!(found("SPLIT HORI"), vec!["Ctrl+H — Split horizontally"]);
+    }
+
+    /// Nobody writes a chord the way the next person does, and somebody
+    /// reaching for this box is already unsure of it.
+    #[test]
+    fn a_chord_is_found_however_it_is_written() {
+        let one = vec!["Ctrl+Shift+O — Screenshot this chartbook"];
+        let ways =
+            ["Ctrl+Shift+O", "ctrl shift o", "shift ctrl o", "ctrl-shift-o", "CTRL+SHIFT+O"];
+        for query in ways {
+            assert_eq!(found(query), one, "{query}");
+        }
+    }
+
+    /// The half-remembered chord above is the test. A lone letter read as part
+    /// of a description buries that row: "o" is a word of "Previous or next
+    /// resolution" and of half the other Ctrl+Shift rows.
+    #[test]
+    fn a_single_letter_is_only_ever_a_key() {
+        assert_eq!(
+            found("o"),
+            vec!["Ctrl+Shift+O — Screenshot this chartbook", "Ctrl+O — Screenshot this chart"]
+        );
+        // Two is enough to mean a word again, and three to mean one somebody
+        // only half typed.
+        assert_eq!(found("hori"), vec!["Ctrl+H — Split horizontally"]);
+    }
+
+    /// Half the chart's keys are arrows, and an arrow cannot be typed.
+    #[test]
+    fn the_keys_drawn_as_glyphs_are_found_by_their_names() {
+        assert!(found("down arrow").iter().any(|row| row.contains("Ctrl+↑ ↓")));
+        assert!(found("alt left").iter().any(|row| row.contains("Alt+← → ↑ ↓")));
+        assert_eq!(found("plus"), vec!["+ − — Zoom"]);
+        assert_eq!(found("-"), vec!["+ − — Zoom"]);
+        assert!(found("escape").iter().any(|row| row.contains("Esc")));
+        assert!(found("control q").iter().any(|row| row.contains("Ctrl+Q")));
+    }
+
+    /// Punctuation that is the key rather than the glue between keys: these
+    /// rows have nothing else to find them by.
+    #[test]
+    fn a_key_that_is_punctuation_is_still_searchable() {
+        assert_eq!(found("?"), vec!["? · Ctrl+? — This list"]);
+        assert_eq!(found(","), vec!["Ctrl+, — Preferences"]);
+    }
+
+    /// Where a key works is in the heading more often than in the row, so the
+    /// heading is part of what the row says.
+    #[test]
+    fn a_heading_counts_as_part_of_the_rows_under_it() {
+        let rail = found("watchlist");
+        assert!(rail.iter().any(|row| row.contains("Next or previous symbol")));
+        assert!(rail.iter().any(|row| row.contains("Ctrl+B")));
+    }
+
+    #[test]
+    fn a_key_nobody_has_matches_nothing_at_all() {
+        assert!(found("xyzzy").is_empty());
+        // Every word has to be found, so a right query and a wrong one
+        // together are still wrong.
+        assert!(found("split xyzzy").is_empty());
     }
 }
 
@@ -1383,6 +1637,16 @@ impl Window {
                 .filter(|width| *width > 0)
                 .unwrap_or(CORNER_WIDTH),
         };
+        // Over a chart the cluster needs a ground of its own; over the rail it
+        // has nothing behind it to be told apart from. Only the window knows
+        // which of the two it is sitting on.
+        if let Some(cluster) = self.corner.borrow().as_ref().and_then(|corner| corner.child()) {
+            match railed {
+                true => cluster.remove_css_class("over-chart"),
+                false => cluster.add_css_class("over-chart"),
+            }
+        }
+
         // The rects tile the area exactly, so the chart under the window's
         // corner is the one — the only one — holding its top right pixel.
         let rects = self.layout_rects();
@@ -3317,87 +3581,27 @@ impl Window {
         );
     }
 
-    /// The shortcuts, grouped and aligned.
+    /// The shortcuts, grouped and aligned, over a box that filters them.
     ///
     /// A list of rows rather than a block of text: an alert dialog centres
     /// whatever it is given, which turns two columns into a ragged mess.
+    ///
+    /// The box has the keyboard from the moment the sheet arrives, because
+    /// somebody who opened this came to look something up — and the only thing
+    /// the sheet does with a keystroke is look it up.
     fn show_shortcuts(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();
 
-        let sections: [(&str, &[(&str, &str)]); 5] = [
-            (
-                "Finding things",
-                &[
-                    ("Type a letter", "Find a symbol"),
-                    ("Type a number", "Set the resolution"),
-                    ("Ctrl+K", "Find a symbol"),
-                    ("Ctrl+I", "Indicators"),
-                    ("Ctrl+Shift+I", "Add an indicator"),
-                    ("Ctrl+Shift+S", "Chart settings"),
-                    ("Ctrl+,", "Preferences"),
-                    ("F10", "Main menu"),
-                    ("? · Ctrl+?", "This list"),
-                    ("Ctrl+Q", "Quit"),
-                ],
-            ),
-            (
-                "Chartbooks",
-                &[
-                    ("Ctrl+N", "New chartbook"),
-                    ("Ctrl+Shift+R", "Rename this chartbook"),
-                    ("Ctrl+Shift+X", "Remove this chartbook"),
-                    ("Ctrl+Shift+O", "Screenshot this chartbook"),
-                    ("Ctrl+Alt+← →", "Previous or next chartbook"),
-                    ("Double-click a tab", "Rename it"),
-                    ("Right-click a tab", "Rename or remove it"),
-                ],
-            ),
-            (
-                "Watchlist",
-                &[
-                    ("Ctrl+B", "Open, focus, then close"),
-                    ("↑ ↓", "Next or previous symbol"),
-                    ("Ctrl+↑ ↓", "Next or previous section"),
-                    // The one binding in this grid that is not global, so the
-                    // row says where it works: pressed over a chart it does
-                    // nothing, and nothing is hard to ask a question about.
-                    ("Ctrl+Alt+Shift+↑ ↓", "Previous or next watchlist, in the sidebar"),
-                    ("Ctrl+N", "Add a symbol, in the sidebar"),
-                    ("Ctrl+Shift+N", "Add a section, in the sidebar"),
-                    ("Delete", "Remove the symbol"),
-                ],
-            ),
-            (
-                "Charts",
-                &[
-                    ("Ctrl+H", "Split horizontally"),
-                    ("Ctrl+V", "Split vertically"),
-                    ("Ctrl+X", "Close this chart"),
-                    ("Ctrl+M", "Give this chart the window, or put it back"),
-                    ("Ctrl+O", "Screenshot this chart"),
-                    ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
-                    ("Alt+← → ↑ ↓", "Focus the chart that way"),
-                    ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
-                ],
-            ),
-            (
-                "Chart",
-                &[
-                    ("Ctrl+Shift+← →", "Previous or next resolution"),
-                    ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
-                    ("← →", "Pan"),
-                    ("+ −", "Zoom"),
-                    ("End", "Jump to the latest bar"),
-                    ("Alt+R", "Reset the view"),
-                    ("Esc", "Back to the chart"),
-                ],
-            ),
-        ];
+        // The rows are kept with the strings they were built from, so
+        // filtering asks the table rather than reading titles back off GTK.
+        type Row = (adw::ActionRow, &'static str, &'static str, &'static str);
+        let mut listed: Vec<(adw::PreferencesGroup, Vec<Row>)> = Vec::new();
 
-        for (title, shortcuts) in sections {
+        for (title, shortcuts) in SHORTCUT_SECTIONS {
             let group = adw::PreferencesGroup::new();
             group.set_title(title);
-            for (keys, what) in shortcuts {
+            let mut rows = Vec::new();
+            for (keys, what) in *shortcuts {
                 let row = adw::ActionRow::new();
                 row.set_title(what);
                 let label = gtk::Label::new(Some(keys));
@@ -3405,12 +3609,55 @@ impl Window {
                 label.set_valign(gtk::Align::Center);
                 row.add_suffix(&label);
                 group.add(&row);
+                rows.push((row, *title, *keys, *what));
             }
             page.add(&group);
+            listed.push((group, rows));
         }
+
+        // Said rather than left to be guessed at. With every group hidden the
+        // sheet is an empty box, which reads as broken rather than as an
+        // answer — and "not here" is an answer worth having.
+        let nothing = adw::PreferencesGroup::new();
+        let sentence = gtk::Label::new(Some("No shortcut matches that"));
+        sentence.add_css_class("dim-label");
+        nothing.add(&sentence);
+        nothing.set_visible(false);
+        page.add(&nothing);
+
+        let search = gtk::SearchEntry::new();
+        search.set_placeholder_text(Some("Search"));
+        search.set_hexpand(true);
+        let field = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        field.set_margin_top(2);
+        field.set_margin_bottom(10);
+        field.set_margin_start(12);
+        field.set_margin_end(12);
+        field.append(&search);
+
+        // Headings with nothing under them are worse than a shorter sheet, so a
+        // group whose every row is filtered away goes too.
+        let filter = move |query: &str| {
+            let mut found = 0usize;
+            for (group, rows) in &listed {
+                let mut showing = 0usize;
+                for (row, section, keys, what) in rows {
+                    let hit = shortcut_matches(section, keys, what, query);
+                    row.set_visible(hit);
+                    showing += usize::from(hit);
+                }
+                group.set_visible(showing > 0);
+                found += showing;
+            }
+            nothing.set_visible(found == 0);
+        };
+        search.connect_search_changed(move |entry| filter(&entry.text()));
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&adw::HeaderBar::new());
+        // A bar of its own under the header rather than a widget in it: the
+        // sheet keeps its title, and the box stays put while the list scrolls.
+        toolbar.add_top_bar(&field);
         toolbar.set_content(Some(&page));
 
         let dialog = adw::Dialog::new();
@@ -3418,6 +3665,16 @@ impl Window {
         dialog.set_content_width(480);
         dialog.set_content_height(620);
         dialog.set_child(Some(&toolbar));
+
+        // Escape in a search box is otherwise dead; here it means the same
+        // thing it means everywhere else in the sheet.
+        crate::ui::dialogs::close_on_search_escape(&search, &dialog);
+
+        // The keyboard lands in the box, so the first thing typed is the
+        // search. Asked of the dialog rather than grabbed here, because the
+        // sheet is not on screen yet and focuses whatever this names two
+        // frames later, when it is.
+        dialog.set_focus(Some(&search));
         dialog.present(Some(&self.window));
     }
 
@@ -4090,13 +4347,20 @@ impl Window {
         self: &Rc<Self>,
         whole_book: bool,
         into: Option<&std::path::Path>,
+        clipboard: bool,
     ) -> Result<(String, std::path::PathBuf), String> {
         let theme = self.theming.borrow().theme();
         let book = self.book_label(self.active.get());
         if whole_book {
             let charts = self.panes.borrow().len();
-            let path =
-                screenshot::write_chartbook(&self.store, &self.chart_host, &book, &theme, into)?;
+            let path = screenshot::write_chartbook(
+                &self.store,
+                &self.chart_host,
+                &book,
+                &theme,
+                into,
+                clipboard,
+            )?;
             return Ok((format!("chartbook \"{book}\", {charts} charts"), path));
         }
         let pane = self.focused_pane();
@@ -4107,7 +4371,7 @@ impl Window {
             .map(|instrument| instrument.display_symbol())
             .unwrap_or_default();
         let at = self.layout.borrow().leaves().iter().position(|leaf| *leaf == pane.id);
-        let path = screenshot::write_chart(&self.store, &pane, &theme, into)?;
+        let path = screenshot::write_chart(&self.store, &pane, &theme, into, clipboard)?;
         let what = format!(
             "pos:{} {symbol} {} in \"{book}\"",
             at.unwrap_or(0),

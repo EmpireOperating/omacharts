@@ -163,6 +163,7 @@ pub trait Live {
         &self,
         whole_book: bool,
         into: Option<&std::path::Path>,
+        clipboard: bool,
     ) -> Result<(String, std::path::PathBuf), Fault>;
     /// Queue a paced background fetch of these instruments' daily bars, and
     /// return immediately.
@@ -459,8 +460,9 @@ impl Live for Rc<crate::ui::Window> {
         &self,
         whole_book: bool,
         into: Option<&std::path::Path>,
+        clipboard: bool,
     ) -> Result<(String, std::path::PathBuf), Fault> {
-        crate::ui::Window::screenshot(self, whole_book, into)
+        crate::ui::Window::screenshot(self, whole_book, into, clipboard)
             .map_err(|error| Fault::new(EXIT_ERROR, error))
     }
 
@@ -498,6 +500,7 @@ mod tests {
             &self,
             _whole_book: bool,
             _into: Option<&std::path::Path>,
+            _clipboard: bool,
         ) -> Result<(String, std::path::PathBuf), Fault> {
             panic!("a bug somewhere inside the window")
         }

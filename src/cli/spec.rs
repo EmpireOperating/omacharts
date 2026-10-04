@@ -402,11 +402,15 @@ pub const SURFACE: &[Noun] = &[
                 name: "screenshot",
                 about: "Save a PNG of the open chartbook: every chart, as laid out",
                 args: &[],
-                flags: &[Flag::valued(
-                    "output",
-                    "PATH",
-                    "the file to write, or a folder to name it in (default: the configured folder)",
-                )],
+                flags: &[
+                    Flag::valued(
+                        "output",
+                        "PATH",
+                        "the file to write, or a folder to name it in \
+                         (default: the configured folder)",
+                    ),
+                    Flag::switch("clipboard", "also copy the image, as the window's own key does"),
+                ],
                 example: "omacharts chartbook screenshot --output /tmp/book.png",
                 json: true,
                 writes: false,
@@ -595,11 +599,15 @@ pub const SURFACE: &[Noun] = &[
                 name: "screenshot",
                 about: "Save a PNG of the focused chart, as it looks on screen",
                 args: &[],
-                flags: &[Flag::valued(
-                    "output",
-                    "PATH",
-                    "the file to write, or a folder to name it in (default: the configured folder)",
-                )],
+                flags: &[
+                    Flag::valued(
+                        "output",
+                        "PATH",
+                        "the file to write, or a folder to name it in \
+                         (default: the configured folder)",
+                    ),
+                    Flag::switch("clipboard", "also copy the image, as the window's own key does"),
+                ],
                 example: "omacharts chart screenshot --output /tmp/chart.png",
                 json: true,
                 writes: false,
