@@ -19,7 +19,7 @@ use omacharts_engine::{
     resample, BarStyle, Indicator, Instrument, Provider, Session, Timeframe,
 };
 
-use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
+use crate::loader::{Loader, Request, Response, BACKFILL, BACKGROUND, FOREGROUND};
 use crate::store::{Store, DEFAULT_WATCHLIST};
 use crate::theming::Theming;
 use crate::ui::chart::{Drawn, Echo};
@@ -32,6 +32,15 @@ use crate::ui::search::SymbolSearch;
 use crate::ui::shortcuts;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
 use gtk::gio;
+
+/// How often the rail's missing prices are looked for.
+///
+/// Not a pacing knob — the provider owns pacing, and this never fetches. It is
+/// how long a symbol added from a terminal, or a section just expanded, waits
+/// to be noticed, and how long after a 429 the backfill offers itself again.
+/// A minute is below anyone's patience for a dash filling in and far above the
+/// cost of the `coverage` queries it takes to find out there is nothing to do.
+const BACKFILL_POLL_SECONDS: u32 = 60;
 
 /// How often we look for a desktop theme change. Cheap enough to be invisible,
 /// often enough to feel immediate.
@@ -735,6 +744,10 @@ pub struct Window {
     split: gtk::Paned,
     /// The resolution strip and what is on it.
     timeframes: RefCell<Vec<Timeframe>>,
+    /// Set when the provider has just refused speculative work. Until it
+    /// passes, the backfill does not offer anything — the provider would only
+    /// turn it down, and asking is how a cooldown becomes a longer one.
+    backfill_quiet_until: Cell<Option<std::time::Instant>>,
 }
 
 impl Window {
@@ -797,6 +810,7 @@ impl Window {
             timeframes: RefCell::new(parse_timeframes(
                 store.setting(SETTING_TIMEFRAMES).as_deref(),
             )),
+            backfill_quiet_until: Cell::new(None),
         });
 
         let watchlist = this.build_watchlist();
@@ -820,8 +834,10 @@ impl Window {
         watchlist.connect_chartbook_using(move |id| books.book_using_watchlist(id));
 
         let holder = watchlist.clone();
+        let marked = watchlist.clone();
         watchlist.link_button().set_popover(Some(&this.link_popover(
             move |group| holder.group_held_by(group).map(|(_, name)| name),
+            move || marked.link_group(),
             |window, group| {
                 let colour = window.link_colour(group);
                 if let Some(rail) = window.watchlist.borrow().as_ref() {
@@ -891,6 +907,7 @@ impl Window {
         this.wire_shortcuts();
         this.wire_responses(receiver);
         this.wire_theme_polling();
+        this.wire_backfill();
 
         // The widget is part of the app, so it arrives with it rather than
         // waiting to be discovered in the settings.
@@ -968,9 +985,14 @@ impl Window {
 
         // The chain opens the list of groups rather than toggling one, now
         // that there are nine of them and "off" is a tenth answer.
+        let marked = self.clone();
         pane.link.set_popover(Some(&self.link_popover(
             // Charts share a group freely; only a watchlist is exclusive.
             |_| None,
+            // By id rather than by holding the pane: the pane owns the button
+            // that owns this popover, and the chain it paints is the same
+            // `linked` this reads, so there is one answer rather than two.
+            move || marked.pane(id).map(|pane| pane.linked.get()).unwrap_or_default(),
             move |window, group| {
                 window.focus(id);
                 window.set_pane_link_group(id, group);
@@ -1475,15 +1497,29 @@ impl Window {
 
     /// The list of groups, as a popover. `choose` is handed the group the row
     /// stands for; which chart or rail it applies to is the caller's business.
+    ///
+    /// `current` is asked which group is in force, and asked again every time
+    /// the popover opens rather than once when it is built: the popover is
+    /// attached to its button for the life of the chart, and the group changes
+    /// underneath it constantly. A mark decided at build time would be a mark
+    /// that was right once.
+    ///
+    /// It is a parameter for the same reason `held` is. The popover is shared
+    /// between a chart, which is in its pane's group, and the rail, which is in
+    /// the watchlist's — so reading either one's state from in here would be
+    /// right for one caller and wrong for the other.
     fn link_popover(
         self: &Rc<Self>,
         held: impl Fn(LinkGroup) -> Option<String> + 'static,
+        current: impl Fn() -> LinkGroup + 'static,
         choose: impl Fn(&Rc<Self>, LinkGroup) + 'static,
     ) -> gtk::Popover {
         let popover = gtk::Popover::new();
         popover.set_has_arrow(false);
         let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let choose = Rc::new(choose);
+        // The mark for each row, kept so opening the popover can move it.
+        let mut marks: Vec<(LinkGroup, gtk::Image)> = Vec::new();
         for group in link::ALL {
             let row = gtk::Button::new();
             row.add_css_class("flat");
@@ -1505,6 +1541,23 @@ impl Window {
                 line.append(&owner);
                 row.set_sensitive(false);
             }
+            // The same icon GTK draws for a chosen item in a menu — the chart's
+            // own right-click menu gets one of these for free from a stateful
+            // action, and a hand-built list of buttons has to put it there
+            // itself rather than invent a different way of saying "this one".
+            //
+            // Always present, never hidden: hiding it would collapse the
+            // column and shuffle every label sideways as the choice moved.
+            // Opacity keeps the space and only stops it being drawn.
+            //
+            // After the owner label, so a row that is both the current group
+            // and spoken for by another watchlist reads as what it is — "this
+            // one, and it belongs to that list" — rather than one of the two
+            // displacing the other.
+            let mark = gtk::Image::from_icon_name("object-select-symbolic");
+            mark.set_opacity(0.0);
+            line.append(&mark);
+            marks.push((group, mark));
             row.set_child(Some(&line));
 
             let this = self.clone();
@@ -1518,6 +1571,13 @@ impl Window {
             });
             menu.append(&row);
         }
+        // Every time it opens, not once when it is built.
+        popover.connect_show(move |_| {
+            let now = current();
+            for (group, mark) in &marks {
+                mark.set_opacity(if *group == now { 1.0 } else { 0.0 });
+            }
+        });
         popover.set_child(Some(&menu));
         popover
     }
@@ -1721,6 +1781,11 @@ impl Window {
             let colours = self.clone();
             rail.adopt_link_group(move |group| colours.link_colour(group));
         }
+        // A watchlist that just changed is the likeliest moment for there to
+        // be a row with no price — somebody has just added one. Waiting for
+        // the timer would mean watching a dash for up to a minute after
+        // typing the symbol.
+        self.backfill();
     }
 
     /// Adopt a theme or bar scheme chosen outside this window, and repaint.
@@ -3005,7 +3070,14 @@ impl Window {
                         // A failure shows the same chart, marked stale. Never
                         // an empty pane.
                         this.present(&key, timeframe, bars, true);
-                        let _ = (error, rate_limited);
+                        // Being throttled is the one failure worth acting on
+                        // rather than just showing: carrying on would spend a
+                        // queue of speculative requests on certain refusals
+                        // and keep the cooldown climbing.
+                        if rate_limited {
+                            this.pause_backfill();
+                        }
+                        let _ = error;
                     }
                 }
             }
@@ -3569,6 +3641,108 @@ impl Window {
                 );
             }
         }
+    }
+
+    /// Queue a paced daily fetch for instruments the rail has no price for,
+    /// in the order given, and return at once.
+    ///
+    /// The one place anything outside the chart asks for data, and the reason
+    /// it exists is a rule worth stating plainly: **the GTK main loop never
+    /// waits on the network.** A command forwarded from a terminal or from the
+    /// bar widget runs *inside this process, on this thread* — so a command
+    /// that fetched would freeze the window for as long as the provider's
+    /// pacing took, which was six seconds every two minutes. Queueing instead
+    /// costs a mutex, and the loader already holds one throttle across every
+    /// request it has ever made, so a 429 is remembered rather than rediscovered
+    /// by each caller.
+    ///
+    /// Queues what it is given, in the order given — deciding what is worth
+    /// asking for belongs to whoever knows why they are asking. The loader
+    /// drops a duplicate of something already queued.
+    pub fn warm(self: &Rc<Self>, instruments: &[Instrument]) {
+        let daily = Timeframe::days(1);
+        for (rank, instrument) in instruments.iter().enumerate() {
+            let Some(symbol) = self.provider.symbol_for(instrument) else { continue };
+            let key = format!("{}:{symbol}", self.provider.id());
+            self.loader.fetch(
+                Request { key, symbol, timeframe: daily, speculative: true },
+                BACKFILL.saturating_add(rank as u32),
+            );
+        }
+    }
+
+    /// Keep asking, on a slow timer, whether the rail has rows with no price.
+    ///
+    /// A timer rather than a hook on every way a watchlist can change: symbols
+    /// arrive from a terminal as well as from the window, sections are expanded
+    /// and collapsed, and the question — "is anything on screen showing a dash"
+    /// — is the same one however it came to be true. It is also what lets the
+    /// backfill offer itself again after the provider has refused it.
+    fn wire_backfill(self: &Rc<Self>) {
+        // Behind the first frame, with the rest of the housekeeping: a dash
+        // filling in a moment later is not worth delaying the window for.
+        let first = self.clone();
+        glib::idle_add_local_once(move || first.backfill());
+        let this = self.clone();
+        glib::timeout_add_seconds_local(BACKFILL_POLL_SECONDS, move || {
+            this.backfill();
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Ask for daily bars for the rows the rail cannot price yet.
+    ///
+    /// The rail paints from the cache and never fetches — that is its contract
+    /// and this does not change it. What changes is that a symbol nobody has
+    /// opened no longer waits to be opened: the window, which already fetches
+    /// on the rail's behalf around the selection, now also covers the rows that
+    /// have nothing at all.
+    ///
+    /// Three things keep it from costing anybody their rate limit. Every
+    /// request is speculative, so the provider holds them [two seconds
+    /// apart](crate::loader) and refuses them outright while throttled — the
+    /// same pacing that already fills the neighbourhood, not a second
+    /// mechanism. Only rows with nothing cached are asked for, so this drains
+    /// and goes quiet instead of re-asking for what it just fetched. And only
+    /// visible rows: a collapsed section's symbols are not showing a dash to
+    /// anybody, and get picked up when the section opens.
+    fn backfill(self: &Rc<Self>) {
+        if self.backfill_quiet_until.get().is_some_and(|until| until > std::time::Instant::now()) {
+            return;
+        }
+        self.backfill_quiet_until.set(None);
+        let Some(rail) = self.watchlist.borrow().as_ref().cloned() else { return };
+        let daily = Timeframe::days(1);
+        let missing: Vec<Instrument> = rail
+            .flat_order()
+            .into_iter()
+            .filter(|instrument| {
+                self.provider
+                    .symbol_for(instrument)
+                    .map(|symbol| {
+                        let key = format!("{}:{symbol}", self.provider.id());
+                        self.store.coverage(&key, daily).is_none()
+                    })
+                    .unwrap_or(false)
+            })
+            .collect();
+        // Nothing missing is the steady state, and it has to be silent.
+        if missing.is_empty() {
+            return;
+        }
+        self.warm(&missing);
+    }
+
+    /// Stop offering backfill work for a while, because the provider just
+    /// refused some.
+    ///
+    /// Deliberately longer than the provider's own first cooldown, so the
+    /// window is never the thing that walks into it. The provider climbs its
+    /// own from a minute to fifteen; this only has to stay out of the way.
+    fn pause_backfill(self: &Rc<Self>) {
+        self.loader.drop_backfill();
+        self.backfill_quiet_until
+            .set(Some(std::time::Instant::now() + std::time::Duration::from_secs(300)));
     }
 
     /// Apply bars that arrived for `key`, ignoring a reply for a chart the user

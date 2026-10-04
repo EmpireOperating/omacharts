@@ -53,6 +53,16 @@ pub const FOREGROUND: u32 = 0;
 /// immediately around the selection.
 pub const BACKGROUND: u32 = 1_000;
 
+/// A standing to-do list: symbols with nothing cached at all, which the rail
+/// has no price to draw for until something fetches them.
+///
+/// Below every positional priority, and — unlike those — not forgotten when
+/// the selection moves. A prefetch is a guess about where you are going next
+/// and stops being true the moment you go somewhere else; a symbol with no
+/// data is missing data wherever you are, so dropping it would mean a dash
+/// that only fills in if you stop arrowing.
+pub const BACKFILL: u32 = 2_000_000;
+
 /// Fetches bars on one worker thread, nearest-wanted first.
 ///
 /// One thread, not one per request, for two reasons. The provider is paced —
@@ -133,9 +143,22 @@ impl Loader {
     /// Called when the selection moves: the old neighbours are no longer the
     /// nearest ones, and leaving them queued would spend the request budget on
     /// symbols that are now far away.
+    ///
+    /// [`BACKFILL`] work survives, because it was never about position.
     pub fn drop_prefetches(&self) {
         let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
-        queue.jobs.retain(|job| job.priority == FOREGROUND);
+        queue.jobs.retain(survives_a_move);
+    }
+
+    /// Forget the standing backfill.
+    ///
+    /// For a 429: the provider is now refusing everything speculative, so a
+    /// hundred queued symbols would be a hundred instant refusals and a
+    /// hundred pointless repaints. Dropping them and asking again later is
+    /// the same answer the provider's own cooldown gives, applied one level up.
+    pub fn drop_backfill(&self) {
+        let mut queue = self.inner.queue.lock().unwrap_or_else(|e| e.into_inner());
+        queue.jobs.retain(|job| job.priority < BACKFILL);
     }
 
     pub fn queued(&self) -> usize {
@@ -166,6 +189,15 @@ impl Inner {
             queue = self.wake.wait(queue).unwrap_or_else(|e| e.into_inner());
         }
     }
+}
+
+/// Is this job still worth having once the selection has moved?
+///
+/// The chart on screen is, because it is the thing that moved. The backfill is,
+/// because it was never about where you were. Everything between the two is a
+/// guess about the old neighbourhood and has just stopped being true.
+fn survives_a_move(job: &Job) -> bool {
+    job.priority == FOREGROUND || job.priority >= BACKFILL
 }
 
 /// Index of the job to run next: lowest priority, then earliest asked.
@@ -338,6 +370,30 @@ mod tests {
     fn equal_priorities_keep_their_order() {
         let jobs = vec![job("b", 3, 7), job("a", 3, 2)];
         assert_eq!(best(&jobs), Some(1), "asked for first, so run first");
+    }
+
+    /// Moving the selection forgets the neighbourhood, because that is what
+    /// changed. A symbol with nothing cached is still missing it.
+    #[test]
+    fn moving_on_forgets_prefetches_but_keeps_the_backfill() {
+        let queued = [
+            job("chart", FOREGROUND, 0),
+            job("neighbour", 2, 1),
+            job("neighbour-daily", BACKGROUND + 2, 2),
+            job("never-fetched", BACKFILL, 3),
+        ];
+        let kept: Vec<&str> = queued
+            .iter()
+            .filter(|job| survives_a_move(job))
+            .map(|job| job.request.key.as_str())
+            .collect();
+        assert_eq!(kept, ["chart", "never-fetched"]);
+    }
+
+    #[test]
+    fn the_backfill_runs_last_of_everything() {
+        let jobs = vec![job("never-fetched", BACKFILL, 0), job("neighbour-daily", BACKGROUND, 1)];
+        assert_eq!(best(&jobs), Some(1), "a guess about where you are going still wins");
     }
 
     #[test]

@@ -282,10 +282,10 @@ fn refresh(store: &Store, provider: &Yahoo, instruments: &[Instrument]) {
         let Some(symbol) = provider.symbol_for(instrument) else { continue };
         let Some(key) = cache_key(provider, instrument) else { continue };
         let since = store.coverage(&key, daily).map(|c| c.last_ts - 5 * daily.seconds());
-        if let Ok(bars) = provider.bars_speculative(&symbol, daily, since) {
-            if !bars.is_empty() {
-                store.merge_bars(&key, daily, &bars);
-            }
+        if let Ok(bars) = provider.bars_speculative(&symbol, daily, since)
+            && !bars.is_empty()
+        {
+            store.merge_bars(&key, daily, &bars);
         }
     }
 }
