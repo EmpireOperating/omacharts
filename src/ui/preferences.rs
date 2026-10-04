@@ -581,10 +581,6 @@ fn desktop_group() -> Option<adw::PreferencesGroup> {
 
     let group = adw::PreferencesGroup::new();
     group.set_title("Desktop");
-    group.set_description(Some(
-        "The bar widget reads the watchlist with the omacharts command, so it \
-         keeps working — and keeps its icon — when the app is closed.",
-    ));
 
     let row = adw::ActionRow::new();
     row.set_title("Show in the Omarchy bar");
