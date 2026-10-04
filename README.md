@@ -72,19 +72,11 @@ command surface in a form a script can read.
 
 Any agent can drive this app as well as a person can: `omacharts surface --json`
 describes every command and argument in a form meant to be parsed, and
-[AGENTS.md](AGENTS.md) covers the conventions.
+[AGENTS.md](AGENTS.md) covers the conventions, which Claude and Codex both read.
 
 What is left is discovery, so Omacharts ships a skill that makes an agent reach
-for it when you say "what's semis doing" or "set me up for the open".
-
-Install the skill as a plugin, which keeps it updated with the app:
-
-```sh
-claude plugin marketplace add /usr/share/omacharts/claude-plugin
-claude plugin install omacharts@omacharts
-```
-
-Or, if you have just installed the package and are already in a terminal:
+for it when you say "what's semis doing" or "set me up for the open". It
+installs for whichever agents you have:
 
 ```sh
 omacharts skill install
