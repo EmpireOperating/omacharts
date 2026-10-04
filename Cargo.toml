@@ -2,7 +2,7 @@
 name = "omacharts"
 version = "0.1.0"
 edition = "2024"
-description = "Fast, beautiful charting software for the Linux desktop"
+description = "Fast, beautiful charting software for Omarchy"
 license = "MIT"
 
 [workspace]
