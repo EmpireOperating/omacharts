@@ -191,11 +191,21 @@ impl Store {
         );
     }
 
+    /// A stored flag, read the way people write one.
+    ///
+    /// The app writes "1" and "0", but a setting can also be typed —
+    /// `omacharts config set <key> false` — and only the two digits were
+    /// understood, so every other spelling silently fell back to the default
+    /// and the command looked as though it had done nothing. The words cost
+    /// nothing to accept and are what somebody reaches for first.
     pub fn setting_bool(&self, key: &str, default: bool) -> bool {
-        match self.setting(key).as_deref() {
-            Some("1") => true,
-            Some("0") => false,
-            _ => default,
+        match self.setting(key) {
+            Some(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => true,
+                "0" | "false" | "no" | "off" => false,
+                _ => default,
+            },
+            None => default,
         }
     }
 
@@ -535,6 +545,12 @@ impl Store {
             .conn
             .execute("DELETE FROM watchlist_sections WHERE watchlist_id = ?1", params![id]);
         let _ = self.conn.execute("DELETE FROM watchlists WHERE id = ?1", params![id]);
+        // The group it drove goes with it. Left behind, the row still claims
+        // the group — so the next list offering that group was told it was
+        // taken, by a list that no longer exists and could not be named.
+        let _ = self
+            .conn
+            .execute("DELETE FROM settings WHERE key = ?1", params![format!("watchlist_link_{id}")]);
     }
 
     pub fn set_section_collapsed(&self, id: i64, collapsed: bool) {
@@ -1469,6 +1485,28 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
+
+    /// The app writes "1" and "0", but `omacharts config set <key> false` puts
+    /// a word there, and a reader that understood only the digits treated it
+    /// as unset — so the command appeared to do nothing at all.
+    #[test]
+    fn a_flag_is_read_the_way_people_write_one() {
+        let store = Store::memory().unwrap();
+        for yes in ["1", "true", "TRUE", "yes", "on", " true "] {
+            store.set_setting("flag", yes);
+            assert!(store.setting_bool("flag", false), "{yes:?} should read as true");
+        }
+        for no in ["0", "false", "False", "no", "off"] {
+            store.set_setting("flag", no);
+            assert!(!store.setting_bool("flag", true), "{no:?} should read as false");
+        }
+
+        // Anything else is not an answer, so the default stands.
+        store.set_setting("flag", "maybe");
+        assert!(store.setting_bool("flag", true));
+        assert!(!store.setting_bool("flag", false));
+        assert!(store.setting_bool("never set", true));
+    }
 
     /// A fresh install opens on an empty chart. Volume was the default here
     /// when it was drawn unconditionally, which made the very first chart

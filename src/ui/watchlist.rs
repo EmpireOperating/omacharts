@@ -2179,8 +2179,24 @@ mod tests {
         assert!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST).is_some());
 
         store.remove_watchlist(energy);
-        store.set_setting(&link_setting(energy), "0");
         assert_eq!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST), None);
+
+        // And the row itself is gone, not merely ignored. Left behind it
+        // would be read again by anything that walks the settings, and would
+        // come back to life under a list that reused the id.
+        assert_eq!(store.setting(&link_setting(energy)), None, "the group outlived its list");
+    }
+
+    /// `remove_watchlist` deletes this row, and spells the key itself rather
+    /// than reaching into this module for it. Two spellings of one key is a
+    /// cleanup that stops happening the day either side is reworded, so the
+    /// agreement is pinned here where the name is defined.
+    #[test]
+    fn the_key_the_store_clears_is_the_key_this_writes() {
+        let store = Store::memory().unwrap();
+        let list = store.add_watchlist("Metals").expect("made");
+        store.set_setting(&link_setting(list), "5");
+        assert_eq!(store.setting(&format!("watchlist_link_{list}")).as_deref(), Some("5"));
     }
 
     /// Nothing stopped two lists claiming one group until now, so a database
