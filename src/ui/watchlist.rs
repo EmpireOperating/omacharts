@@ -399,6 +399,7 @@ impl Watchlist {
 
         watchlist.wire_selection();
         watchlist.wire_keys();
+        watchlist.wire_click_to_focus();
         watchlist.wire_switcher();
         watchlist.rebuild();
         watchlist
@@ -700,6 +701,47 @@ impl Watchlist {
         } else {
             self.list.grab_focus();
         }
+    }
+
+    /// Put the keyboard in the rail without disturbing what is highlighted.
+    ///
+    /// `grab_focus` lands on a row and highlights it, and a highlight is what
+    /// drives the chart — so it is the wrong thing to do when all that
+    /// happened is a click on the rail. The shortcuts only need the keyboard
+    /// to be in here; they do not need anything selected.
+    fn take_focus(self: &Rc<Self>) {
+        if let Some(row) = self.list.selected_row() {
+            row.grab_focus();
+        } else if let Some(offer) = self.empty_focus.borrow().as_ref() {
+            offer.grab_focus();
+        } else {
+            self.list.grab_focus();
+        }
+    }
+
+    /// A click anywhere in the rail puts the keyboard in it.
+    ///
+    /// The rail owns shortcuts of its own — a new section, rotating through
+    /// the watchlists — and they ask whether the keyboard is in here before
+    /// they do anything. Clicking a symbol focused the rail as a side effect
+    /// of selecting it, but clicking the empty space below the last row, or
+    /// the header, left the keyboard wherever it was, so the shortcuts the
+    /// empty state advertises did nothing.
+    ///
+    /// Caught on the way down, because the list claims a press for its own
+    /// selection and a gesture waiting on the way up would never hear about
+    /// it. Taking focus first is harmless: it changes no selection, and the
+    /// press carries on to whatever it was going to do anyway.
+    fn wire_click_to_focus(self: &Rc<Self>) {
+        let click = gtk::GestureClick::new();
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let this = self.clone();
+        click.connect_pressed(move |_, _, _, _| {
+            if !this.has_focus() {
+                this.take_focus();
+            }
+        });
+        self.widget.add_controller(click);
     }
 
     /// Does the keyboard currently live here?
