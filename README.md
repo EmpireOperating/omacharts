@@ -1,6 +1,6 @@
 # Omacharts
 
-Fast, beautiful market charts for [Omarchy](https://omarchy.org).
+Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 
 <p align="center">
   <img src="doc/gallery.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
