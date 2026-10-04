@@ -21,10 +21,10 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   arrangements as you want as chartbooks, each with its own watchlist, and
   switch between them from the strip along the bottom. Link charts and
   watchlists as you need to. It all comes back the way you left it.
-- **Keyboard first.** Hotkeys for the whole app: split and close charts,
-  resize them, walk the chartbooks, step the resolution, rotate the
-  watchlists. Type a letter to find a symbol, a number to set a resolution.
-  Press `?` for the lot.
+- **Keyboard first.** An intuitive, discoverable user interface, prepared for
+  power users. Hotkeys for the whole app: split and close charts, resize them,
+  walk the chartbooks, step the resolution, rotate the watchlists. Type a
+  letter to find a symbol, a number to set a resolution. Press `?` for the lot.
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI and ATR, each in its own resizable strip. More coming.
 - **A bar widget** for the Omarchy bar: your watchlist with sparklines, live,
