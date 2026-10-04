@@ -1207,24 +1207,15 @@ fn chart_set(
         Some(text) => Some(link_group(text)?),
     };
 
-    // Joining a group adopts what the group is already showing, which is what
-    // joining one means — a chart whose chain says group 3 while it shows
-    // something else is the state the window goes out of its way to avoid.
-    // Not where the same command named a symbol: that was asked for.
-    let adopted = match (link, symbol.is_some()) {
-        (Some(group), false) if group > 0 => group_instrument(workspace.book(at)?, group, pane),
-        _ => None,
-    };
+    // Which group it was in, read before anything is written: only an actual
+    // change leads the group. Re-stating the group a chart is already in is
+    // not somebody asking for four charts to move.
+    let was = group_of(workspace.book(at)?, pane);
 
     let target = workspace.book_mut(at)?;
     let Some(chart) = charts::pane_mut(target, pane) else {
         return Err(Fault::not_found(format!("no chart {pane}")));
     };
-    if let Some((symbol, suffix)) = adopted {
-        chart["symbol"] = json!(symbol);
-        chart["suffix"] = json!(suffix);
-        changed.push(format!("symbol {}", spell(&symbol, suffix.as_deref())));
-    }
     if let Some(symbol) = symbol {
         chart["symbol"] = json!(symbol);
         chart["suffix"] = json!(suffix);
@@ -1253,6 +1244,11 @@ fn chart_set(
         chart["show_grid"] = json!(grid == "on");
         changed.push(format!("grid {grid}"));
     }
+    // What the chart ends up showing, which is what it leads its new group
+    // with. Read after the writes above, so `--symbol X --link N` leads with X
+    // rather than with whatever the chart had before.
+    let leading = chart["symbol"].as_str().filter(|s| !s.is_empty()).map(String::from);
+    let leading_suffix = chart["suffix"].as_str().map(String::from);
 
     if changed.is_empty() {
         return Err(Fault::usage(
@@ -1260,9 +1256,34 @@ fn chart_set(
                 .into(),
         ));
     }
+
+    // A chart put in a group leads it. Three things write nothing: leaving a
+    // group — the charts still in it keep what they had; re-stating the group
+    // the chart is already in; and leading from a chart with no symbol, which
+    // would blank the group it just joined.
+    let joined = link.filter(|group| *group > 0 && *group != was);
+    let followers = match (joined, &leading) {
+        (Some(group), Some(symbol)) => {
+            workspace.lead_link_group(group, symbol, leading_suffix.as_deref(), at, pane)
+        }
+        _ => 0,
+    };
+
     workspace.save(store);
-    let text = format!("chart {pane}: {}", changed.join(", "));
-    said(as_json, json!({"chart": pane, "changed": changed}), text)
+    let mut text = format!("chart {pane}: {}", changed.join(", "));
+    if followers > 0 {
+        let group = joined.unwrap_or(0);
+        let named = spell(leading.as_deref().unwrap_or("?"), leading_suffix.as_deref());
+        text.push_str(&match followers {
+            1 => format!("; 1 other chart in group {group} now shows {named}"),
+            n => format!("; {n} other charts in group {group} now show {named}"),
+        });
+    }
+    said(
+        as_json,
+        json!({"chart": pane, "changed": changed, "followers": followers}),
+        text,
+    )
 }
 
 fn chart_indicator(
@@ -1443,22 +1464,17 @@ fn chart_label(book: &Value, pane: u32) -> String {
     )
 }
 
-/// What the other charts in a group are showing, if they agree on anything.
+/// Which group a chart is in, as a number, with zero for none.
 ///
-/// The first one found, which is how the window picks it too: a group whose
-/// members disagree is a group mid-change, and either answer leaves it
-/// consistent a moment later.
-fn group_instrument(book: &Value, group: u8, except: u32) -> Option<(String, Option<String>)> {
+/// Wanted before a change rather than after it, because joining a group leads
+/// it and re-stating the group a chart is already in must not.
+fn group_of(book: &Value, pane: u32) -> u8 {
     charts::panes(book)
         .iter()
-        .filter(|pane| pane["id"].as_u64() != Some(u64::from(except)))
-        .filter(|pane| pane["linked"].as_u64() == Some(u64::from(group)))
-        .find_map(|pane| {
-            Some((
-                pane["symbol"].as_str()?.to_string(),
-                pane["suffix"].as_str().map(str::to_string),
-            ))
-        })
+        .find(|p| p["id"].as_u64() == Some(u64::from(pane)))
+        .and_then(|p| p["linked"].as_u64())
+        .and_then(|group| u8::try_from(group).ok())
+        .unwrap_or(0)
 }
 
 /// The chartbook already showing `watchlist`, if it is not the one at `besides`.
@@ -2658,38 +2674,158 @@ mod tests {
         assert_eq!(parsed["charts"][0]["id"], 1);
     }
 
-    /// Joining a group means showing what the group shows. A chart whose chain
-    /// says group 2 and whose canvas says something else is the state the
-    /// window goes out of its way to avoid, and the command has to agree.
+    /// Joining a group leads it. You linked *this* chart, so what it is showing
+    /// is the symbol you meant the group to be on — and the chain and the
+    /// canvas agree either way round, which is the state the window goes out of
+    /// its way to keep.
     #[test]
-    fn a_chart_joining_a_group_takes_what_the_group_is_showing() {
+    fn a_chart_joining_a_group_leads_it_onto_what_that_chart_is_showing() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD", &store);
 
         let joined = run("chart set --book Macro --chart pos:1 --link 2", &store);
         assert_eq!(joined.code, 0, "{}", joined.err);
-        assert!(joined.out.contains("NVDA"), "it has to say so: {}", joined.out);
+        assert!(joined.out.contains("AMD"), "it has to say what followed: {}", joined.out);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
-        assert_eq!(parsed["charts"][1]["symbol"], "NVDA");
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "the chart already in it follows");
+        assert_eq!(parsed["charts"][1]["symbol"], "AMD");
     }
 
-    /// A symbol named in the same command was asked for, so joining a group
-    /// does not overrule it.
+    /// A symbol named in the same command is what the chart ends up showing,
+    /// so it is also what the group is led onto — read after the write rather
+    /// than before it.
     #[test]
-    fn a_symbol_named_alongside_a_group_is_the_one_that_is_shown() {
+    fn a_symbol_named_alongside_a_group_is_the_one_the_group_follows() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
         run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+
         run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
 
         let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"][1]["symbol"], "AMD");
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "and the group follows the new symbol");
+    }
+
+    /// Only an actual change leads the group. A radio menu makes re-picking the
+    /// group you are already in easy to do by accident, and a popover re-states
+    /// its own state every time it opens — either of those quietly rewriting
+    /// four charts would make the whole control unusable.
+    #[test]
+    fn re_stating_the_group_a_chart_is_already_in_moves_nobody() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+        // Both on AMD now. Put one of them somewhere else by hand, then re-pick
+        // the group it has been in all along.
+        run("chart set --book Macro --chart pos:0 --symbol NVDA", &store);
+
+        let again = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        assert_eq!(again.code, 0, "{}", again.err);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "nothing was asked for, so nothing moved");
+        assert_eq!(parsed["charts"][1]["symbol"], "AMD");
+    }
+
+    /// Leaving a group changes nothing about the group. The chart stops
+    /// following and stops leading; the charts still in it keep what they were
+    /// showing, because unlinking is a statement about one chart.
+    #[test]
+    fn leaving_a_group_leaves_the_charts_still_in_it_alone() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD", &store);
+
+        let left = run("chart set --book Macro --chart pos:1 --link none", &store);
+        assert_eq!(left.code, 0, "{}", left.err);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["symbol"], "AMD", "group 2 keeps what it had");
+        assert_eq!(parsed["charts"][1]["link"], 0, "and this one is out of it");
+    }
+
+    /// Moving between two groups writes to the one being joined and not to the
+    /// one being left, which are two different sets of charts.
+    #[test]
+    fn moving_from_one_group_to_another_leads_only_the_group_it_joins() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart split horizontal --book Macro --chart pos:1", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link 5", &store);
+        run("chart set --book Macro --chart pos:2 --symbol TSM --link 2", &store);
+        // Joining group 2 just led it onto TSM. Put group 2 back on NVDA, so
+        // that what the move below does to it — nothing — is visible.
+        run("chart set --book Macro --chart pos:0 --symbol NVDA", &store);
+
+        run("chart set --book Macro --chart pos:2 --link 5", &store);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][1]["symbol"], "TSM", "group 5 follows what joined it");
+        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "group 2 was only left, not written to");
+    }
+
+    /// A chart with nothing on it leads with nothing. Blanking a group because
+    /// an empty chart joined it would be the one way this feature could destroy
+    /// what somebody was looking at.
+    #[test]
+    fn a_chart_with_no_symbol_does_not_blank_the_group_it_joins() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        // Nothing in the command surface can empty a chart, so this reaches
+        // past it — which is the only way the stored arrangement gets into this
+        // state, and it is reachable: `config set workspace` writes it whole.
+        let mut workspace = charts::Workspace::load(&store);
+        let book = workspace.book_mut(0).unwrap();
+        charts::pane_mut(book, 2).unwrap()["symbol"] = json!("");
+        workspace.save(&store);
+
+        let joined = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        assert_eq!(joined.code, 0, "{}", joined.err);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "the group keeps what it was showing");
+    }
+
+    /// A group reaches across chartbooks, so joining one has to write into the
+    /// books that are not open. Stopping at the open one would make a group
+    /// mean "the charts in this group I can currently see", and the book you
+    /// switched back to would show a symbol from before the link.
+    #[test]
+    fn joining_a_group_leads_the_charts_in_the_books_that_are_away() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chartbook create Chips --symbol MU", &store);
+        run("chart set --book Chips --chart pos:0 --link 4", &store);
+        run("chart set --book Chips --chart pos:0 --symbol MU", &store);
+
+        let joined = run("chart set --book Macro --chart pos:0 --symbol NVDA --link 4", &store);
+        assert_eq!(joined.code, 0, "{}", joined.err);
+        assert!(joined.out.contains("group 4"), "it has to say so: {}", joined.out);
+
+        let listed = run("chart list --book Chips --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["symbol"], "NVDA", "the book that is away followed");
     }
 
     /// Which list the rail shows is written down against whichever book was

@@ -526,9 +526,28 @@ impl Watchlist {
         ask.and_then(|ask| ask(id))
     }
 
+    /// The symbol the rail is on, if it is on one.
+    ///
+    /// What a list leads its group with when it is put in one. A watchlist has
+    /// no symbol of its own, and the row somebody left the selection on is the
+    /// nearest thing to one — so a list with nothing selected, or whose
+    /// selection is a section header, has nothing to lead with.
+    pub fn selected_instrument(&self) -> Option<Instrument> {
+        let at = self.list.selected_row()?.index().max(0) as usize;
+        match self.rows.borrow().get(at) {
+            Some(RowKind::Entry { instrument, .. }) => Some(instrument.clone()),
+            _ => None,
+        }
+    }
+
     /// Join a group, or leave it. Remembered against the watchlist rather
     /// than the rail, so a list keeps driving the same charts when a
     /// chartbook brings it back.
+    ///
+    /// Only the group is written here. Making the group follow this list's
+    /// symbol is the window's business, because it owns the charts and the
+    /// books that are away — and it has to read the group back out of here
+    /// afterwards, since a group another list holds is refused below.
     pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
         // A group drives one list. The popover disables a group another list
         // already holds, so reaching here with one is a bug rather than a
@@ -546,7 +565,17 @@ impl Watchlist {
 
     /// The same, for a list that has just been shown: read what it was left
     /// in rather than writing anything down.
-    pub fn adopt_link_group(&self, colour: impl Fn(LinkGroup) -> Option<String>) {
+    ///
+    /// Never leads, whatever it finds. Being shown a list, or redrawing the
+    /// rail after a symbol was added to one, is not somebody putting that list
+    /// in a group — so this only ever repaints the chain.
+    ///
+    /// Answers whether the group changed, which is the one thing that has a
+    /// consequence: the list then has to be pointed at what its new group is
+    /// showing. Without the answer the caller would have to follow on every
+    /// redraw, and adding one symbol to a list would jump the selection off
+    /// whatever somebody was looking at.
+    pub fn adopt_link_group(&self, colour: impl Fn(LinkGroup) -> Option<String>) -> bool {
         let mut stored = stored_group(&self.store, self.active.get());
         // A database written before a group could only be held once can have
         // two lists claiming one. The first keeps it and this one comes back
@@ -555,8 +584,10 @@ impl Watchlist {
             stored = LinkGroup::None;
             self.store.set_setting(&link_setting(self.active.get()), "0");
         }
+        let changed = self.link_group.get() != stored;
         self.link_group.set(stored);
         self.paint_link(stored, colour(stored));
+        changed
     }
 
     fn paint_link(&self, group: LinkGroup, colour: Option<String>) {

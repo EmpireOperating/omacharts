@@ -157,6 +157,48 @@ impl Workspace {
         }
     }
 
+    /// Put `symbol` on every chart in `group`, everywhere but on the chart
+    /// that is leading it.
+    ///
+    /// Across every chartbook, not only the one that is open. A group reaches
+    /// across books, so stopping at the open one would make a group mean "the
+    /// charts in this group I can currently see" — and the book you switched
+    /// away from would come back showing a symbol from before the link. The
+    /// open book is included for the same reason the rest are: a command writes
+    /// the whole arrangement back and the window rebuilds from it.
+    ///
+    /// Answers how many charts actually moved, so a command that changed four
+    /// of them can say so. A chart already on the symbol is not one of them.
+    pub fn lead_link_group(
+        &mut self,
+        group: u8,
+        symbol: &str,
+        suffix: Option<&str>,
+        at: usize,
+        leader: u32,
+    ) -> usize {
+        if group == 0 {
+            return 0;
+        }
+        let mut moved = 0;
+        for (index, book) in self.books_mut().iter_mut().enumerate() {
+            let Some(panes) = book["panes"].as_array_mut() else { continue };
+            for pane in panes {
+                let is_leader = index == at && pane["id"].as_u64() == Some(u64::from(leader));
+                if is_leader || pane["linked"].as_u64() != Some(u64::from(group)) {
+                    continue;
+                }
+                if pane["symbol"].as_str() == Some(symbol) && pane["suffix"].as_str() == suffix {
+                    continue;
+                }
+                pane["symbol"] = json!(symbol);
+                pane["suffix"] = json!(suffix);
+                moved += 1;
+            }
+        }
+        moved
+    }
+
     pub fn push(&mut self, book: Value) -> usize {
         self.books_mut().push(book);
         self.books().len() - 1

@@ -142,14 +142,19 @@ same instrument: moving one moves the others, and a pointer on one draws a
 crosshair on the rest.
 
 ```
-omacharts chart set --link 3        # join group 3
-omacharts chart set --link none     # leave it
+omacharts chart set --link 3        # join group 3 and lead it
+omacharts chart set --link none     # leave it, changing nobody
 omacharts chart list                # the last column is the group
 ```
 
 A watchlist drives a group too, and that is the other half of what groups are
 for: picking a symbol in a list changes the charts in the group it drives
-rather than the one chart you happen to be on.
+rather than the one chart you happen to be on. In the window, putting a list in
+a group leads it the same way a chart does — with the row the list is on. From
+a command there is no such row to lead with, because which row a list is on is
+the rail's own state and is nowhere in the database, so this sets the group and
+the list then follows it: the rail points at what its new group is showing the
+moment that list is on screen.
 
 ```
 $ omacharts watchlist link Semis 3
@@ -179,14 +184,33 @@ asking before changing any of it. Out of the box the default watchlist drives
 group 1, and charts start in group 1, so a fresh install has the list driving
 the charts.
 
-Joining a group takes what the group is showing, because that is what joining
-one means — unless the same command named a symbol, which was asked for:
+**A chart put in a group leads it.** What that chart is showing becomes the
+group's symbol, and everything else in the group follows: the other charts, the
+charts of the chartbooks that are not open, and the watchlist driving the group.
+You linked *this* chart, so this is the symbol you meant the group to be on:
 
 ```
 $ omacharts chart set --chart pos:1 --link 2
-chart 3: symbol NVDA, link group 2
+chart 3: link group 2; 1 other chart in group 2 now shows AMD
   [exit 0]
 ```
+
+`--symbol` and `--link` in one command lead with the new symbol, since that is
+what the chart ends up showing.
+
+Three changes write nothing, which is what makes the control safe to touch:
+
+* **`--link none`** takes the chart out and changes nobody. The charts still in
+  the group keep what they had.
+* **Re-stating the group a chart is already in.** Only an actual change leads,
+  so a script that re-applies a chart's whole state does not rewrite four others
+  every time it runs.
+* **Joining from a chart with no symbol.** The group keeps what it was showing
+  rather than being blanked.
+
+`chart set --symbol` on a chart already in a group changes that one chart.
+Spreading a symbol over a group is the window's business — picking in the rail,
+or typing in the search — and a command names the charts it means.
 
 Whether a pointer on one chart draws a line on the ones linked to it:
 

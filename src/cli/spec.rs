@@ -295,7 +295,7 @@ pub const SURFACE: &[Noun] = &[
             },
             Verb {
                 name: "link",
-                about: "Which link group a watchlist drives, if any",
+                about: "Which link group a watchlist drives, if any — the list then follows it",
                 args: &[
                     Arg::req("LIST", SELECTOR),
                     Arg::opt("GROUP", "the group it drives, or `none`; omit to read it").of(LINKS),
@@ -554,7 +554,7 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("resolution", "TF", "such as 5m, 1h, 1D, 1W"),
                     Flag::valued("style", "STYLE", "how bars are drawn").of(STYLES),
                     Flag::valued("session", "SESSION", "which hours to include").of(SESSIONS),
-                    Flag::valued("link", "GROUP", "which link group it joins, or `none` to leave one")
+                    Flag::valued("link", "GROUP", "the link group it joins and then leads, or `none` to leave one")
                         .of(LINKS),
                     Flag::valued("grid", "BOOL", "draw the grid").of(&["on", "off"]),
                 ],

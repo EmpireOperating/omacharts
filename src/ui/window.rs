@@ -435,6 +435,202 @@ mod tests {
         assert_eq!(back.books[1].layout.leaves(), vec![7]);
     }
 
+    /// A chart, as a book that is not on screen holds one.
+    fn stored_pane(id: u32, symbol: &str, linked: LinkGroup) -> StoredPane {
+        StoredPane {
+            id,
+            symbol: symbol.to_string(),
+            suffix: None,
+            timeframe: "1D".to_string(),
+            indicators: Vec::new(),
+            bar_style: "candle".to_string(),
+            session: "extended".to_string(),
+            show_grid: true,
+            linked,
+        }
+    }
+
+    fn book_of(name: &str, panes: Vec<StoredPane>) -> Chartbook {
+        let first = panes.first().map(|pane| pane.id).unwrap_or(1);
+        Chartbook {
+            name: name.to_string(),
+            layout: Node::leaf(first),
+            focused: first,
+            panes,
+            watchlist: None,
+            sidebar_shown: None,
+            sidebar_width: None,
+        }
+    }
+
+    /// Whatever a test wants to spread. Only the ticker and the suffix are read
+    /// by anything here; the rest is what the inventory would have filled in.
+    fn any_instrument(symbol: &str, suffix: Option<&str>) -> Instrument {
+        Instrument {
+            symbol: symbol.to_string(),
+            name: symbol.to_string(),
+            kind: omacharts_engine::InstrumentKind::Equity,
+            suffix: suffix.map(str::to_string),
+            currency: Some("USD".to_string()),
+            tier: 2,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: None,
+            popularity: 0,
+        }
+    }
+
+    /// The half of linking nobody can see: a group reaches into the books that
+    /// are away, whose charts are stored values rather than widgets. Without
+    /// this, switching to a book you had linked would show a symbol from
+    /// before the link and the whole feature would look as though it had
+    /// quietly failed.
+    #[test]
+    fn a_group_is_written_into_every_book_but_the_one_on_screen() {
+        let mut books = vec![
+            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::Group(2))]),
+            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::Group(2))]),
+            book_of("Further", vec![stored_pane(3, "TSLA", LinkGroup::Group(2))]),
+        ];
+
+        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::Group(2));
+
+        assert_eq!(books[1].panes[0].symbol, "NVDA");
+        assert_eq!(books[2].panes[0].symbol, "NVDA");
+        assert_eq!(
+            books[0].panes[0].symbol, "AAPL",
+            "the open book's charts are the live ones, and saving writes those back"
+        );
+    }
+
+    /// A chart in another group is deliberately somewhere else, and so is an
+    /// unlinked one.
+    #[test]
+    fn a_book_that_is_away_keeps_the_charts_that_are_not_in_the_group() {
+        let mut books = vec![
+            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::Group(2))]),
+            book_of(
+                "Away",
+                vec![
+                    stored_pane(2, "MSFT", LinkGroup::Group(2)),
+                    stored_pane(3, "GOOG", LinkGroup::Group(5)),
+                    stored_pane(4, "AMZN", LinkGroup::None),
+                ],
+            ),
+        ];
+
+        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::Group(2));
+
+        assert_eq!(books[1].panes[0].symbol, "NVDA");
+        assert_eq!(books[1].panes[1].symbol, "GOOG", "group 5 is tracking something else");
+        assert_eq!(books[1].panes[2].symbol, "AMZN", "and an unlinked chart follows nobody");
+    }
+
+    /// "Linked to nobody" is not a pool to agree with, which is what makes
+    /// unlinking the one group change that moves no other chart.
+    #[test]
+    fn nothing_is_written_for_the_unlinked_group() {
+        let mut books = vec![
+            book_of("Open", vec![stored_pane(1, "AAPL", LinkGroup::None)]),
+            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::None)]),
+        ];
+
+        write_group_into_books(&mut books, 0, &any_instrument("NVDA", None), LinkGroup::None);
+
+        assert_eq!(books[1].panes[0].symbol, "MSFT");
+    }
+
+    /// The first thing anybody ever sees. It used to be a hardcoded index that
+    /// was not in the watchlist beside it, so a brand new install opened on a
+    /// symbol its own rail never mentioned.
+    #[test]
+    fn a_first_launch_opens_on_the_top_of_the_watchlist() {
+        let store = Store::memory().expect("an in-memory store");
+        store.seed_watchlist_if_empty(crate::ui::watchlist::DEFAULTS);
+
+        let wanted = opening_candidates(None, &store.watchlist());
+
+        assert_eq!(wanted.first().map(|(s, _)| s.as_str()), Some("SPY"));
+    }
+
+    /// The root section sorts before the named ones, so a symbol sitting
+    /// outside any section is what the rail draws at the top — and that is what
+    /// "the first symbol" has to mean, or the app opens on something other than
+    /// the row the user is looking at.
+    #[test]
+    fn the_first_symbol_is_the_one_the_rail_draws_first() {
+        let store = Store::memory().expect("an in-memory store");
+        store.seed_watchlist_if_empty(crate::ui::watchlist::DEFAULTS);
+        store.add_to_root("MU", None);
+
+        let wanted = opening_candidates(None, &store.watchlist());
+
+        assert_eq!(
+            wanted.first().map(|(s, _)| s.as_str()),
+            Some("MU"),
+            "the root's entries come before any section's"
+        );
+    }
+
+    /// Restoring the last state is what every launch but the first does, and
+    /// nothing about seeding a first one is allowed to disturb it.
+    #[test]
+    fn the_symbol_last_looked_at_wins_over_the_watchlist() {
+        let store = Store::memory().expect("an in-memory store");
+        store.seed_watchlist_if_empty(crate::ui::watchlist::DEFAULTS);
+
+        let stored = Some(("SAP".to_string(), Some("DE".to_string())));
+        let wanted = opening_candidates(stored, &store.watchlist());
+
+        assert_eq!(wanted[0], ("SAP".to_string(), Some("DE".to_string())));
+        assert_eq!(wanted[1].0, "SPY", "and the watchlist is what it falls back to");
+    }
+
+    /// A watchlist can be emptied — somebody can delete every row — and a
+    /// first launch into a blank window reads as an app that failed to start.
+    #[test]
+    fn an_empty_watchlist_still_leaves_something_to_open_on() {
+        let store = Store::memory().expect("an in-memory store");
+
+        let wanted = opening_candidates(None, &store.watchlist());
+
+        assert_eq!(wanted, vec![(LAST_RESORT_SYMBOL.to_string(), None)]);
+    }
+
+    /// Every candidate can fail to resolve: an inventory changes under people,
+    /// and a row naming a listing that has gone must be stepped over rather
+    /// than end the search.
+    #[test]
+    fn a_symbol_that_no_longer_resolves_is_stepped_over_rather_than_fatal() {
+        let store = Store::memory().expect("an in-memory store");
+        store.seed_watchlist_if_empty(crate::ui::watchlist::DEFAULTS);
+
+        let stored = Some(("NOSUCHTHING".to_string(), None));
+        let wanted = opening_candidates(stored, &store.watchlist());
+        let index = crate::inventory::Inventory::curated();
+        let found = wanted
+            .iter()
+            .find_map(|(symbol, suffix)| index.find(symbol, suffix.as_deref()));
+
+        assert_eq!(found.map(|i| i.symbol), Some("SPY".to_string()));
+    }
+
+    /// The venue travels with the ticker. A group landing on SAP in New York
+    /// when the chart that led it was showing SAP in Frankfurt would be two
+    /// different instruments wearing one name.
+    #[test]
+    fn the_venue_travels_with_the_symbol_into_the_books_that_are_away() {
+        let mut books = vec![
+            book_of("Open", vec![stored_pane(1, "SAP", LinkGroup::Group(3))]),
+            book_of("Away", vec![stored_pane(2, "MSFT", LinkGroup::Group(3))]),
+        ];
+
+        write_group_into_books(&mut books, 0, &any_instrument("SAP", Some("DE")), LinkGroup::Group(3));
+
+        assert_eq!(books[1].panes[0].symbol, "SAP");
+        assert_eq!(books[1].panes[0].suffix.as_deref(), Some("DE"));
+    }
+
     /// A book is what you were looking at, and half of that is the list
     /// beside the charts. Coming back to an arrangement of energy charts
     /// next to yesterday's list is the same surprise as coming back to the
@@ -915,6 +1111,74 @@ fn parse_workspace(json: &str) -> Option<Workspace> {
         })
 }
 
+/// Write `instrument` onto every stored chart in `group`, in every book but
+/// `skip`.
+///
+/// The books that are away are data rather than widgets, so a group reaching
+/// across chartbooks has to be written into them: skipping them would make a
+/// group mean "the charts in this group I can currently see", and switching to
+/// a book you had linked would show a symbol from before the link.
+///
+/// Free-standing and over the stored shape on purpose, which is what lets the
+/// half of linking that nobody can see on screen be tested without a screen.
+///
+/// `skip` is the book on screen, whose charts are the live ones — saving writes
+/// those back over whatever was stored anyway.
+fn write_group_into_books(
+    books: &mut [Chartbook],
+    skip: usize,
+    instrument: &Instrument,
+    group: LinkGroup,
+) {
+    if !group.is_linked() {
+        return;
+    }
+    for book in books.iter_mut().enumerate().filter(|(at, _)| *at != skip).map(|(_, book)| book) {
+        for pane in book.panes.iter_mut().filter(|pane| pane.linked == group) {
+            pane.symbol = instrument.symbol.clone();
+            pane.suffix = instrument.suffix.clone();
+        }
+    }
+}
+
+/// What a chart opens on when there is nothing else at all: no symbol stored,
+/// and a watchlist whose every row has been deleted or no longer names anything
+/// the inventory knows.
+///
+/// The broadest thing there is, and the point of it is only that it is never
+/// nothing: a blank window on a first launch reads as an app that failed to
+/// start.
+const LAST_RESORT_SYMBOL: &str = "GSPC";
+
+/// Which symbols a window with no arrangement to restore tries, best first.
+///
+/// The one last looked at, then the default watchlist from the top in display
+/// order, then [`LAST_RESORT_SYMBOL`].
+///
+/// The watchlist is in there because the first thing anybody ever sees should
+/// be something they can find in their own list. A hardcoded index was a symbol
+/// that is not in it, so the app opened on something the rail beside it did not
+/// mention.
+///
+/// A list rather than one answer because every candidate can fail to resolve.
+/// An inventory changes under people, and a stored symbol or a watchlist row
+/// that no longer names an instrument has to be stepped over rather than end
+/// the search.
+fn opening_candidates(
+    stored: Option<(String, Option<String>)>,
+    watchlist: &[crate::store::Section],
+) -> Vec<(String, Option<String>)> {
+    let mut wanted: Vec<(String, Option<String>)> = stored.into_iter().collect();
+    wanted.extend(
+        watchlist
+            .iter()
+            .flat_map(|section| section.entries.iter())
+            .map(|entry| (entry.symbol.clone(), entry.suffix.clone())),
+    );
+    wanted.push((LAST_RESORT_SYMBOL.to_string(), None));
+    wanted
+}
+
 /// How wide the window's corner controls are, for the one time a chart's own
 /// corner has to step around them before either has been allocated.
 const CORNER_WIDTH: i32 = 78;
@@ -1078,7 +1342,12 @@ impl Window {
             // A different list is a different group: the chain has to say what
             // the list in front of you drives, not what the last one did.
             let colours = saver.clone();
-            rail.adopt_link_group(move |group| colours.link_colour(group));
+            // And the list it is now showing follows its group rather than
+            // leading it. Being shown a list is not putting it in a group, and
+            // a rail that led here would move charts for a glance at a list.
+            if rail.adopt_link_group(move |group| colours.link_colour(group)) {
+                saver.rail_follows_its_group();
+            }
             saver.save_soon();
         });
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
@@ -1095,8 +1364,20 @@ impl Window {
             move || marked.link_group(),
             |window, group| {
                 let colour = window.link_colour(group);
-                if let Some(rail) = window.watchlist.borrow().as_ref() {
-                    rail.set_link_group(group, colour);
+                let rail = window.watchlist.borrow().as_ref().cloned();
+                let Some(rail) = rail else { return };
+                let before = rail.link_group();
+                rail.set_link_group(group, colour);
+                // Read back rather than assumed. A group another list already
+                // holds is refused, and a refusal that then moved the charts
+                // would be the worst of both answers.
+                let now = rail.link_group();
+                // A list leads the group it is put in, with the row it is on —
+                // which is the nearest thing a watchlist has to a symbol of its
+                // own. An empty list, or one nobody has clicked in yet, leads
+                // with nothing rather than blanking the group.
+                if now != before && let Some(instrument) = rail.selected_instrument() {
+                    window.spread_to_followers(&instrument, now, None);
                 }
                 window.save_workspace();
             },
@@ -1739,16 +2020,34 @@ impl Window {
         }
     }
 
+    /// Put a chart in a group, or take it out of one — and where it joins one,
+    /// make what it is showing the group's symbol.
+    ///
+    /// The chart leads rather than follows. You linked *this* chart, so this is
+    /// the symbol you meant the group to be on; and it is the only direction
+    /// that works from the rail's side as well, where a list has no symbol of
+    /// its own to adopt and can only ever drive.
+    ///
+    /// Three changes deliberately write nothing, each of which would otherwise
+    /// move charts somebody did not ask about:
+    ///
+    /// - **Leaving a group.** The charts still in it keep what they had. Only
+    ///   the group being joined is ever written to, so nothing walks the group
+    ///   a chart left as a side effect of leaving it.
+    /// - **Re-picking the group it is already in.** The chain's popover and the
+    ///   chart menu's radio items both re-apply their own state, so a group
+    ///   that rewrote four charts every time its menu opened would be unusable.
+    /// - **Joining from a chart with nothing on it.** A group that is showing
+    ///   something keeps it; leading with nothing would blank the group.
     pub fn set_pane_link_group(self: &Rc<Self>, id: u32, group: LinkGroup) {
         let Some(pane) = self.pane(id) else { return };
+        let before = pane.linked.get();
         pane.set_link_group(group, self.link_colour(group));
-        // Joining a group adopts what the group is showing, which is what
-        // joining means — otherwise the chain says group 3 and the chart is
-        // somewhere else.
-        if let Some(instrument) = self.group_instrument(group, id) {
-            self.show_in(&pane, instrument);
-        }
         self.sync_chart_actions(&pane);
+        let showing = pane.instrument.borrow().clone();
+        if group != before && let Some(instrument) = showing {
+            self.spread_to_followers(&instrument, group, Some(id));
+        }
         self.save_workspace();
     }
 
@@ -2044,7 +2343,15 @@ impl Window {
             // set from a terminal was right in the database and stale on
             // screen until the next time you switched lists.
             let colours = self.clone();
-            rail.adopt_link_group(move |group| colours.link_colour(group));
+            // A command can only put a list in a group, never hand the group a
+            // symbol: which row the list is on is the rail's own state and is
+            // nowhere in the database. So the list follows — it is pointed at
+            // what its new group is showing. Only when the group actually
+            // changed, or adding one symbol to a list would move the selection
+            // off whatever somebody was looking at.
+            if rail.adopt_link_group(move |group| colours.link_colour(group)) {
+                self.rail_follows_its_group();
+            }
         }
         // A watchlist that just changed is the likeliest moment for there to
         // be a row with no price — somebody has just added one. Waiting for
@@ -2793,17 +3100,66 @@ impl Window {
         }
     }
 
-    /// What a group is already showing, ignoring `except`. `None` for the
-    /// unlinked group, which is not a pool and has nothing to agree on.
-    fn group_instrument(&self, group: LinkGroup, except: u32) -> Option<Instrument> {
+    /// What a group is already showing. `None` for the unlinked group, which
+    /// is not a pool and has nothing to agree on.
+    ///
+    /// The live charts first, then the charts of the books that are away. The
+    /// stored ones are consulted because a group reaches across chartbooks: a
+    /// rail showing a list that drives a group whose only members are in
+    /// another book still has somewhere to point, and answering `None` there
+    /// would read as the group being empty when it is not.
+    fn group_instrument(&self, group: LinkGroup) -> Option<Instrument> {
         if !group.is_linked() {
             return None;
         }
-        self.panes
+        let live = self
+            .panes
             .borrow()
             .iter()
-            .filter(|p| p.id != except && p.linked.get() == group)
-            .find_map(|p| p.instrument.borrow().clone())
+            .filter(|p| p.linked.get() == group)
+            .find_map(|p| p.instrument.borrow().clone());
+        live.or_else(|| {
+            self.books
+                .borrow()
+                .iter()
+                .flat_map(|book| book.panes.iter())
+                .filter(|p| p.linked == group)
+                .find_map(|p| self.index.find(&p.symbol, p.suffix.as_deref()))
+        })
+    }
+
+    /// Point the rail at `instrument`, where the list on it is the one driving
+    /// `group`.
+    ///
+    /// Through [`highlight`](Watchlist::highlight), which selects the row and
+    /// tells nobody. That is what stops this coming back round: the rail's loud
+    /// door is `pick`, whose `row-selected` handler is the one path that
+    /// reaches `spread` again, and `highlight` brackets its selection in the
+    /// rail's `quiet` flag so that handler returns at once.
+    ///
+    /// A list that does not hold the symbol keeps the row it was on. There is
+    /// nothing to select, and clearing the selection would lose somebody's
+    /// place in a list of forty over a symbol that was never in it.
+    fn rail_follows(&self, instrument: &Instrument, group: LinkGroup) {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        let Some(rail) = rail.filter(|rail| rail.link_group() == group) else { return };
+        rail.highlight(instrument);
+    }
+
+    /// Point the rail at whatever the group its list drives is showing.
+    ///
+    /// The other half of a group reaching a watchlist, and the answer to the
+    /// rail being one widget showing one list: a group whose list is not the
+    /// one on screen cannot be pointed at anything when the group moves. There
+    /// is nothing to write down to make up for that, because the group's symbol
+    /// is already written in the charts — so the list is pointed at it the
+    /// moment it is shown instead, which cannot go stale.
+    fn rail_follows_its_group(self: &Rc<Self>) {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        let Some(rail) = rail else { return };
+        if let Some(instrument) = self.group_instrument(rail.link_group()) {
+            rail.highlight(&instrument);
+        }
     }
 
     /// The window's own controls, over its top-right corner: the watchlist
@@ -3787,20 +4143,42 @@ impl Window {
         if let Some(pane) = seed.and_then(|id| self.pane(id)) {
             self.show_in(&pane, instrument.clone());
         }
-        if group.is_linked() {
-            let others: Vec<Rc<ChartPane>> = self
-                .panes
-                .borrow()
-                .iter()
-                .filter(|p| Some(p.id) != seed && p.linked.get() == group)
-                .cloned()
-                .collect();
-            for pane in others {
-                self.show_in(&pane, instrument.clone());
-            }
-            self.spread_to_stored_books(&instrument, group);
-        }
+        self.spread_to_followers(&instrument, group, seed);
         self.save_workspace();
+    }
+
+    /// Put `instrument` on everything in `group` but `except`: the live charts,
+    /// the charts of the books that are away, and the rail where the list on it
+    /// drives this group.
+    ///
+    /// `except` is the one already showing it — the chart the symbol came from.
+    /// Skipped rather than painted again, so a chart leading its group does not
+    /// refetch what it is already displaying.
+    ///
+    /// Nothing happens for the unlinked group. "Linked to nobody" is not a pool
+    /// to agree with, which is what makes unlinking a change that moves no
+    /// other chart.
+    fn spread_to_followers(
+        self: &Rc<Self>,
+        instrument: &Instrument,
+        group: LinkGroup,
+        except: Option<u32>,
+    ) {
+        if !group.is_linked() {
+            return;
+        }
+        let others: Vec<Rc<ChartPane>> = self
+            .panes
+            .borrow()
+            .iter()
+            .filter(|p| Some(p.id) != except && p.linked.get() == group)
+            .cloned()
+            .collect();
+        for pane in others {
+            self.show_in(&pane, instrument.clone());
+        }
+        self.spread_to_stored_books(instrument, group);
+        self.rail_follows(instrument, group);
     }
 
     /// Move a group's charts in the books that are not on screen.
@@ -3808,16 +4186,12 @@ impl Window {
     /// The active book is skipped: its charts are the live ones, and saving
     /// writes them back over whatever was stored anyway.
     fn spread_to_stored_books(&self, instrument: &Instrument, group: LinkGroup) {
-        let active = self.active.get();
-        for (index, book) in self.books.borrow_mut().iter_mut().enumerate() {
-            if index == active {
-                continue;
-            }
-            for pane in book.panes.iter_mut().filter(|p| p.linked == group) {
-                pane.symbol = instrument.symbol.clone();
-                pane.suffix = instrument.suffix.clone();
-            }
-        }
+        write_group_into_books(
+            &mut self.books.borrow_mut(),
+            self.active.get(),
+            instrument,
+            group,
+        );
     }
 
     /// Chart an instrument on one chart: paint from cache now, fetch the gap
@@ -4825,14 +5199,27 @@ impl Window {
         self.focused_pane().indicators.borrow().iter().map(|i| i.id).max().unwrap_or(0) + 1
     }
 
+    /// Open the chart on the symbol last looked at, or — the first time ever —
+    /// on the top of the watchlist.
+    ///
+    /// Reached only where there was no arrangement to restore, which is a fresh
+    /// install and nothing else.
     fn restore_last_symbol(self: &Rc<Self>) {
-        let symbol = self.store.setting(LAST_SYMBOL).unwrap_or_else(|| "GSPC".to_string());
-        let suffix = self.store.setting(LAST_SUFFIX).filter(|s| !s.is_empty());
-        let instrument = self
-            .index
-            .find(&symbol, suffix.as_deref())
-            .or_else(|| self.index.find("GSPC", None));
-        if let Some(instrument) = instrument {
+        let stored = self
+            .store
+            .setting(LAST_SYMBOL)
+            .filter(|symbol| !symbol.is_empty())
+            .map(|symbol| (symbol, self.store.setting(LAST_SUFFIX).filter(|s| !s.is_empty())));
+        // The store rather than the rail. The rail is built by now, but asking
+        // it would make the first thing anybody sees depend on the order two
+        // things happen in during startup — and the ordering that matters here,
+        // the root section's entries before the named sections', is the store's
+        // own answer anyway.
+        let wanted = opening_candidates(stored, &self.store.watchlist());
+        let found = wanted
+            .iter()
+            .find_map(|(symbol, suffix)| self.index.find(symbol, suffix.as_deref()));
+        if let Some(instrument) = found {
             self.show(instrument);
         }
     }
