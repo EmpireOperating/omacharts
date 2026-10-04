@@ -35,18 +35,15 @@ Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 
 ## Installing
 
-Omacharts is for Omarchy, and Omarchy's own package repository is where it
-is published:
+On Arch, install the package attached to the latest
+[release](https://github.com/jorgemanrubia/omacharts/releases/latest):
 
 ```sh
-omarchy pkg add omacharts
+curl -LO https://github.com/jorgemanrubia/omacharts/releases/latest/download/omacharts-0.1.2-1-x86_64.pkg.tar.zst
+sudo pacman -U omacharts-0.1.2-1-x86_64.pkg.tar.zst
 ```
 
-Nothing to configure — that repository is already enabled on an Omarchy
-machine, and `pacman -Syu` keeps Omacharts up to date with the rest of the
-system.
-
-Or build it yourself from a clone, which is the same package:
+Or build that same package yourself from a clone:
 
 ```sh
 git clone https://github.com/jorgemanrubia/omacharts
@@ -54,17 +51,24 @@ cd omacharts/packaging/aur
 makepkg -si
 ```
 
-Every [release](https://github.com/jorgemanrubia/omacharts/releases/latest)
-also carries that package already built, if you would rather not compile it:
+Either one gets you the command on your path, the man page, shell
+completions and the agent skill. To run it from a working tree instead — it
+rebuilds on every launch — use `./bin/install`.
+
+### Through Omarchy
+
+Omacharts is for Omarchy, so Omarchy's own package repository is where it
+belongs, and it is
+[waiting to be merged there](https://github.com/omacom/omarchy-pkgs/pull/802).
+Once it lands, this is the whole of it:
 
 ```sh
-curl -LO https://github.com/jorgemanrubia/omacharts/releases/latest/download/omacharts-0.1.2-1-x86_64.pkg.tar.zst
-sudo pacman -U omacharts-0.1.2-1-x86_64.pkg.tar.zst
+omarchy pkg add omacharts
 ```
 
-That gets you the command on your path, the man page, shell completions and
-the agent skill. To run it from a working tree instead — it rebuilds on every
-launch — use `./bin/install`.
+Nothing to configure, since that repository is already enabled on an Omarchy
+machine, and `pacman -Syu` will carry Omacharts along with the rest of the
+system.
 
 ## Data
 
