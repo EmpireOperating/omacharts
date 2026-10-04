@@ -1674,6 +1674,7 @@ impl Window {
         rows.add(&chosen);
         rows.add(&fresh);
 
+        let field = name.clone();
         let dialog = adw::AlertDialog::new(Some("New chartbook"), None);
         dialog.set_extra_child(Some(&rows));
         dialog.add_response("cancel", "Cancel");
@@ -1684,6 +1685,18 @@ impl Window {
         dialog.set_default_response(Some("create"));
         dialog.set_close_response("cancel");
 
+        // A chartbook with no name is one you cannot tell from its neighbours
+        // in the strip, so blank is not a thing to fall back from — it is a
+        // thing to wait for. The field arrives filled, so clearing it is
+        // deliberate, and the only answer is to stop offering Create.
+        let gate = dialog.clone();
+        let blank_blocks = move |field: &adw::EntryRow| {
+            gate.set_response_enabled("create", !field.text().trim().is_empty());
+        };
+        blank_blocks(&name);
+        let gating = blank_blocks.clone();
+        name.connect_changed(move |field| gating(field));
+
         // Finishing from the keyboard, by the one route that creates a
         // chartbook. The binding has no emitter for this signal, so the signal
         // is emitted by name — and the dialog is then closed by hand, because
@@ -1691,7 +1704,13 @@ impl Window {
         // same handler having already closed itself.
         let finish: Rc<dyn Fn()> = {
             let dialog = dialog.clone();
+            let field = name.clone();
             Rc::new(move || {
+                // Return reaches here whether or not the button is offered, so
+                // the gate has to be asked again rather than assumed.
+                if field.text().trim().is_empty() {
+                    return;
+                }
                 dialog.emit_by_name::<()>("response", &[&"create"]);
                 dialog.close();
             })
@@ -1715,8 +1734,10 @@ impl Window {
             if response != "create" || done.replace(true) {
                 return;
             }
-            let typed = name.text().trim().to_string();
-            let label = if typed.is_empty() { proposed.clone() } else { typed };
+            let label = name.text().trim().to_string();
+            if label.is_empty() {
+                return;
+            }
             let watchlist = if fresh.is_active() {
                 // Made only now, so cancelling leaves no list behind that
                 // nothing points at.
@@ -1730,6 +1751,16 @@ impl Window {
             this.open_chartbook(&label, watchlist);
         });
         dialog.present(Some(&self.window));
+
+        // The name is the only thing most people change, and the proposed one
+        // is a number nobody wants to keep — so it comes up chosen, and typing
+        // replaces it. After presenting, because the row is not realised until
+        // the frame the dialog arrives in and cannot hold the keyboard before
+        // then.
+        glib::idle_add_local_once(move || {
+            field.grab_focus();
+            field.select_region(0, -1);
+        });
     }
 
     fn open_chartbook(self: &Rc<Self>, name: &str, watchlist: Option<i64>) {
