@@ -1627,7 +1627,7 @@ fn draw_indicator_fills(
                         continue;
                     }
                     let colour = band_colour(band, drawn, &state.theme);
-                    colors::set_source_alpha(cr, &colour, vwap::FILL_ALPHA);
+                    colors::set_source_alpha(cr, &colour, band.fill_alpha);
                     fill_between(
                         cr, &band.upper, &band.lower, first, visible, plot_x, bar_w, to_y,
                     );
@@ -1721,6 +1721,13 @@ fn draw_profiles(
     bar_w: f64,
     to_y: &impl Fn(f64) -> f64,
 ) {
+    let poc = match &drawn.indicator.params {
+        omacharts_engine::Params::VolumeProfile { poc_color: Some(choice), .. } => {
+            choice.resolve(&state.theme)
+        }
+        _ => state.theme.companion(&drawn.color),
+    };
+
     let last = first + visible;
     for profile in profiles {
         if profile.last_bar < first || profile.first_bar >= last {
@@ -1748,14 +1755,15 @@ fn draw_profiles(
             let _ = cr.fill();
         }
 
-        // The point of control, across the period it belongs to.
+        // The point of control, across the period it belongs to, in a colour
+        // set against the profile rather than the same one brighter — it is a
+        // different fact about the period, drawn on top of it.
         let y = to_y(profile.poc_price()).round() + 0.5;
-        colors::set_source_alpha(cr, &drawn.color, 0.85);
+        colors::set_source_alpha(cr, &poc, 0.9);
         cr.set_line_width(1.0);
         cr.move_to(left, y);
         cr.line_to(left + span, y);
         let _ = cr.stroke();
-        let _ = state;
     }
 }
 

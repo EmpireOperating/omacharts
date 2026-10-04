@@ -188,6 +188,17 @@ impl Theme {
         mix(hex, &self.ui.background, 0.38)
     }
 
+    /// A colour to set against `hex`, from this theme's own palette.
+    ///
+    /// The next one along the sequence, which is the pair the sequence was
+    /// built to keep apart: consecutive entries are far apart in hue, so a
+    /// mark drawn on top of something in `hex` reads as a different thing
+    /// rather than as a brighter patch of the same one.
+    pub fn companion(&self, hex: &str) -> String {
+        let at = (0..SWATCH_SEQUENCE.len()).find(|n| self.series(*n).eq_ignore_ascii_case(hex));
+        self.series(at.map(|n| n + 1).unwrap_or(1))
+    }
+
     /// The nth overlay's line and fill together.
     pub fn series_pair(&self, n: usize) -> (String, String) {
         let line = self.series(n);

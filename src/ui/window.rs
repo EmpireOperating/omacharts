@@ -405,9 +405,12 @@ impl Window {
         crate::inventory::load_in_background(this.index.clone(), |_| {});
 
         if !this.restore_workspace() {
-            this.rebuild_indicator_legend();
             this.restore_last_symbol();
         }
+        // Either way. The legend was only built on the path that did not
+        // restore anything, so a window that came back with its charts came
+        // back without the names of what was drawn on them.
+        this.rebuild_indicator_legend();
         this
     }
 

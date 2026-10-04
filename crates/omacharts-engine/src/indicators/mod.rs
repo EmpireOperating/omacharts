@@ -108,9 +108,11 @@ impl Kind {
 
     pub fn name(self) -> &'static str {
         match self {
+            // Spelled out. The short form is beside it in its own column, so
+            // repeating it in brackets says the same thing twice.
             Kind::Sma => "Simple Moving Average",
             Kind::Ema => "Exponential Moving Average",
-            Kind::Vwap => "VWAP",
+            Kind::Vwap => "Volume Weighted Average Price",
             Kind::VolumeProfile => "Volume Profile",
             Kind::Volume => "Volume",
             Kind::Rsi => "Relative Strength Index",
@@ -118,7 +120,9 @@ impl Kind {
         }
     }
 
-    /// What the chart's summary shows. Short, because it sits over the chart.
+    /// What the chart shows. Short, because it sits over the drawing, where
+    /// the full name is a sentence in the way of the candles — the picker is
+    /// where it is spelled out.
     pub fn short_name(self) -> &'static str {
         match self {
             Kind::Sma => "SMA",
@@ -166,6 +170,7 @@ impl Kind {
                 reset: Reset::Session,
                 rows: None,
                 value_area: 0.70,
+                poc_color: None,
             },
             Kind::Volume => Params::Volume { height: 0.18 },
             // Fourteen bars, overbought at seventy, oversold at thirty: the
@@ -203,6 +208,10 @@ pub enum Params {
         rows: Option<usize>,
         /// Fraction of volume the value area covers.
         value_area: f64,
+        /// The line across the busiest price. Unset follows the profile's own
+        /// colour, which is what it did before it could be set apart.
+        #[serde(default)]
+        poc_color: Option<ColorChoice>,
     },
     Volume {
         /// How much of the chart's height the pane takes.
@@ -434,7 +443,7 @@ pub fn compute(
             values: bars.iter().map(|bar| bar.volume).collect(),
             height: height.clamp(0.05, 0.6),
         },
-        (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area }) => {
+        (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area, .. }) => {
             Output::Profiles(profile::compute(
                 bars,
                 reset.effective_for(timeframe),

@@ -221,6 +221,41 @@ impl IndicatorList {
     }
 }
 
+/// Where the line can be seen: the colour it is drawn in right now, and the
+/// samples showing it.
+///
+/// The samples used to be painted in whatever the colour was when the panel was
+/// built, so changing the colour left a purple swatch above four blue lines.
+/// They ask for the colour every time they are drawn instead, and the colour
+/// row repaints them when it changes one.
+#[derive(Clone)]
+struct Ink {
+    colour: Rc<dyn Fn() -> String>,
+    samples: Rc<RefCell<Vec<glib::WeakRef<gtk::DrawingArea>>>>,
+}
+
+impl Ink {
+    fn new(colour: impl Fn() -> String + 'static) -> Ink {
+        Ink { colour: Rc::new(colour), samples: Rc::new(RefCell::new(Vec::new())) }
+    }
+
+    fn colour(&self) -> String {
+        (self.colour)()
+    }
+
+    fn watch(&self, area: &gtk::DrawingArea) {
+        self.samples.borrow_mut().push(area.downgrade());
+    }
+
+    fn repaint(&self) {
+        for area in self.samples.borrow().iter() {
+            if let Some(area) = area.upgrade() {
+                area.queue_draw();
+            }
+        }
+    }
+}
+
 /// Something to run when an indicator changes, so whatever is showing it
 /// redraws.
 ///
@@ -445,7 +480,9 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
 
     let page = adw::PreferencesPage::new();
     page.add(&parameters_group(window, refresh, &indicator));
-    page.add(&appearance_group(window, refresh, &colour, &indicator));
+    if let Some(group) = appearance_group(window, refresh, &colour, &indicator) {
+        page.add(&group);
+    }
     for group in band_groups(window, refresh, &colour, &indicator) {
         page.add(&group);
     }
@@ -521,24 +558,46 @@ fn appearance_group(
     refresh: &Refresh,
     colour: &str,
     indicator: &Indicator,
-) -> adw::PreferencesGroup {
+) -> Option<adw::PreferencesGroup> {
     let id = indicator.id;
+
+    // Volume is drawn in the bar scheme's own up and down colours, the same
+    // ones the candles use, so there is nothing here to ask about: a colour,
+    // a thickness and a pattern that changed nothing would be three lies.
+    if indicator.kind == Kind::Volume {
+        return None;
+    }
+
+    // A volume profile is bars and a mark, not a line, so it is asked about
+    // its two colours and nothing about thickness or pattern.
+    if indicator.kind == Kind::VolumeProfile {
+        return Some(profile_colours(window, refresh, colour, indicator));
+    }
+
     let group = adw::PreferencesGroup::new();
     group.set_title("Line");
+
+    let ink = {
+        let window = window.clone();
+        Ink::new(move || drawn_colour(&window, &window.indicators(), id))
+    };
 
     group.add(&colour_row(
         window,
         refresh,
+        &ink,
         "Colour",
         colour,
         indicator.color.clone(),
         move |indicator, choice| indicator.color = choice,
         id,
     ));
-    group.add(&stroke_rows(window, refresh, id, "", indicator.stroke, {
+    for row in stroke_rows(window, refresh, &ink, id, "", indicator.stroke, {
         move |indicator: &mut Indicator, stroke: Stroke| indicator.stroke = stroke
-    }));
-    group
+    }) {
+        group.add(&row);
+    }
+    Some(group)
 }
 
 /// Width and style, as one expander-free pair of rows.
@@ -547,17 +606,22 @@ fn appearance_group(
 fn stroke_rows(
     window: &Rc<Window>,
     refresh: &Refresh,
+    ink: &Ink,
     id: u32,
     prefix: &str,
     stroke: Stroke,
     apply: impl Fn(&mut Indicator, Stroke) + Clone + 'static,
-) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::new();
+) -> Vec<adw::ActionRow> {
+    // Rows rather than a group of their own. A PreferencesGroup added inside
+    // another draws its own card, which is why thickness and style sat in a
+    // second box under the same heading as the colour.
+    let mut rows = Vec::new();
 
     let apply_width = apply.clone();
-    group.add(&picker_row(
+    rows.push(picker_row(
         window,
         refresh,
+        ink,
         id,
         &format!("{prefix}Thickness"),
         &WIDTHS.map(|width| (width, Stroke { width, style: stroke.style })),
@@ -565,9 +629,10 @@ fn stroke_rows(
         move |indicator, picked| apply_width(indicator, picked),
     ));
 
-    group.add(&picker_row(
+    rows.push(picker_row(
         window,
         refresh,
+        ink,
         id,
         &format!("{prefix}Line style"),
         &LineStyle::ALL.map(|style| {
@@ -581,7 +646,7 @@ fn stroke_rows(
         },
     ));
 
-    group
+    rows
 }
 
 /// The weights on offer. Four, plus none.
@@ -600,9 +665,11 @@ const LINE_SAMPLE_WIDTH: f64 = 1.5;
 ///
 /// Grouped toggles rather than a dropdown: the whole point is seeing the
 /// options beside each other.
+#[allow(clippy::too_many_arguments)]
 fn picker_row(
     window: &Rc<Window>,
     refresh: &Refresh,
+    ink: &Ink,
     id: u32,
     title: &str,
     options: &[(f64, Stroke)],
@@ -617,16 +684,13 @@ fn picker_row(
     strip.add_css_class("stroke-picker");
     strip.set_valign(gtk::Align::Center);
 
-    let colour = {
-        let indicators = window.indicators();
-        drawn_colour(window, &indicators, id)
-    };
-
     let mut first: Option<gtk::ToggleButton> = None;
     for (sample, stroke) in options {
         let button = gtk::ToggleButton::new();
         button.add_css_class("flat");
-        button.set_child(Some(&stroke_sample(*sample, stroke.style, &colour)));
+        let area = stroke_sample(*sample, stroke.style, ink);
+        ink.watch(&area);
+        button.set_child(Some(&area));
         button.set_tooltip_text(Some(&describe_stroke(*sample, stroke.style)));
         match &first {
             Some(anchor) => button.set_group(Some(anchor)),
@@ -666,17 +730,17 @@ fn describe_stroke(width: f64, style: LineStyle) -> String {
 }
 
 /// One option, drawn as the line it would produce.
-fn stroke_sample(width: f64, style: LineStyle, colour: &str) -> gtk::DrawingArea {
+fn stroke_sample(width: f64, style: LineStyle, ink: &Ink) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(34);
     area.set_content_height(18);
-    let colour = colour.to_string();
+    let ink = ink.clone();
     area.set_draw_func(move |_, cr, w, h| {
         if width <= 0.0 {
             return;
         }
         let (w, h) = (w as f64, h as f64);
-        colors::set_source(cr, &colour);
+        colors::set_source(cr, &ink.colour());
         cr.set_line_width(width);
         cr.set_dash(&style.dashes(width), 0.0);
         cr.set_line_cap(gtk::cairo::LineCap::Round);
@@ -697,6 +761,7 @@ fn stroke_sample(width: f64, style: LineStyle, colour: &str) -> gtk::DrawingArea
 fn colour_row(
     window: &Rc<Window>,
     refresh: &Refresh,
+    ink: &Ink,
     title: &str,
     current: &str,
     choice: Option<ColorChoice>,
@@ -719,6 +784,7 @@ fn colour_row(
     // gives it something to undo.
     let window_for_colour = window.clone();
     let refresh_for_colour = refresh.clone();
+    let ink_for_colour = ink.clone();
     let apply_for_colour = apply.clone();
     let default_weak = default.downgrade();
     let button = crate::ui::palette::picker(
@@ -733,12 +799,14 @@ fn colour_row(
             if let Some(default) = default_weak.upgrade() {
                 default.set_sensitive(true);
             }
+            ink_for_colour.repaint();
             refresh_for_colour.run();
         },
     );
 
     let window_for_default = window.clone();
     let refresh_for_default = refresh.clone();
+    let ink_for_default = ink.clone();
     let button_weak = button.downgrade();
     default.connect_clicked(move |default| {
         let apply = apply.clone();
@@ -751,6 +819,7 @@ fn colour_row(
             let indicators = window_for_default.indicators();
             crate::ui::palette::show(&button, &drawn_colour(&window_for_default, &indicators, id));
         }
+        ink_for_default.repaint();
         refresh_for_default.run();
     });
 
@@ -828,7 +897,7 @@ fn parameters_group(
             ));
             group.add(&pane_height_row(window, refresh, id, *height));
         }
-        Params::VolumeProfile { reset, rows, value_area } => {
+        Params::VolumeProfile { reset, rows, value_area, .. } => {
             group.add(&reset_row(window, refresh, id, *reset));
             for row in rows_rows(window, refresh, id, *rows) {
                 group.add(&row);
@@ -850,6 +919,56 @@ fn parameters_group(
             ));
         }
     }
+    group
+}
+
+/// The two colours a volume profile actually has.
+fn profile_colours(
+    window: &Rc<Window>,
+    refresh: &Refresh,
+    colour: &str,
+    indicator: &Indicator,
+) -> adw::PreferencesGroup {
+    let id = indicator.id;
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Colours");
+
+    // Neither row has samples to repaint: a profile has no line to show.
+    let unused = Ink::new(String::new);
+    group.add(&colour_row(
+        window,
+        refresh,
+        &unused,
+        "Profile",
+        colour,
+        indicator.color.clone(),
+        move |indicator, choice| indicator.color = choice,
+        id,
+    ));
+
+    let Params::VolumeProfile { poc_color, .. } = &indicator.params else { return group };
+    // Unset is not "the same as the profile": it is the next colour along the
+    // theme's sequence, which is the pair that sequence keeps far apart in hue.
+    let shown = poc_color
+        .as_ref()
+        .map(|choice| choice.resolve(&window.theme()))
+        .unwrap_or_else(|| window.theme().companion(colour));
+
+    group.add(&colour_row(
+        window,
+        refresh,
+        &unused,
+        "Point of control",
+        &shown,
+        poc_color.clone(),
+        move |indicator, choice| {
+            if let Params::VolumeProfile { poc_color, .. } = &mut indicator.params {
+                *poc_color = choice;
+            }
+        },
+        id,
+    ));
+
     group
 }
 
@@ -932,14 +1051,54 @@ fn band_groups(
         shaded.add_suffix(&fill);
         group.add(&shaded);
 
+        // How much of the colour that shading gets. It is a backdrop, so the
+        // range stops well short of opaque.
+        group.add(&spin_row(
+            window,
+            refresh,
+            id,
+            "Shading %",
+            band.alpha() * 100.0,
+            2.0,
+            60.0,
+            1.0,
+            move |indicator, value| {
+                if let Params::Vwap { bands, .. } = &mut indicator.params {
+                    if let Some(band) = bands.get_mut(index) {
+                        band.fill_alpha = Some(value / 100.0);
+                    }
+                }
+            },
+        ));
+
         let current = band
             .color
             .as_ref()
             .map(|c| c.resolve(&window.theme()))
             .unwrap_or_else(|| line_colour.clone());
+
+        // A band's samples follow the band's own colour, falling back to the
+        // line's when it has none of its own — the same answer the chart draws.
+        let ink = {
+            let window = window.clone();
+            Ink::new(move || {
+                let indicators = window.indicators();
+                let band_colour = indicators
+                    .iter()
+                    .find(|i| i.id == id)
+                    .and_then(|i| match &i.params {
+                        Params::Vwap { bands, .. } => bands.get(index).and_then(|b| b.color.clone()),
+                        _ => None,
+                    })
+                    .map(|choice| choice.resolve(&window.theme()));
+                band_colour.unwrap_or_else(|| drawn_colour(&window, &indicators, id))
+            })
+        };
+
         group.add(&colour_row(
             window,
             refresh,
+            &ink,
             "Colour",
             &current,
             band.color.clone(),
@@ -953,8 +1112,7 @@ fn band_groups(
             id,
         ));
 
-        groups.push(group);
-        groups.push(stroke_rows(window, refresh, id, "", band.stroke, {
+        for row in stroke_rows(window, refresh, &ink, id, "", band.stroke, {
             move |indicator: &mut Indicator, stroke: Stroke| {
                 if let Params::Vwap { bands, .. } = &mut indicator.params {
                     if let Some(band) = bands.get_mut(index) {
@@ -962,7 +1120,11 @@ fn band_groups(
                     }
                 }
             }
-        }));
+        }) {
+            group.add(&row);
+        }
+
+        groups.push(group);
     }
     groups
 }

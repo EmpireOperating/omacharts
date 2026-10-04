@@ -29,7 +29,19 @@ pub struct Band {
     pub color: Option<ColorChoice>,
     /// Shade the area between this band's edges.
     pub fill: bool,
+    /// How much of the colour that shading gets. `None` is [`FILL_ALPHA`],
+    /// which is what every band shipped with before it could be set.
+    #[serde(default)]
+    pub fill_alpha: Option<f64>,
     pub stroke: Stroke,
+}
+
+impl Band {
+    /// The shading's opacity, clamped to where it is still a backdrop at the
+    /// top and still visible at the bottom.
+    pub fn alpha(&self) -> f64 {
+        self.fill_alpha.unwrap_or(FILL_ALPHA).clamp(0.02, 0.6)
+    }
 }
 
 /// What a VWAP ships with: three bands at the usual multiples, none drawn.
@@ -45,6 +57,7 @@ pub fn default_bands() -> Vec<Band> {
             enabled: false,
             color: None,
             fill: true,
+            fill_alpha: None,
             stroke: Stroke::new(0.0, LineStyle::Solid),
         },
         Band {
@@ -52,6 +65,7 @@ pub fn default_bands() -> Vec<Band> {
             enabled: false,
             color: None,
             fill: false,
+            fill_alpha: None,
             stroke: Stroke::new(1.0, LineStyle::Dashed),
         },
         Band {
@@ -59,6 +73,7 @@ pub fn default_bands() -> Vec<Band> {
             enabled: false,
             color: None,
             fill: false,
+            fill_alpha: None,
             stroke: Stroke::new(1.0, LineStyle::Solid),
         },
     ]
@@ -71,6 +86,7 @@ pub struct BandSeries {
     pub enabled: bool,
     pub color: Option<ColorChoice>,
     pub fill: bool,
+    pub fill_alpha: f64,
     pub stroke: Stroke,
     pub upper: Vec<Option<f64>>,
     pub lower: Vec<Option<f64>>,
@@ -84,10 +100,10 @@ pub struct Bands {
     pub bands: Vec<BandSeries>,
 }
 
-/// How much of the colour a shaded band gets.
+/// How much of the colour a shaded band gets, unless it says otherwise.
 ///
-/// One number rather than a per-band setting: the shading is a backdrop, and
-/// letting it be turned up is letting it compete with the bars.
+/// A backdrop: enough to read as a region, not enough to compete with the
+/// bars drawn over it.
 pub const FILL_ALPHA: f64 = 0.16;
 
 /// Typical price — the midpoint the weighting is applied to.
@@ -106,6 +122,7 @@ pub fn compute(bars: &[Bar], reset: Reset, session_origin: i64, bands: &[Band]) 
                 enabled: band.enabled,
                 color: band.color.clone(),
                 fill: band.fill,
+                fill_alpha: band.alpha(),
                 stroke: band.stroke,
                 upper: vec![None; n],
                 lower: vec![None; n],
@@ -174,6 +191,7 @@ mod tests {
                 enabled: true,
                 color: None,
                 fill: false,
+                fill_alpha: None,
                 stroke: Stroke::default(),
             })
             .collect()
