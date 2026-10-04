@@ -16,8 +16,10 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   chart keeps its own symbol, resolution, indicators and settings.
 - **Linked or parked.** Linked charts follow the watchlist together; unlink one
   and it stays where you left it.
-- **Keyboard first.** Type a letter to find a symbol, a number to set a
-  resolution.
+- **Keyboard first.** Hotkeys for the whole app: split and close charts,
+  resize them, walk the chartbooks, step the resolution, rotate the
+  watchlists. Type a letter to find a symbol, a number to set a resolution.
+  Press `?` for the lot.
 - **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
   RSI and ATR, each in its own resizable strip.
 - **A bar widget** for the Omarchy bar: your watchlist with sparklines, live,
