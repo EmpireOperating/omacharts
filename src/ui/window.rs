@@ -23,7 +23,7 @@ use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::chart::Drawn;
-use crate::ui::pane::{ChartPane, Node};
+use crate::ui::pane::{self, ChartPane, Node};
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
@@ -250,6 +250,10 @@ struct Workspace {
     panes: Vec<StoredPane>,
 }
 
+/// How wide the window's corner controls are, for the one time a chart's own
+/// corner has to step around them before either has been allocated.
+const CORNER_WIDTH: i32 = 78;
+
 pub struct Window {
     pub window: adw::ApplicationWindow,
     /// Every chart on screen. One of them is focused, and that is the one the
@@ -259,6 +263,14 @@ pub struct Window {
     /// hands its space to its sibling.
     layout: RefCell<Node>,
     focused: Cell<u32>,
+    /// The chart that has the window to itself, if one does.
+    ///
+    /// Kept beside the tree rather than in it: maximizing is a way of looking
+    /// at an arrangement, not a change to it, so the arrangement it came from
+    /// is still there to go back to exactly. It is also why this is not
+    /// written down — a window that came back maximized would look like a
+    /// window that had lost its other charts.
+    maximized: Cell<Option<u32>>,
     next_pane: Cell<u32>,
     /// A save is already queued, so a drag does not queue one per pixel.
     save_pending: Cell<bool>,
@@ -270,6 +282,10 @@ pub struct Window {
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
+    /// The window's own controls, floating over the top-right corner. Held on
+    /// to because a chart's maximize button is in that corner too, and has to
+    /// step aside when the rail is closed and the two would be in one place.
+    corner: RefCell<Option<gtk::WindowHandle>>,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
@@ -322,6 +338,7 @@ impl Window {
             panes: RefCell::new(Vec::new()),
             layout: RefCell::new(Node::leaf(1)),
             focused: Cell::new(1),
+            maximized: Cell::new(None),
             next_pane: Cell::new(1),
             save_pending: Cell::new(false),
             linked_action: RefCell::new(None),
@@ -329,6 +346,7 @@ impl Window {
             session_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             chart_host: chart_host.clone(),
+            corner: RefCell::new(None),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -360,6 +378,7 @@ impl Window {
         // No header bar: the window's controls float over its top-right
         // corner, and the chart gets the row the bar used to take.
         let corner = this.build_corner(&this.split);
+        *this.corner.borrow_mut() = Some(corner.clone());
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(split));
         overlay.add_overlay(&corner);
@@ -451,6 +470,14 @@ impl Window {
         pane.gear.connect_clicked(move |_| {
             opener.focus(id);
             opener.open_chart_settings();
+        });
+
+        // Clicking another chart's corner means that chart: the focus moves
+        // there first, and then it grows.
+        let expander = self.clone();
+        pane.expand.connect_clicked(move |_| {
+            expander.focus(id);
+            expander.toggle_maximized();
         });
 
         let linker = self.clone();
@@ -561,6 +588,15 @@ impl Window {
             return;
         }
         self.focused.set(id);
+        // Maximized, the focus keys still walk the arrangement — they just
+        // walk it one chart at a time, with the window showing whichever one
+        // the focus has reached. Stepping out of the maximized chart to look
+        // at its neighbour is the whole reason to press them while one chart
+        // is filling the window.
+        if self.maximized.get().is_some_and(|open| open != id) && self.pane(id).is_some() {
+            self.maximized.set(Some(id));
+            self.rebuild_layout();
+        }
         for pane in self.panes.borrow().iter() {
             pane.set_focused(pane.id == id);
         }
@@ -600,6 +636,9 @@ impl Window {
     /// Copying the chart you split is what makes splitting useful: you get two
     /// of what you were looking at and change one of them.
     pub fn split_focused(self: &Rc<Self>, horizontal: bool) {
+        // Dividing a chart that is filling the window has to show you what it
+        // divided into, so this is where maximizing ends.
+        self.maximized.set(None);
         let from = self.focused_pane();
         let added = self.new_pane(
             from.timeframe.get(),
@@ -624,6 +663,9 @@ impl Window {
     pub fn close_focused(self: &Rc<Self>) {
         let id = self.focused.get();
         let Some(next) = self.layout.borrow().remove(id) else { return };
+        if self.maximized.get() == Some(id) {
+            self.maximized.set(None);
+        }
         let leaves = next.leaves();
         *self.layout.borrow_mut() = next;
         self.panes.borrow_mut().retain(|p| p.id != id);
@@ -632,6 +674,20 @@ impl Window {
             self.focus(*first);
         }
         self.save_workspace();
+    }
+
+    /// Give the focused chart the whole window, or hand the window back.
+    ///
+    /// The tree is left alone: what changes is how much of it is mounted. So
+    /// restoring is exact, down to where every divider was.
+    pub fn toggle_maximized(self: &Rc<Self>) {
+        if self.layout.borrow().leaves().len() < 2 {
+            return;
+        }
+        let id = self.focused.get();
+        let next = (self.maximized.get() != Some(id)).then_some(id);
+        self.maximized.set(next);
+        self.rebuild_layout();
     }
 
     /// Walk the focus to the next or previous chart in layout order.
@@ -643,7 +699,16 @@ impl Window {
     /// a column beside a tall chart, that is the pane *below*, and pressing
     /// right moved down. Geometry is what the arrow key is asking about.
     pub fn focus_towards(self: &Rc<Self>, dx: i32, dy: i32) {
-        let Some(from) = self.pane_rect(self.focused.get()) else { return };
+        // Maximized, every chart but one is off the widget tree and has no
+        // allocation to ask about — so the arrangement is measured from the
+        // arrangement itself. Otherwise the real allocations are the truth,
+        // gutters and all.
+        let rects = self.maximized.get().map(|_| self.layout_rects());
+        let rect = |id: u32| match &rects {
+            Some(rects) => rects.get(&id).copied(),
+            None => self.pane_rect(id),
+        };
+        let Some(from) = rect(self.focused.get()) else { return };
         let (fx, fy) = (from.0 + from.2 / 2.0, from.1 + from.3 / 2.0);
 
         let mut best: Option<(f64, u32)> = None;
@@ -651,7 +716,7 @@ impl Window {
             if pane.id == self.focused.get() {
                 continue;
             }
-            let Some(rect) = self.pane_rect(pane.id) else { continue };
+            let Some(rect) = rect(pane.id) else { continue };
             let (cx, cy) = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
             let (along, across) = if dx != 0 {
                 ((cx - fx) * dx as f64, (cy - fy).abs())
@@ -680,6 +745,45 @@ impl Window {
         Some((x, y, pane.root.width() as f64, pane.root.height() as f64))
     }
 
+    /// Where every chart would sit, worked out from the tree rather than from
+    /// the widgets — which is the only way to ask while one of them is
+    /// filling the window and the rest are off the screen entirely.
+    fn layout_rects(&self) -> HashMap<u32, (f64, f64, f64, f64)> {
+        fn fill(node: &Node, x: f64, y: f64, w: f64, h: f64, out: &mut HashMap<u32, (f64, f64, f64, f64)>) {
+            match node {
+                Node::Leaf(id) => {
+                    out.insert(*id, (x, y, w, h));
+                }
+                Node::Split { horizontal, ratio, first, second } => {
+                    let ratio = ratio.clamp(0.05, 0.95);
+                    if *horizontal {
+                        fill(first, x, y, w * ratio, h, out);
+                        fill(second, x + w * ratio, y, w * (1.0 - ratio), h, out);
+                    } else {
+                        fill(first, x, y, w, h * ratio, out);
+                        fill(second, x, y + h * ratio, w, h * (1.0 - ratio), out);
+                    }
+                }
+            }
+        }
+        let mut out = HashMap::new();
+        let width = self.chart_host.width().max(1) as f64;
+        let height = self.chart_host.height().max(1) as f64;
+        fill(&self.layout.borrow(), 0.0, 0.0, width, height, &mut out);
+        out
+    }
+
+    /// What is actually mounted: the whole tree, or the one chart that has
+    /// been given the window.
+    fn mounted(&self) -> Node {
+        match self.maximized.get() {
+            Some(id) if self.pane(id).is_some() && self.layout.borrow().leaves().len() > 1 => {
+                Node::Leaf(id)
+            }
+            _ => self.layout.borrow().clone(),
+        }
+    }
+
     /// Mount the tree. Rebuilt whole rather than patched: a handful of panes,
     /// and a tree that is half old and half new is a bug nobody can see.
     fn rebuild_layout(self: &Rc<Self>) {
@@ -697,12 +801,58 @@ impl Window {
                 }
             }
         }
-        let layout = self.layout.borrow().clone();
+        let layout = self.mounted();
         let widget = self.build_node(&layout, &[]);
         self.chart_host.append(&widget);
         let focused = self.focused.get();
+        // One chart has nothing to be maximized away from, so the corner is
+        // not offered at all until there is a second — and nothing is drawn
+        // as maximized either, which is what `mounted` has already decided.
+        let several = self.layout.borrow().leaves().len() > 1;
+        let maximized = several.then(|| self.maximized.get()).flatten();
         for pane in self.panes.borrow().iter() {
             pane.set_focused(pane.id == focused);
+            pane.set_expandable(several);
+            pane.set_maximized(maximized == Some(pane.id));
+        }
+        self.sync_corner_clearance();
+    }
+
+    /// Keep a chart's maximize button out from under the window's own corner.
+    ///
+    /// They want the same few pixels, and only sometimes: the window's
+    /// controls sit over the rail while the rail is open, and drop onto the
+    /// top-right chart when it is closed. So the chart under them steps its
+    /// button aside by exactly their width, and every other chart keeps the
+    /// corner it had.
+    fn sync_corner_clearance(self: &Rc<Self>) {
+        let railed = self
+            .split
+            .end_child()
+            .map(|rail| rail.is_visible())
+            .unwrap_or(false);
+        let clearance = match railed {
+            true => 0,
+            false => self
+                .corner
+                .borrow()
+                .as_ref()
+                .map(|corner| corner.width())
+                .filter(|width| *width > 0)
+                .unwrap_or(CORNER_WIDTH),
+        };
+        // The rects tile the area exactly, so the chart under the window's
+        // corner is the one — the only one — holding its top right pixel.
+        let rects = self.layout_rects();
+        let right = self.chart_host.width().max(1) as f64;
+        let topmost = self.mounted().leaves().into_iter().find(|id| {
+            rects
+                .get(id)
+                .is_some_and(|(x, y, w, _)| *y <= 0.5 && x + w >= right - 0.5)
+        });
+        for pane in self.panes.borrow().iter() {
+            let margin = if Some(pane.id) == topmost { clearance } else { 0 };
+            pane.set_corner_clearance(margin);
         }
     }
 
@@ -974,11 +1124,15 @@ impl Window {
         toggle.set_active(split.end_child().map(|rail| rail.is_visible()).unwrap_or(false));
         let split_weak = split.downgrade();
         let store = self.store.clone();
+        let this = self.clone();
         toggle.connect_toggled(move |toggle| {
             if let Some(rail) = split_weak.upgrade().and_then(|split| split.end_child()) {
                 rail.set_visible(toggle.is_active());
             }
             store.set_setting_bool(SHOW_WATCHLIST, toggle.is_active());
+            // Closing the rail drops these controls onto the top-right chart,
+            // where its own corner is.
+            this.sync_corner_clearance();
         });
 
         // Ctrl+B needs to drive the button so its pressed state stays honest.
@@ -1274,11 +1428,15 @@ impl Window {
                 }
                 // Walk the chart without leaving it: resolutions sideways,
                 // symbols up and down, whichever pane has the keyboard.
-                Key::Left if ctrl && alt => {
+                //
+                // Sideways takes Shift as well, so that the modifier a window
+                // manager is most likely to have already claimed is not the
+                // one standing between you and the next resolution.
+                Key::Left if ctrl && alt && shift => {
                     this.step_timeframe(-1);
                     return glib::Propagation::Stop;
                 }
-                Key::Right if ctrl && alt => {
+                Key::Right if ctrl && alt && shift => {
                     this.step_timeframe(1);
                     return glib::Propagation::Stop;
                 }
@@ -1628,6 +1786,7 @@ impl Window {
                     ("Ctrl+H", "Split horizontally"),
                     ("Ctrl+V", "Split vertically"),
                     ("Ctrl+X", "Close this chart"),
+                    ("Ctrl+M", "Give this chart the window, or put it back"),
                     ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
                     ("Alt+← → ↑ ↓", "Focus the chart that way"),
                 ],
@@ -1635,7 +1794,7 @@ impl Window {
             (
                 "Chart",
                 &[
-                    ("Ctrl+Alt+← →", "Previous or next resolution"),
+                    ("Ctrl+Alt+Shift+← →", "Previous or next resolution"),
                     ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
                     ("← →", "Pan"),
                     ("+ −", "Zoom"),
@@ -2220,7 +2379,12 @@ impl Window {
         let layout = gio::Menu::new();
         shortcuts::append(&layout, "Split horizontally", "chart.split-h");
         shortcuts::append(&layout, "Split vertically", "chart.split-v");
+        // Both only mean anything with something else on screen: there is
+        // nothing to close down to, and nothing to grow over.
         if self.panes.borrow().len() > 1 {
+            let open = self.maximized.get() == Some(self.focused.get());
+            let what = if open { pane::RESTORE } else { pane::MAXIMIZE };
+            shortcuts::append(&layout, what, "chart.maximize");
             shortcuts::append(&layout, "Close chart", "chart.close");
         }
         menu.append_section(None, &layout);
@@ -2312,6 +2476,11 @@ impl Window {
         let this = self.clone();
         split_v.connect_activate(move |_, _| this.split_focused(false));
         actions.add_action(&split_v);
+
+        let maximize = gio::SimpleAction::new("maximize", None);
+        let this = self.clone();
+        maximize.connect_activate(move |_, _| this.toggle_maximized());
+        actions.add_action(&maximize);
 
         let close = gio::SimpleAction::new("close", None);
         let this = self.clone();

@@ -325,6 +325,28 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .legend-gear { opacity: 0.35; min-width: 22px; min-height: 22px; padding: 2px; }
 .legend-gear:hover { opacity: 1; }
 
+/* The maximize corner is the same bargain as the gear, struck harder: it is
+   not there at all until the pointer is on the chart, which is also the only
+   moment it could be clicked. Four charts with a permanent button in each
+   corner is four more things between you and the prices. */
+.pane-expand {
+  opacity: 0;
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  min-width: 20px;
+  min-height: 20px;
+  padding: 1px;
+  transition: opacity 120ms ease-out;
+}
+.chart-pane:hover .pane-expand { opacity: 0.45; }
+.chart-pane:hover .pane-expand:hover {
+  opacity: 1;
+  background: alpha(currentColor, 0.12);
+  border-radius: 5px;
+}
+
 /* The window's own controls — the watchlist toggle and the main menu — sit
    in the top-right corner, over whatever is there, instead of on a header
    bar. A header bar is a 47px band across the whole window; it held two

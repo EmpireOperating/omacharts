@@ -16,6 +16,7 @@ use gtk::prelude::*;
 use omacharts_engine::{BarStyle, Indicator, Instrument, Session, Theme, Timeframe};
 
 use crate::ui::chart::ChartView;
+use crate::ui::shortcuts;
 
 /// How a pane follows the watchlist.
 ///
@@ -25,6 +26,10 @@ use crate::ui::chart::ChartView;
 /// showing something while you go looking at something else.
 pub const LINK_ON: &str = "Linked to the watchlist";
 pub const LINK_OFF: &str = "Not linked — this chart stays where it is";
+
+/// One chart filling the window, and the way back.
+pub const MAXIMIZE: &str = "Maximize";
+pub const RESTORE: &str = "Restore";
 
 pub struct ChartPane {
     pub id: u32,
@@ -48,6 +53,14 @@ pub struct ChartPane {
     pub indicator_legend: gtk::Box,
     pub gear: gtk::Button,
     pub link: gtk::ToggleButton,
+    /// Fills the window with this chart, and puts it back. In the top right
+    /// corner, out from under the legend, and only there while the pointer is
+    /// on the chart: with four charts open, four of these drawn all the time
+    /// is four more things between you and the prices.
+    pub expand: gtk::Button,
+    expand_icon: gtk::DrawingArea,
+    /// Which way the expand glyph points, and which word its tooltip uses.
+    expand_state: Rc<Cell<bool>>,
     pub instrument: RefCell<Option<Instrument>>,
     pub timeframe: Cell<Timeframe>,
     pub indicators: RefCell<Vec<Indicator>>,
@@ -140,10 +153,32 @@ impl ChartPane {
         top.set_margin_top(6);
         top.append(&strip);
 
+        // The opposite corner from the legend, and the only thing in it, so
+        // that a chart which has grown to fill the window still shows the way
+        // back without anything else being in the way.
+        let expand_state = Rc::new(Cell::new(false));
+        let expand_icon = expand_icon(expand_state.clone());
+        let expand = gtk::Button::new();
+        expand.set_child(Some(&expand_icon));
+        expand.add_css_class("flat");
+        expand.add_css_class("pane-expand");
+        expand.set_valign(gtk::Align::Center);
+        expand.set_tooltip_text(Some(&shortcuts::tooltip(MAXIMIZE, "chart.maximize")));
+        // Nothing to maximize away from until there is a second chart.
+        expand.set_visible(false);
+
+        let corner = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        corner.set_halign(gtk::Align::End);
+        corner.set_valign(gtk::Align::Start);
+        corner.set_margin_top(6);
+        corner.set_margin_end(CORNER_MARGIN);
+        corner.append(&expand);
+
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&view.area));
         overlay.add_overlay(&legend);
         overlay.add_overlay(&top);
+        overlay.add_overlay(&corner);
 
         // A box rather than the overlay itself, so the focus ring is drawn on
         // something that is not also the drawing surface.
@@ -164,6 +199,9 @@ impl ChartPane {
             indicator_legend,
             gear,
             link,
+            expand,
+            expand_icon,
+            expand_state,
             instrument: RefCell::new(None),
             timeframe: Cell::new(timeframe),
             indicators: RefCell::new(indicators),
@@ -205,6 +243,29 @@ impl ChartPane {
         set_link_look(&self.link, linked);
     }
 
+    /// Push the maximize corner in from the right, to leave room for
+    /// something else that wants the same corner.
+    pub fn set_corner_clearance(&self, clearance: i32) {
+        if let Some(corner) = self.expand.parent() {
+            corner.set_margin_end(CORNER_MARGIN + clearance);
+        }
+    }
+
+    /// Offer the maximize corner at all, which is a question of whether
+    /// there is anything else on screen to maximize away from.
+    pub fn set_expandable(&self, expandable: bool) {
+        self.expand.set_visible(expandable);
+    }
+
+    /// Point the glyph in or out, and say which it is.
+    pub fn set_maximized(&self, maximized: bool) {
+        if self.expand_state.replace(maximized) != maximized {
+            self.expand_icon.queue_draw();
+        }
+        let what = if maximized { RESTORE } else { MAXIMIZE };
+        self.expand.set_tooltip_text(Some(&shortcuts::tooltip(what, "chart.maximize")));
+    }
+
     pub fn label(&self) -> String {
         match self.instrument.borrow().as_ref() {
             Some(instrument) => format!(
@@ -226,6 +287,78 @@ impl ChartPane {
         self.symbol_button.set_label(&symbol);
         self.timeframe_label.set_text(&format!("·  {}", self.timeframe.get().label()));
     }
+}
+
+/// How far the maximize corner sits in from the chart's right edge. The same
+/// gap the legend keeps on the left, so the two corners are a pair.
+const CORNER_MARGIN: i32 = 12;
+
+/// Two arrows on a diagonal, pointing away from each other — and, once the
+/// chart has the window to itself, back towards each other.
+///
+/// The same glyph every tiling window manager and every video player uses for
+/// this, which is the point: it has to be readable at eighteen pixels without
+/// a label, and the shape people already know is the one that is. Drawn rather
+/// than named for the same reason the chain is: Adwaita's nearest icons are
+/// "view-fullscreen", which is a frame with corner brackets and reads as a
+/// crop tool at this size, and "zoom-fit-best", which reads as a magnifier.
+fn expand_icon(maximized: Rc<Cell<bool>>) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(18);
+    area.set_content_height(18);
+    area.set_draw_func(move |area, cr, width, height| {
+        let colour = area.color();
+        cr.set_source_rgba(
+            colour.red() as f64,
+            colour.green() as f64,
+            colour.blue() as f64,
+            colour.alpha() as f64,
+        );
+        let (w, h) = (width as f64, height as f64);
+        cr.set_line_width(1.3);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+        let (cx, cy) = (w / 2.0, h / 2.0);
+
+        // An arrowhead on a diagonal: the two legs are the pointing direction
+        // turned a quarter either way, which on a diagonal lands them square
+        // on the axes and keeps them crisp at this size.
+        let head_at = |tx: f64, ty: f64, dx: f64, dy: f64, head: f64| {
+            cr.move_to(tx - dx * head, ty);
+            cr.line_to(tx, ty);
+            cr.line_to(tx, ty - dy * head);
+        };
+
+        if maximized.get() {
+            // Coming back in: two arrows from the corners towards the middle,
+            // stopping short of each other so the pair reads as two arrows
+            // and not as one line with a knot in it. They start nearer the
+            // corners than the other glyph's do, because an arrow needs a
+            // shaft behind its head to be an arrow at eighteen pixels.
+            let head = w * 0.22;
+            let (near, far) = (w * 0.1, w - w * 0.1);
+            let gap = w * 0.11;
+            cr.move_to(far, near);
+            cr.line_to(cx + gap, cy - gap);
+            cr.move_to(near, far);
+            cr.line_to(cx - gap, cy + gap);
+            let _ = cr.stroke();
+            head_at(cx + gap, cy - gap, -1.0, 1.0, head);
+            head_at(cx - gap, cy + gap, 1.0, -1.0, head);
+        } else {
+            // Going out: one shaft corner to corner, pointed at both ends.
+            let head = w * 0.26;
+            let (near, far) = (w * 0.2, w - w * 0.2);
+            cr.move_to(near, far);
+            cr.line_to(far, near);
+            let _ = cr.stroke();
+            head_at(far, near, 1.0, -1.0, head);
+            head_at(near, far, -1.0, 1.0, head);
+        }
+        let _ = cr.stroke();
+    });
+    area
 }
 
 /// A chain: two rounded links, overlapping, on the diagonal.

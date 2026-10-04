@@ -51,6 +51,7 @@ pub const BINDINGS: &[Binding] = &[
     global("chart.settings", &["<Ctrl><Shift>comma"]),
     global("chart.reset-view", &["<Alt>r"]),
     global("chart.split-h", &["<Ctrl>h"]),
+    global("chart.maximize", &["<Ctrl>m"]),
     // Paste and cut. The keys are the keys; what changes is whether
     // the keyboard is in something you can type into.
     careful("chart.split-v", &["<Ctrl>v"]),
