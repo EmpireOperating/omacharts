@@ -283,6 +283,7 @@ fn unlisted(query: &str) -> Option<Instrument> {
         tier: 2,
         session_origin: 0,
         overrides: Vec::new(),
+        exchange: None,
     })
 }
 
@@ -290,6 +291,89 @@ fn unlisted_row(instrument: &Instrument) -> gtk::ListBoxRow {
     let row = row_for(instrument);
     row.add_css_class("symbol-row-unlisted");
     row
+}
+
+/// A quiet mark for what kind of thing this is.
+///
+/// Drawn rather than lettered, in the row's own colour at half strength: the
+/// kind is already named in words further along the row, so this is there to
+/// be recognised at a glance down the list, not read.
+fn kind_badge(kind: omacharts_engine::InstrumentKind) -> gtk::DrawingArea {
+    use omacharts_engine::InstrumentKind as K;
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(18);
+    area.set_content_height(18);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(move |area, cr, w, h| {
+        let c = area.color();
+        cr.set_source_rgba(c.red() as f64, c.green() as f64, c.blue() as f64, 0.5);
+        let (w, h) = (w as f64, h as f64);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        cr.set_line_width(1.3);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        match kind {
+            // A candle.
+            K::Equity => {
+                cr.move_to(cx, 2.0);
+                cr.line_to(cx, h - 2.0);
+                let _ = cr.stroke();
+                cr.rectangle(cx - 3.0, cy - 4.0, 6.0, 8.0);
+                let _ = cr.stroke();
+            }
+            // A basket: several things held as one.
+            K::Etf => {
+                for y in [cy - 4.0, cy, cy + 4.0] {
+                    cr.move_to(cx - 5.0, y);
+                    cr.line_to(cx + 5.0, y);
+                }
+                let _ = cr.stroke();
+            }
+            // A line going up, which is what an index is a picture of.
+            K::Index => {
+                cr.move_to(2.5, h - 3.5);
+                cr.line_to(cx - 1.5, cy + 1.0);
+                cr.line_to(cx + 1.5, cy + 3.0);
+                cr.line_to(w - 2.5, 3.5);
+                let _ = cr.stroke();
+            }
+            // A contract: something with edges and a date.
+            K::FutureRoot => {
+                cr.move_to(cx, 2.5);
+                cr.line_to(w - 2.5, cy);
+                cr.line_to(cx, h - 2.5);
+                cr.line_to(2.5, cy);
+                cr.close_path();
+                let _ = cr.stroke();
+            }
+            // A pair, exchanged.
+            K::Fx => {
+                cr.move_to(3.0, cy - 3.0);
+                cr.line_to(w - 3.0, cy - 3.0);
+                cr.move_to(w - 6.0, cy - 5.5);
+                cr.line_to(w - 3.0, cy - 3.0);
+                cr.move_to(w - 3.0, cy + 3.0);
+                cr.line_to(3.0, cy + 3.0);
+                cr.move_to(6.0, cy + 0.5);
+                cr.line_to(3.0, cy + 3.0);
+                let _ = cr.stroke();
+            }
+            K::Crypto => {
+                for i in 0..6 {
+                    let a = std::f64::consts::PI / 6.0 + i as f64 * std::f64::consts::TAU / 6.0;
+                    let (x, y) = (cx + 6.0 * a.cos(), cy + 6.0 * a.sin());
+                    if i == 0 {
+                        cr.move_to(x, y);
+                    } else {
+                        cr.line_to(x, y);
+                    }
+                }
+                cr.close_path();
+                let _ = cr.stroke();
+            }
+        }
+    });
+    area
 }
 
 fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
@@ -304,6 +388,13 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     name.set_hexpand(true);
     name.set_ellipsize(gtk::pango::EllipsizeMode::End);
 
+    // Where it trades, the way TradingView says it: the name alone does not
+    // tell you whether BBVA means Madrid or the New York receipt.
+    let venue = gtk::Label::new(instrument.exchange_label());
+    venue.add_css_class("symbol-venue");
+    venue.set_valign(gtk::Align::Center);
+    venue.set_visible(instrument.exchange_label().is_some());
+
     let kind = gtk::Label::new(Some(instrument.kind.label()));
     kind.add_css_class("symbol-kind");
     kind.set_valign(gtk::Align::Center);
@@ -313,8 +404,10 @@ fn row_for(instrument: &Instrument) -> gtk::ListBoxRow {
     row_box.set_margin_bottom(7);
     row_box.set_margin_start(10);
     row_box.set_margin_end(10);
+    row_box.append(&kind_badge(instrument.kind));
     row_box.append(&ticker);
     row_box.append(&name);
+    row_box.append(&venue);
     row_box.append(&kind);
 
     let row = gtk::ListBoxRow::new();

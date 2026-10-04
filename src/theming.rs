@@ -263,6 +263,13 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .timeframe-strip { padding: 2px; }
 .timeframe-strip button { min-width: 34px; padding: 2px 6px; }
 
+/* Where a symbol trades: quieter than its name, beside what it is. */
+.symbol-venue {
+  font-size: 0.8em;
+  opacity: 0.45;
+  font-feature-settings: 'tnum';
+}
+
 /* The row offering a symbol nobody listed. Quieter than a real match, because
    it is a guess rather than an answer. */
 .symbol-row-unlisted .symbol-row-name { opacity: 0.55; font-style: italic; }

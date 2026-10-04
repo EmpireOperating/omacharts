@@ -1968,7 +1968,6 @@ mod tests {
     fn intraday_ticks_a_few_days_apart_do_not_repeat_a_date() {
         // A week of 15-minute bars: several ticks land inside each day, so a
         // date-only label printed the same thing over and over.
-        const DAY: i64 = 86_400;
         let tick = 6 * 3600;
         let labels: Vec<String> = (0..6)
             .map(|i| format_axis_time(1_700_000_000 + i * tick, tick, true))

@@ -112,6 +112,7 @@ mod tests {
             tier: 0,
             session_origin: 0,
             overrides: Vec::new(),
+            exchange: None,
         }
     }
 

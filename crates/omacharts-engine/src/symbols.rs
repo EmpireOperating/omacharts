@@ -77,6 +77,9 @@ pub struct Instrument {
     pub session_origin: i64,
     /// Per-provider spellings that no template produces.
     pub overrides: Vec<(String, String)>,
+    /// Where it trades, when the source knew. Unset for anything whose venue
+    /// can be worked out from its suffix or its kind.
+    pub exchange: Option<String>,
 }
 
 impl Instrument {
@@ -88,6 +91,38 @@ impl Instrument {
     }
 
     /// What the UI shows as the instrument's ticker.
+    /// Where it trades, in the form people say out loud.
+    ///
+    /// Taken from the listing when the source gave one, and otherwise worked
+    /// out: a Yahoo suffix names a venue, and everything with no suffix and no
+    /// listing behind it is one of the handful of kinds that has an obvious
+    /// home.
+    pub fn exchange_label(&self) -> Option<&str> {
+        if let Some(named) = self.exchange.as_deref() {
+            return Some(named);
+        }
+        if let Some(suffix) = self.suffix.as_deref() {
+            return Some(match suffix {
+                "MC" => "BME",
+                "L" => "LSE",
+                "DE" => "XETRA",
+                "PA" => "Euronext",
+                "SW" => "SIX",
+                "T" => "TSE",
+                "TO" => "TSX",
+                "AS" => "Euronext",
+                "MI" => "Borsa Italiana",
+                "HK" => "HKEX",
+                other => other,
+            });
+        }
+        match self.kind {
+            InstrumentKind::Fx => Some("FX"),
+            InstrumentKind::Crypto => Some("Crypto"),
+            _ => None,
+        }
+    }
+
     pub fn display_symbol(&self) -> String {
         match &self.suffix {
             Some(s) => format!("{}.{}", self.symbol, s),
@@ -221,6 +256,7 @@ impl SearchIndex {
     /// The tiers are what make this feel right: an exact ticker always wins,
     /// but between two equally good textual matches the one people actually
     /// meant — an index, a front-month future, a mega-cap — comes first.
+
     fn score(&self, i: usize, q: &str) -> Option<i32> {
         let symbol = &self.symbol_lc[i];
         let name = &self.name_lc[i];
@@ -300,6 +336,7 @@ pub fn parse_seed(text: &str) -> Vec<Instrument> {
                 Some(sym) => vec![("yahoo".to_string(), sym)],
                 None => Vec::new(),
             },
+            exchange: f.get(8).copied().and_then(blank),
         });
     }
     out
