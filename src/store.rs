@@ -19,6 +19,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub struct Store {
     conn: Connection,
+    /// The file behind it, when there is one. The background cache sweep
+    /// opens its own connection to the same database, and this is how it
+    /// knows which one — an in-memory store has nothing to sweep.
+    path: Option<PathBuf>,
 }
 
 /// Symbols kept outside any section, in the watchlist that has always been
@@ -82,7 +86,7 @@ impl Store {
         // WAL so a background fetch writing never blocks the window reading.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        let store = Store { conn };
+        let store = Store { conn, path: Some(path.to_path_buf()) };
         // Where a migration that could lose something leaves a copy first.
         // Beside the database rather than in a temp directory, because the
         // person who needs it has to be able to find it.
@@ -93,9 +97,24 @@ impl Store {
     /// A database with no file behind it: the tests, and the fallback when
     /// the real one cannot be opened. Nothing to snapshot.
     pub fn memory() -> Result<Store, migrations::Error> {
-        let store = Store { conn: Connection::open_in_memory()? };
+        let store = Store { conn: Connection::open_in_memory()?, path: None };
         store.migrate(None)?;
         Ok(store)
+    }
+
+    /// A store over a connection somebody else opened, with no migration run
+    /// and no file recorded.
+    ///
+    /// For the background cache sweep, which opens its own connection to a
+    /// database the window has already brought up to date, and wants the
+    /// settings table without reimplementing it.
+    pub(crate) fn adopt(conn: Connection) -> Store {
+        Store { conn, path: None }
+    }
+
+    /// The database's file, for anything that needs a second connection to it.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     /// Bring the database up to date, then decide whether what is cached in
@@ -324,6 +343,40 @@ impl Store {
         self.conn.execute("DELETE FROM bar_series", [])?;
         self.conn.execute_batch("VACUUM")?;
         Ok(())
+    }
+
+    /// What the database occupies now.
+    ///
+    /// The same number the sweep evicts against, and the same one settings
+    /// shows. Three places quoting three measurements of "the cache" would
+    /// mean watching a prune run and seeing the figure sit still.
+    pub fn used_bytes(&self) -> i64 {
+        crate::cache::used_bytes(&self.conn)
+    }
+
+    /// What the cache is allowed to occupy.
+    pub fn cache_limit(&self) -> i64 {
+        self.setting(crate::cache::SETTING_LIMIT)
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|bytes| *bytes > 0)
+            .unwrap_or(crate::cache::DEFAULT_LIMIT)
+    }
+
+    pub fn set_cache_limit(&self, bytes: i64) {
+        self.set_setting(crate::cache::SETTING_LIMIT, &bytes.to_string());
+    }
+
+    /// Whether enough time has passed to be worth looking again.
+    ///
+    /// A cache that was under its limit six hours ago is almost certainly
+    /// still under it, and the one case that cannot wait — the user choosing
+    /// a smaller limit — sweeps on the spot rather than through this.
+    pub fn cache_sweep_due(&self) -> bool {
+        let last = self
+            .setting(crate::cache::SETTING_SWEPT_AT)
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        chrono::Utc::now().timestamp() - last >= crate::cache::CADENCE
     }
 
     // -- watchlist ---------------------------------------------------------
@@ -1153,6 +1206,88 @@ mod tests {
         let entry = |s: &str| Entry { symbol: s.into(), suffix: None };
         store.move_entry(id, &entry("ZZ"), &entry("A"));
         assert_eq!(store.watchlist()[0].entries.len(), 1);
+    }
+
+    /// Ten series of a thousand bars, a limit set halfway through them, and
+    /// the ones fetched longest ago are what goes.
+    #[test]
+    fn a_cache_over_its_limit_loses_its_oldest_series_first() {
+        let store = Store::memory().unwrap();
+        let bars: Vec<Bar> = (0..1000).map(|i| bar(i, i as f64)).collect();
+        for series in 0..10 {
+            store.write_bars(&format!("yahoo:S{series}"), Timeframe::days(1), &bars);
+            // write_bars stamps them all in the same second, so the order has
+            // to be made explicit or there is nothing to call oldest.
+            store
+                .conn
+                .execute(
+                    "UPDATE bar_series SET fetched_at = ?2 WHERE key = ?1",
+                    params![format!("yahoo:S{series}"), 1_700_000_000i64 + series],
+                )
+                .unwrap();
+        }
+
+        let full = store.used_bytes();
+        let limit = full / 2;
+        let swept = crate::cache::evict(&store.conn, limit).unwrap();
+
+        assert!(swept.dropped > 0, "something had to go to get under {limit}");
+        assert!(swept.after <= limit, "{} is still over {limit}", swept.after);
+        assert!(
+            store.load_bars("yahoo:S0", Timeframe::days(1)).is_empty(),
+            "the oldest should have gone first"
+        );
+        assert_eq!(
+            store.load_bars("yahoo:S9", Timeframe::days(1)).len(),
+            1000,
+            "the newest should still be there"
+        );
+    }
+
+    /// The usual case: a cache nowhere near its limit is left alone, and
+    /// nothing is read or rewritten to find that out.
+    #[test]
+    fn a_cache_under_its_limit_is_left_alone() {
+        let store = Store::memory().unwrap();
+        store.write_bars("yahoo:ES=F", Timeframe::days(1), &[bar(100, 1.0)]);
+
+        let swept = crate::cache::evict(&store.conn, 1024 * 1024 * 1024).unwrap();
+        assert_eq!(swept.dropped, 0);
+        assert_eq!(swept.before, swept.after);
+        assert_eq!(store.cached_series(), 1);
+    }
+
+    /// Six hours between sweeps, so a launch is never held up by work that
+    /// was done this morning.
+    #[test]
+    fn a_sweep_waits_out_its_cadence_but_a_fresh_database_does_not() {
+        let store = Store::memory().unwrap();
+        assert!(store.cache_sweep_due(), "nothing has ever swept this one");
+
+        let now = chrono::Utc::now().timestamp();
+        store.set_setting(crate::cache::SETTING_SWEPT_AT, &now.to_string());
+        assert!(!store.cache_sweep_due(), "swept just now");
+
+        store.set_setting(
+            crate::cache::SETTING_SWEPT_AT,
+            &(now - crate::cache::CADENCE - 1).to_string(),
+        );
+        assert!(store.cache_sweep_due(), "swept longer ago than the cadence");
+    }
+
+    /// The limit is a number people choose from a short list, and a database
+    /// that has never been asked still has to answer.
+    #[test]
+    fn the_cache_limit_falls_back_to_a_gigabyte() {
+        let store = Store::memory().unwrap();
+        assert_eq!(store.cache_limit(), crate::cache::DEFAULT_LIMIT);
+
+        store.set_cache_limit(512 * 1024 * 1024);
+        assert_eq!(store.cache_limit(), 512 * 1024 * 1024);
+
+        // Nonsense in the settings table is not a reason to have no limit.
+        store.set_setting(crate::cache::SETTING_LIMIT, "nonsense");
+        assert_eq!(store.cache_limit(), crate::cache::DEFAULT_LIMIT);
     }
 
     #[test]

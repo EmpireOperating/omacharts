@@ -90,7 +90,29 @@ fn main() -> glib::ExitCode {
                     Store::memory().expect("open database")
                 }
             };
+            // Trimming the cache is housekeeping, and housekeeping goes
+            // behind the first frame with the rest of it: a cache that has
+            // been over its limit for six hours can be over it a second
+            // longer. Read before the store moves into the window.
+            let sweep = store
+                .path()
+                .filter(|_| store.cache_sweep_due())
+                .map(|path| (path.to_path_buf(), store.cache_limit()));
+
             *window.borrow_mut() = Some(Window::build(app, Rc::new(store)));
+
+            if let Some((path, limit)) = sweep {
+                glib::idle_add_local_once(move || {
+                    omacharts::cache::sweep_in_background(path, limit, |swept| {
+                        if swept.dropped > 0 {
+                            eprintln!(
+                                "omacharts: cache over its limit, dropped {} series",
+                                swept.dropped
+                            );
+                        }
+                    });
+                });
+            }
         }
 
         let Some(window) = window.borrow().clone() else {

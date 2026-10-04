@@ -4,6 +4,7 @@
 //! worth testing without a display lives in `omacharts-engine`.
 
 pub mod bar_plugin;
+pub mod cache;
 pub mod cli;
 pub mod inventory;
 pub mod loader;

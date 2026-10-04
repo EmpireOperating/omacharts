@@ -19,6 +19,7 @@ use omacharts_engine::theme::{
     THEME_BARS_ID,
 };
 
+use crate::cache;
 use crate::store::Store;
 use crate::theming::Theming;
 use crate::ui::colors;
@@ -449,30 +450,74 @@ fn build_data_page(context: &Rc<Context>) {
 
     let cache = adw::ActionRow::new();
     cache.set_title("Cached data");
-    let refresh_subtitle = {
+
+    // One closure, because three things move this number — clearing, choosing
+    // a different limit, and a sweep finishing — and a row that only some of
+    // them updated would be showing a figure the app knows is wrong.
+    let refresh: Rc<dyn Fn()> = {
         let store = context.store.clone();
-        move |row: &adw::ActionRow| {
-            row.set_subtitle(&format!(
-                "{} · {}",
-                describe_count(store.cached_series()),
-                describe_bytes(store.cache_bytes())
-            ));
-        }
+        let row = cache.clone();
+        Rc::new(move || {
+            let series = store.cached_series();
+            let used = store.used_bytes();
+            let limit = store.cache_limit();
+            row.set_subtitle(&if series == 0 {
+                describe_count(series)
+            } else {
+                format!(
+                    "{} · {} of {} · {}",
+                    describe_count(series),
+                    describe_bytes(used),
+                    cache::limit_label(limit),
+                    describe_share(used, limit),
+                )
+            });
+        })
     };
-    refresh_subtitle(&cache);
+    refresh();
 
     let clear = gtk::Button::with_label("Clear");
     clear.add_css_class("destructive-action");
     clear.set_valign(gtk::Align::Center);
     let ctx = context.clone();
-    let row = cache.clone();
+    let refreshed = refresh.clone();
     clear.connect_clicked(move |_| {
         let _ = ctx.store.clear_market_data();
-        refresh_subtitle(&row);
+        refreshed();
         (ctx.on_change)();
     });
     cache.add_suffix(&clear);
     group.add(&cache);
+
+    let limit = adw::ComboRow::new();
+    limit.set_title("Keep at most");
+    limit.set_subtitle(
+        "The data you opened longest ago is dropped automatically once the cache passes this",
+    );
+    let labels: Vec<String> = cache::LIMITS.iter().map(|(_, label)| label.to_string()).collect();
+    limit.set_model(Some(&string_list(&labels)));
+    // A stored limit that is not one of the offered sizes falls back to the
+    // one the app would have used anyway, rather than to whichever happens to
+    // be first — a row showing a size that is not the size in force is worse
+    // than no row at all.
+    let chosen = context.store.cache_limit();
+    let at = |bytes: i64| cache::LIMITS.iter().position(|(size, _)| *size == bytes);
+    limit.set_selected(at(chosen).or_else(|| at(cache::DEFAULT_LIMIT)).unwrap_or(0) as u32);
+
+    let ctx = context.clone();
+    let refreshed = refresh.clone();
+    limit.connect_selected_notify(move |row| {
+        let Some((bytes, _)) = cache::LIMITS.get(row.selected() as usize) else { return };
+        ctx.store.set_cache_limit(*bytes);
+        refreshed();
+        // A limit somebody has just made smaller has to bite now. Leaving it
+        // to the six-hourly sweep would look exactly like a setting that does
+        // nothing, and they are standing here watching the number.
+        let Some(path) = ctx.store.path().map(std::path::Path::to_path_buf) else { return };
+        let swept = refreshed.clone();
+        cache::sweep_in_background(path, *bytes, move |_| swept());
+    });
+    group.add(&limit);
 
     context.data_page.add(&group);
 }
@@ -581,15 +626,35 @@ fn unique_name(base: &str, taken: &[String]) -> (String, String) {
 }
 
 fn describe_bytes(bytes: i64) -> String {
-    const MB: f64 = 1024.0 * 1024.0;
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
     let bytes = bytes as f64;
-    if bytes >= MB {
+    if bytes >= GB {
+        format!("{:.1} GB", bytes / GB)
+    } else if bytes >= MB {
         format!("{:.1} MB", bytes / MB)
-    } else if bytes >= 1024.0 {
-        format!("{:.0} kB", bytes / 1024.0)
+    } else if bytes >= KB {
+        format!("{:.0} kB", bytes / KB)
     } else {
         format!("{bytes:.0} bytes")
     }
+}
+
+/// How much of the limit is spoken for, as a whole percent.
+///
+/// Rounded away from both ends rather than to nearest. A cache with something
+/// in it must not read 0% and one with room left must not read 100%, because
+/// those two are the only readings anybody acts on and both would be lies.
+fn describe_share(used: i64, limit: i64) -> String {
+    if used <= 0 || limit <= 0 {
+        return "0%".to_string();
+    }
+    if used >= limit {
+        return "100%".to_string();
+    }
+    let share = (used as f64 / limit as f64 * 100.0).round() as i64;
+    format!("{}%", share.clamp(1, 99))
 }
 
 fn describe_count(series: i64) -> String {
@@ -624,6 +689,20 @@ mod tests {
         assert_eq!(describe_bytes(0), "0 bytes");
         assert_eq!(describe_bytes(2048), "2 kB");
         assert_eq!(describe_bytes(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(describe_bytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    /// The two readings somebody acts on are "empty" and "full", so neither
+    /// may appear unless it is true.
+    #[test]
+    fn a_share_of_the_limit_never_rounds_to_a_lie() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(describe_share(0, gb), "0%");
+        assert_eq!(describe_share(1024, gb), "1%", "something is not nothing");
+        assert_eq!(describe_share(gb - 1, gb), "99%", "room left is not full");
+        assert_eq!(describe_share(gb, gb), "100%");
+        assert_eq!(describe_share(gb * 2, gb), "100%", "over is still full");
+        assert_eq!(describe_share(gb / 2, gb), "50%");
     }
 
     #[test]
