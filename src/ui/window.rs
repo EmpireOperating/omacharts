@@ -441,6 +441,10 @@ pub struct Window {
     /// to because a chart's maximize button is in that corner too, and has to
     /// step aside when the rail is closed and the two would be in one place.
     corner: RefCell<Option<gtk::WindowHandle>>,
+    /// The corner's watchlist button. Held because Ctrl+B decides what to do
+    /// and the button is what does it: showing the rail through the button is
+    /// what keeps its pressed state honest and the corner clearance correct.
+    watchlist_toggle: RefCell<Option<gtk::ToggleButton>>,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     theming: Rc<RefCell<Theming>>,
@@ -514,6 +518,7 @@ impl Window {
             chart_host: chart_host.clone(),
             book_strip: book_strip.clone(),
             corner: RefCell::new(None),
+            watchlist_toggle: RefCell::new(None),
             store: store.clone(),
             index: index.clone(),
             theming: theming.clone(),
@@ -1629,14 +1634,15 @@ impl Window {
             this.sync_corner_clearance();
         });
 
-        // Ctrl+B needs to drive the button so its pressed state stays honest.
+        *self.watchlist_toggle.borrow_mut() = Some(toggle.clone());
+
+        // Ctrl+B is not a toggle. A rail you can see but cannot drive with the
+        // arrow keys is a rail you still have to reach for the mouse to use, so
+        // the first press puts the keyboard in it and only the second puts it
+        // away. `toggle_watchlist` holds that decision.
         let action = gio::SimpleAction::new("watchlist", None);
-        let toggle_weak = toggle.downgrade();
-        action.connect_activate(move |_, _| {
-            if let Some(toggle) = toggle_weak.upgrade() {
-                toggle.set_active(!toggle.is_active());
-            }
-        });
+        let this = self.clone();
+        action.connect_activate(move |_, _| this.toggle_watchlist());
         self.window.add_action(&action);
 
         let cluster = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -3090,6 +3096,19 @@ impl Window {
         }
     }
 
+    /// Show or hide the rail the way a click does.
+    ///
+    /// Through the corner button rather than around it: the button's handler
+    /// is what remembers the choice and what moves a chart's own corner out
+    /// from under the window's controls. Setting the rail directly would leave
+    /// the button looking unpressed over an open rail.
+    fn set_rail_shown(&self, shown: bool) {
+        match self.watchlist_toggle.borrow().as_ref() {
+            Some(toggle) => toggle.set_active(shown),
+            None => self.set_show_sidebar(shown),
+        }
+    }
+
     /// Put the rail back at the width it was left at.
     ///
     /// Stored as a width rather than a handle position, because the position
@@ -3148,8 +3167,7 @@ impl Window {
 
         match watchlist_action(self.shows_sidebar(), focused) {
             WatchlistAction::Open => {
-                self.set_show_sidebar(true);
-                self.store.set_setting_bool(SHOW_WATCHLIST, true);
+                self.set_rail_shown(true);
                 if let Some(watchlist) = self.watchlist.borrow().as_ref().cloned() {
                     // The sidebar is not realised until the frame after it is
                     // revealed, so focus has to wait for it.
@@ -3162,8 +3180,7 @@ impl Window {
                 }
             }
             WatchlistAction::Close => {
-                self.set_show_sidebar(false);
-                self.store.set_setting_bool(SHOW_WATCHLIST, false);
+                self.set_rail_shown(false);
                 self.focused_pane().view.area.grab_focus();
             }
         }
