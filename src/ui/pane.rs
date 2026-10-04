@@ -230,8 +230,25 @@ impl ChartPane {
     /// Point this chart's strip at the resolution it is showing.
     pub fn sync_strip(&self) {
         let current = self.timeframe.get();
-        for (listed, button) in self.buttons.borrow().iter() {
-            button.set_active(*listed == current);
+        // Keep the keyboard with the resolution it is choosing. Clicking the
+        // strip leaves the focus ring on the button clicked, and stepping with
+        // the keys from there moved the pressed state along while the ring
+        // stayed put — two answers to "which one is this", a button apart.
+        // Only when the strip already has the keyboard: taking it from the
+        // chart would send the arrow keys somewhere nobody pointed them.
+        let chosen = {
+            let buttons = self.buttons.borrow();
+            let holds_keyboard = buttons.iter().any(|(_, button)| button.has_focus());
+            for (listed, button) in buttons.iter() {
+                button.set_active(*listed == current);
+            }
+            holds_keyboard
+                .then(|| buttons.iter().find(|(listed, _)| *listed == current))
+                .flatten()
+                .map(|(_, button)| button.clone())
+        };
+        if let Some(button) = chosen {
+            button.grab_focus();
         }
     }
 
