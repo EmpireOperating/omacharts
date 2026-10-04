@@ -16,7 +16,7 @@ use std::fmt::Write as _;
 
 use omacharts_engine::frame::{GUTTER_WIDTH, RING_WIDTH};
 use omacharts_engine::theme::{
-    builtin_bar_schemes, builtin_themes, theme_bars, BarScheme, Mode, Theme,
+    builtin_bar_schemes, builtin_themes, theme_bars, theme_mono_bars, BarScheme, Mode, Theme,
     FALLBACK_THEME_ID, OMARCHY_ID, THEME_BARS_ID,
 };
 use omacharts_engine::omarchy;
@@ -81,7 +81,12 @@ impl Theming {
     /// Every bar scheme on offer. The first is built from the active theme, so
     /// candles match the desktop without the user choosing anything.
     pub fn bar_schemes(&self) -> Vec<BarScheme> {
-        let mut out = vec![theme_bars(&self.theme())];
+        // Both theme-derived schemes, because neither can come from the fixed
+        // built-in list: each is built from whichever theme is active. Leaving
+        // the monochrome one out does not disable it — it makes the setting
+        // write an id nothing can resolve, and `bar_scheme` then falls back to
+        // colour without saying so.
+        let mut out = vec![theme_bars(&self.theme()), theme_mono_bars(&self.theme())];
         out.extend(self.builtin_schemes.iter().cloned());
         out.extend(self.custom_schemes.iter().cloned());
         out
