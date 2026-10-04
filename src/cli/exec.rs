@@ -113,6 +113,10 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("section", "order") => section_order(store, m, json),
 
         ("status", "show") => status(store, live.is_some(), json),
+        // Before the arm below, which answers out of the stored arrangement.
+        // These two cannot: there are no pixels in a saved layout.
+        ("chart", "screenshot") => screenshot(live, m, json, false),
+        ("chartbook", "screenshot") => screenshot(live, m, json, true),
         ("chart", "crosshair") => crosshair(store, m, json),
         ("chartbook", _) | ("chart", _) => {
             // "The one I am looking at" needs something to be looking at. The
@@ -879,6 +883,36 @@ fn section_order(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<S
 }
 
 // -- chartbooks and charts ------------------------------------------------
+
+/// A picture of what is on screen, written to a file and never to a dialog.
+///
+/// A command has to be able to run in a script and in an agent, so this reaches
+/// the writing path directly rather than the one the keyboard uses: the
+/// "save automatically" setting is not consulted here, and the file chooser it
+/// can open is not reachable from this call at all.
+fn screenshot(
+    live: Option<&dyn Live>,
+    m: &clap::ArgMatches,
+    as_json: bool,
+    whole_book: bool,
+) -> Result<String, Fault> {
+    let live = live.ok_or_else(|| {
+        Fault::new(
+            crate::cli::EXIT_NO_WINDOW,
+            format!(
+                "no window is open, and a screenshot is of what is on screen; \
+                 start Omacharts, then take a picture of {}",
+                if whole_book { "its chartbook" } else { "its chart" }
+            ),
+        )
+    })?;
+    let into = arg(m, "output").map(std::path::PathBuf::from);
+    let (of, path) = live.screenshot(whole_book, into.as_deref())?;
+    Ok(match as_json {
+        true => format!("{}\n", json!({ "of": of, "path": path.display().to_string() })),
+        false => format!("saved {of} to {}\n", path.display()),
+    })
+}
 
 fn charts_verb(
     store: &Store,
@@ -2713,6 +2747,17 @@ mod tests {
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
         fn warm(&self, _instruments: &[omacharts_engine::Instrument]) {}
+
+        /// A test has no pixels. The other methods stand in for a window; this
+        /// one stands in for there being nothing on screen to photograph,
+        /// which is a refusal and not a usage error.
+        fn screenshot(
+            &self,
+            _whole_book: bool,
+            _into: Option<&std::path::Path>,
+        ) -> Result<(String, std::path::PathBuf), Fault> {
+            Err(Fault::new(crate::cli::EXIT_ERROR, "a test has nothing on screen".to_string()))
+        }
     }
 
     /// Every example in the table is a command that runs.

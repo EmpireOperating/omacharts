@@ -152,6 +152,18 @@ pub trait Live {
     fn reload_workspace(&self);
     /// Draw the rail again, after a command changed a watchlist.
     fn reload_watchlists(&self);
+
+    /// Save a picture of the focused chart, or of the whole open chartbook.
+    ///
+    /// The one chart verb that cannot be answered without a window at all, not
+    /// even from a selector: a screenshot is pixels, and a stored arrangement
+    /// has none. Answers with what it photographed and where it went, because
+    /// an implicit target has to be named back.
+    fn screenshot(
+        &self,
+        whole_book: bool,
+        into: Option<&std::path::Path>,
+    ) -> Result<(String, std::path::PathBuf), Fault>;
     /// Queue a paced background fetch of these instruments' daily bars, and
     /// return immediately.
     ///
@@ -443,6 +455,15 @@ impl Live for Rc<crate::ui::Window> {
         crate::ui::Window::reload_watchlists(self);
     }
 
+    fn screenshot(
+        &self,
+        whole_book: bool,
+        into: Option<&std::path::Path>,
+    ) -> Result<(String, std::path::PathBuf), Fault> {
+        crate::ui::Window::screenshot(self, whole_book, into)
+            .map_err(|error| Fault::new(EXIT_ERROR, error))
+    }
+
     fn warm(&self, instruments: &[Instrument]) {
         crate::ui::Window::warm(self, instruments);
     }
@@ -473,6 +494,13 @@ mod tests {
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
         fn warm(&self, _instruments: &[Instrument]) {}
+        fn screenshot(
+            &self,
+            _whole_book: bool,
+            _into: Option<&std::path::Path>,
+        ) -> Result<(String, std::path::PathBuf), Fault> {
+            panic!("a bug somewhere inside the window")
+        }
     }
 
     /// Unwinding out of a command would cross the C frame GLib called it from,

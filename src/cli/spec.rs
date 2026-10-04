@@ -399,6 +399,20 @@ pub const SURFACE: &[Noun] = &[
         about: "Saved arrangements of charts",
         verbs: &[
             Verb {
+                name: "screenshot",
+                about: "Save a PNG of the open chartbook: every chart, as laid out",
+                args: &[],
+                flags: &[Flag::valued(
+                    "output",
+                    "PATH",
+                    "the file to write, or a folder to name it in (default: the configured folder)",
+                )],
+                example: "omacharts chartbook screenshot --output /tmp/book.png",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
                 name: "list",
                 about: "Every chartbook, and which one is open",
                 args: &[],
@@ -576,6 +590,20 @@ pub const SURFACE: &[Noun] = &[
                 json: true,
                 writes: true,
                 workspace: true,
+            },
+            Verb {
+                name: "screenshot",
+                about: "Save a PNG of the focused chart, as it looks on screen",
+                args: &[],
+                flags: &[Flag::valued(
+                    "output",
+                    "PATH",
+                    "the file to write, or a folder to name it in (default: the configured folder)",
+                )],
+                example: "omacharts chart screenshot --output /tmp/chart.png",
+                json: true,
+                writes: false,
+                workspace: false,
             },
             Verb {
                 name: "crosshair",
