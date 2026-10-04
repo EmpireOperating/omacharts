@@ -3,13 +3,13 @@
 Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 
 <p align="center">
-  <img src="assets/examples/banner.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
-</p>
-
-<p align="center">
   <a href="https://www.youtube.com/watch?v=uetKLwfoUrM">
     <img src="assets/examples/video-poster.jpg" width="100%" alt="Watch Omacharts on YouTube">
   </a>
+</p>
+
+<p align="center">
+  <img src="assets/examples/banner.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
 </p>
 
 ## Features
