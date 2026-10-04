@@ -74,6 +74,12 @@ package() {
   # completions and the man page can never describe a different version of
   # the command surface from the one on PATH. Needs no display: these are
   # answered before anything GTK touches.
+  #
+  # Without a bus, though. A command is handed to an omacharts that is
+  # already running, so building this with the app open would have the
+  # running one answer — and ship a man page describing whichever binary
+  # that happened to be. A clean chroot has no bus and never noticed.
+  local -x DBUS_SESSION_BUS_ADDRESS=
   local bin="target/release/$pkgname"
   "$bin" surface --completions bash |
     install -Dm644 /dev/stdin "$pkgdir/usr/share/bash-completion/completions/$pkgname"

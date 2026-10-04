@@ -34,14 +34,23 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 ## Installing
 
-Needs Rust, GTK 4 and libadwaita.
+On Arch, from the AUR:
+
+```sh
+yay -S omacharts
+```
+
+Or build the package yourself from a clone:
 
 ```sh
 git clone https://github.com/jorgemanrubia/omacharts
-cd omacharts
-cargo build --release
-./bin/install
+cd omacharts/packaging/aur
+makepkg -si
 ```
+
+That gets you the command on your path, the man page, shell completions and
+the agent skill. To run it from a working tree instead — it rebuilds on every
+launch — use `./bin/install`.
 
 ## Data
 
