@@ -499,8 +499,8 @@ fn build_market_data(context: &Rc<Context>) {
     let group = adw::PreferencesGroup::new();
     group.set_title("Market data");
     group.set_description(Some(
-        "Bars are downloaded once and kept, so charts you have opened before \
-         open instantly and without a request.",
+        "Bars are downloaded once and kept, so a chart you have opened before \
+         opens instantly.",
     ));
 
     let provider = adw::ActionRow::new();
@@ -551,9 +551,7 @@ fn build_market_data(context: &Rc<Context>) {
 
     let limit = adw::ComboRow::new();
     limit.set_title("Keep at most");
-    limit.set_subtitle(
-        "The data you opened longest ago is dropped automatically once the cache passes this",
-    );
+    limit.set_subtitle("Past this, the oldest data is dropped automatically");
     let labels: Vec<String> = cache::LIMITS.iter().map(|(_, label)| label.to_string()).collect();
     limit.set_model(Some(&string_list(&labels)));
     // A stored limit that is not one of the offered sizes falls back to the
