@@ -137,7 +137,7 @@ mod tests {
         // Parsing one is GTK's job and GTK needs a display to say so.
         // Where there is none this checks the rest, which is still the
         // part that goes wrong.
-        let parses = gtk::init().is_ok();
+        let parses = crate::ui::gtk_ready();
 
         // A typo here is a shortcut that silently does nothing, and a
         // menu row that confidently advertises it.

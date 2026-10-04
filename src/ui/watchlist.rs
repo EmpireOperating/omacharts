@@ -2056,9 +2056,8 @@ mod tests {
     /// one way this can go wrong.
     #[test]
     fn clearing_the_rail_finishes_with_a_popover_anchored_on_the_list() {
-        // Widgets need a display, and where there is none there is nothing to
-        // check — the same bargain the shortcut tests make.
-        if gtk::init().is_err() {
+        // The same bargain the shortcut tests make.
+        if !crate::ui::gtk_ready() {
             return;
         }
 
