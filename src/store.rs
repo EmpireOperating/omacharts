@@ -19,11 +19,25 @@ pub struct Store {
     conn: Connection,
 }
 
-/// Symbols kept outside any section live under this id, which deliberately
-/// has no row in `watchlist_sections`.
+/// Symbols kept outside any section, in the watchlist that has always been
+/// there. Every watchlist has a root of its own; this is the one whose row
+/// predates there being more than one.
 pub const ROOT_SECTION: i64 = 0;
 
-/// A named group of symbols in the watchlist. The root section has an empty
+/// What a root section's position is, in a column where every named section's
+/// is zero or more. One number, below everything it is ordered against, is
+/// what makes "the section that is not a section" a query rather than a rule
+/// written down in two places.
+const ROOT_POSITION: i64 = -1;
+
+/// The watchlist every install has and nobody can delete.
+///
+/// A fixed row id rather than a name, because it can be renamed: resolving it
+/// by the string "Default" would lose it the moment somebody called it
+/// something else.
+pub const DEFAULT_WATCHLIST: i64 = 1;
+
+/// A named group of symbols in a watchlist. The root section has an empty
 /// name and is drawn without a header.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Section {
@@ -32,6 +46,9 @@ pub struct Section {
     /// Sections fold away like they do in every other watchlist. The root
     /// never collapses — there is no header to click.
     pub collapsed: bool,
+    /// The section holding whatever is not in a section. One per watchlist,
+    /// so its id is only [`ROOT_SECTION`] in the default one.
+    pub root: bool,
     pub entries: Vec<Entry>,
 }
 
@@ -99,6 +116,11 @@ impl Store {
              CREATE TABLE IF NOT EXISTS custom_bar_schemes (
                  id TEXT PRIMARY KEY, json TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS watchlists (
+                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name     TEXT NOT NULL,
+                 position INTEGER NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS watchlist_sections (
                  id       INTEGER PRIMARY KEY AUTOINCREMENT,
                  name     TEXT NOT NULL,
@@ -124,12 +146,36 @@ impl Store {
         let _ = self
             .conn
             .execute("ALTER TABLE watchlist_sections ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0", []);
+        self.add_default_watchlist()?;
         self.conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')",
             [],
         )?;
         self.invalidate_stale_cache()?;
         self.adopt_volume_indicator();
+        Ok(())
+    }
+
+    /// Make the watchlist that is always there, and leave everything written
+    /// before watchlists were plural inside it.
+    ///
+    /// The column default is what does the migration: sections written when
+    /// there was only one watchlist name no watchlist at all, and SQLite
+    /// fills the column in as it adds it. Nothing is moved and nothing is
+    /// rewritten, so running this again on a database that already has the
+    /// column simply fails the ALTER and carries on.
+    fn add_default_watchlist(&self) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO watchlists (id, name, position) VALUES (?1, 'Default', 0)",
+            params![DEFAULT_WATCHLIST],
+        )?;
+        // The literal is DEFAULT_WATCHLIST, which SQLite wants spelled out.
+        // `every_section_written_before_watchlists_were_plural_lands_in_the
+        // _default_one` is what keeps the two honest.
+        let _ = self.conn.execute(
+            "ALTER TABLE watchlist_sections ADD COLUMN watchlist_id INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
         Ok(())
     }
 
@@ -373,34 +419,85 @@ impl Store {
 
     // -- watchlist ---------------------------------------------------------
 
-    /// The watchlist, in display order.
+    /// Every watchlist, in display order, as id and name.
+    pub fn watchlists(&self) -> Vec<(i64, String)> {
+        let Ok(mut stmt) =
+            self.conn.prepare("SELECT id, name FROM watchlists ORDER BY position, id")
+        else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    pub fn watchlist_exists(&self, id: i64) -> bool {
+        self.conn
+            .query_row("SELECT 1 FROM watchlists WHERE id = ?1", params![id], |_| Ok(()))
+            .optional()
+            .ok()
+            .flatten()
+            .is_some()
+    }
+
+    /// The default watchlist, in display order.
+    ///
+    /// The one the bar widget shows, which is why it is the one this returns:
+    /// switching the rail to a scratch list is a thing you do while looking at
+    /// the app, and it has no business rewriting what sits in the system bar.
+    pub fn watchlist(&self) -> Vec<Section> {
+        self.watchlist_sections(DEFAULT_WATCHLIST)
+    }
+
+    /// One watchlist's sections, in display order.
     ///
     /// Sections are optional: symbols can sit at the root. The root comes back
-    /// as a nameless section with id [`ROOT_SECTION`], present only when it
-    /// holds something, so callers render one uniform list either way.
-    pub fn watchlist(&self) -> Vec<Section> {
+    /// as a nameless section, present only when it holds something, so callers
+    /// render one uniform list either way.
+    pub fn watchlist_sections(&self, watchlist: i64) -> Vec<Section> {
+        let root_id = self.root_section(watchlist);
         let mut out = Vec::new();
-        let root = self.section_entries(ROOT_SECTION);
+        let root = self.section_entries(root_id);
         if !root.is_empty() {
             out.push(Section {
-                id: ROOT_SECTION,
+                id: root_id,
                 name: String::new(),
                 collapsed: false,
+                root: true,
                 entries: root,
             });
         }
-        out.extend(self.named_sections());
+        out.extend(self.named_sections(watchlist));
         out
     }
 
-    fn named_sections(&self) -> Vec<Section> {
+    /// Where a symbol lands when it is put in a watchlist rather than in one
+    /// of its sections.
+    ///
+    /// Every watchlist has one, held apart from the named sections by a
+    /// position no section it is ordered against can reach. The default
+    /// watchlist's is [`ROOT_SECTION`], which is the row that was there before
+    /// any of this.
+    pub fn root_section(&self, watchlist: i64) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT id FROM watchlist_sections
+                 WHERE watchlist_id = ?1 AND position = ?2 ORDER BY id LIMIT 1",
+                params![watchlist, ROOT_POSITION],
+                |r| r.get(0),
+            )
+            .unwrap_or(ROOT_SECTION)
+    }
+
+    fn named_sections(&self, watchlist: i64) -> Vec<Section> {
         let Ok(mut stmt) = self.conn.prepare(
             "SELECT id, name, collapsed FROM watchlist_sections
-             WHERE id <> ?1 ORDER BY position, id",
+             WHERE watchlist_id = ?1 AND position <> ?2 ORDER BY position, id",
         ) else {
             return Vec::new();
         };
-        let Ok(rows) = stmt.query_map(params![ROOT_SECTION], |r| {
+        let Ok(rows) = stmt.query_map(params![watchlist, ROOT_POSITION], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)? != 0))
         }) else {
             return Vec::new();
@@ -410,9 +507,58 @@ impl Store {
                 id,
                 name,
                 collapsed,
+                root: false,
                 entries: self.section_entries(id),
             })
             .collect()
+    }
+
+    /// Create an empty watchlist, with the root section it needs to hold a
+    /// symbol that is not in a section.
+    pub fn add_watchlist(&self, name: &str) -> Option<i64> {
+        let position: i64 = self
+            .conn
+            .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM watchlists", [], |r| r.get(0))
+            .unwrap_or(0);
+        self.conn
+            .execute(
+                "INSERT INTO watchlists (name, position) VALUES (?1, ?2)",
+                params![name, position],
+            )
+            .ok()?;
+        let id = self.conn.last_insert_rowid();
+        self.conn
+            .execute(
+                "INSERT INTO watchlist_sections (name, position, watchlist_id)
+                 VALUES ('', ?1, ?2)",
+                params![ROOT_POSITION, id],
+            )
+            .ok()?;
+        Some(id)
+    }
+
+    pub fn rename_watchlist(&self, id: i64, name: &str) {
+        let _ = self
+            .conn
+            .execute("UPDATE watchlists SET name = ?2 WHERE id = ?1", params![id, name]);
+    }
+
+    /// Remove a watchlist and everything in it. The default one stays: it is
+    /// what the bar widget shows and what a deleted watchlist falls back to,
+    /// so there has to be one that is always there.
+    pub fn remove_watchlist(&self, id: i64) {
+        if id == DEFAULT_WATCHLIST {
+            return;
+        }
+        let _ = self.conn.execute(
+            "DELETE FROM watchlist_entries WHERE section_id IN
+             (SELECT id FROM watchlist_sections WHERE watchlist_id = ?1)",
+            params![id],
+        );
+        let _ = self
+            .conn
+            .execute("DELETE FROM watchlist_sections WHERE watchlist_id = ?1", params![id]);
+        let _ = self.conn.execute("DELETE FROM watchlists WHERE id = ?1", params![id]);
     }
 
     pub fn set_section_collapsed(&self, id: i64, collapsed: bool) {
@@ -443,22 +589,26 @@ impl Store {
         rows.filter_map(Result::ok).collect()
     }
 
-    /// Put a symbol at the root, outside any section.
+    /// Put a symbol at the root of the default watchlist, outside any section.
     pub fn add_to_root(&self, symbol: &str, suffix: Option<&str>) {
         self.add_to_section(ROOT_SECTION, symbol, suffix);
     }
 
-    pub fn add_section(&self, name: &str) -> Option<i64> {
+    pub fn add_section(&self, watchlist: i64, name: &str) -> Option<i64> {
         let position: i64 = self
             .conn
-            .query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM watchlist_sections", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM watchlist_sections
+                 WHERE watchlist_id = ?1",
+                params![watchlist],
+                |r| r.get(0),
+            )
             .unwrap_or(0);
         self.conn
             .execute(
-                "INSERT INTO watchlist_sections (name, position) VALUES (?1, ?2)",
-                params![name, position],
+                "INSERT INTO watchlist_sections (name, position, watchlist_id)
+                 VALUES (?1, ?2, ?3)",
+                params![name, position, watchlist],
             )
             .ok()?;
         Some(self.conn.last_insert_rowid())
@@ -471,10 +621,17 @@ impl Store {
         );
     }
 
-    /// Remove a section and everything in it. The root cannot be removed —
-    /// there is no header to remove it from.
+    /// Remove a section and everything in it. A root cannot be removed —
+    /// there is no header to remove it from, and its watchlist would have
+    /// nowhere to put a symbol that is not in a section.
     pub fn remove_section(&self, id: i64) {
-        if id == ROOT_SECTION {
+        let position: i64 = self
+            .conn
+            .query_row("SELECT position FROM watchlist_sections WHERE id = ?1", params![id], |r| {
+                r.get(0)
+            })
+            .unwrap_or(ROOT_POSITION);
+        if id == ROOT_SECTION || position == ROOT_POSITION {
             return;
         }
         let _ = self
@@ -576,7 +733,7 @@ impl Store {
             return;
         }
         for (name, symbols) in defaults {
-            if let Some(id) = self.add_section(name) {
+            if let Some(id) = self.add_section(DEFAULT_WATCHLIST, name) {
                 for symbol in *symbols {
                     self.add_to_section(id, symbol, None);
                 }
@@ -707,6 +864,12 @@ fn decode_f64(bytes: &[u8]) -> Vec<f64> {
 mod tests {
     use super::*;
 
+    /// Every symbol in a watchlist, sections and all, for the tests that only
+    /// care about which watchlist a symbol ended up in.
+    fn symbols(sections: &[Section]) -> Vec<String> {
+        sections.iter().flat_map(|s| &s.entries).map(|e| e.symbol.clone()).collect()
+    }
+
     fn bar(ts: i64, close: f64) -> Bar {
         Bar { ts, open: close - 1.0, high: close + 1.0, low: close - 2.0, close, volume: 100.0 }
     }
@@ -772,8 +935,8 @@ mod tests {
     #[test]
     fn the_watchlist_round_trips() {
         let store = Store::memory().unwrap();
-        let indexes = store.add_section("Indexes").unwrap();
-        let crypto = store.add_section("Crypto").unwrap();
+        let indexes = store.add_section(DEFAULT_WATCHLIST, "Indexes").unwrap();
+        let crypto = store.add_section(DEFAULT_WATCHLIST, "Crypto").unwrap();
         store.add_to_section(indexes, "GSPC", None);
         store.add_to_section(indexes, "NDX", None);
         store.add_to_section(crypto, "BTC", None);
@@ -804,7 +967,7 @@ mod tests {
     #[test]
     fn the_root_comes_before_named_sections_and_only_when_used() {
         let store = Store::memory().unwrap();
-        store.add_section("Crypto");
+        store.add_section(DEFAULT_WATCHLIST, "Crypto");
         assert_eq!(store.watchlist().len(), 1, "an empty root is not shown");
 
         store.add_to_root("ES", None);
@@ -827,11 +990,121 @@ mod tests {
         assert_eq!(order, vec!["C", "A", "B"]);
     }
 
+    /// The database on a machine that has been running this app has sections
+    /// written before there was more than one watchlist to put them in. They
+    /// have to come back exactly, under the watchlist that has always been
+    /// there — losing somebody's symbols to a schema change is not a thing
+    /// that gets a second chance.
+    #[test]
+    fn a_database_written_before_watchlists_were_plural_keeps_everything() {
+        let path = std::env::temp_dir()
+            .join(format!("omacharts-premigration-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let old = Connection::open(&path).unwrap();
+        old.execute_batch(
+            "CREATE TABLE watchlist_sections (
+                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name     TEXT NOT NULL,
+                 position INTEGER NOT NULL,
+                 collapsed INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE watchlist_entries (
+                 section_id INTEGER NOT NULL
+                     REFERENCES watchlist_sections(id) ON DELETE CASCADE,
+                 symbol     TEXT NOT NULL,
+                 suffix     TEXT NOT NULL DEFAULT '',
+                 position   INTEGER NOT NULL,
+                 PRIMARY KEY (section_id, symbol, suffix)
+             );
+             INSERT INTO watchlist_sections (id, name, position) VALUES (0, '', -1);
+             INSERT INTO watchlist_sections (id, name, position) VALUES (7, 'Futures', 0);
+             INSERT INTO watchlist_entries (section_id, symbol, suffix, position)
+                 VALUES (0, 'SPY', '', 0), (7, 'ES', '', 0), (7, 'NQ', '', 1);",
+        )
+        .unwrap();
+        drop(old);
+
+        let store = Store::open_at(&path).unwrap();
+        let sections = store.watchlist();
+        assert_eq!(sections.len(), 2, "root and Futures: {sections:?}");
+        assert!(sections[0].root);
+        assert_eq!(sections[0].entries, vec![Entry { symbol: "SPY".into(), suffix: None }]);
+        assert_eq!(sections[1].name, "Futures");
+        assert_eq!(sections[1].entries.len(), 2);
+        assert_eq!(store.watchlists(), vec![(DEFAULT_WATCHLIST, "Default".to_string())]);
+
+        // And again, because migrate() runs on every open.
+        drop(store);
+        let store = Store::open_at(&path).unwrap();
+        assert_eq!(store.watchlist().len(), 2);
+        assert_eq!(store.watchlists().len(), 1);
+
+        drop(store);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_symbol_put_in_one_watchlist_stays_out_of_the_others() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").unwrap();
+
+        store.add_to_root("SPY", None);
+        store.add_to_section(store.root_section(scratch), "BTC", None);
+
+        assert_eq!(symbols(&store.watchlist()), vec!["SPY"]);
+        assert_eq!(symbols(&store.watchlist_sections(scratch)), vec!["BTC"]);
+    }
+
+    /// Every watchlist needs somewhere to put a symbol that is not in a
+    /// section, and sharing one would be the same bug as sharing the symbols.
+    #[test]
+    fn each_watchlist_gets_a_root_of_its_own() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").unwrap();
+        assert_eq!(store.root_section(DEFAULT_WATCHLIST), ROOT_SECTION);
+        assert_ne!(store.root_section(scratch), ROOT_SECTION);
+    }
+
+    #[test]
+    fn the_default_watchlist_can_be_renamed_but_not_deleted() {
+        let store = Store::memory().unwrap();
+        store.rename_watchlist(DEFAULT_WATCHLIST, "Majors");
+        store.remove_watchlist(DEFAULT_WATCHLIST);
+        assert_eq!(store.watchlists(), vec![(DEFAULT_WATCHLIST, "Majors".to_string())]);
+    }
+
+    #[test]
+    fn deleting_a_watchlist_takes_its_sections_and_symbols() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").unwrap();
+        let section = store.add_section(scratch, "Metals").unwrap();
+        store.add_to_section(section, "GC", None);
+
+        store.remove_watchlist(scratch);
+        assert!(!store.watchlist_exists(scratch));
+        assert!(store.watchlist_sections(scratch).is_empty());
+        assert!(store.watchlist().is_empty(), "the default one is untouched and still empty");
+    }
+
+    /// What the bar widget reads. Switching the rail to a scratch list is
+    /// something you do while looking at the app; the system bar has no
+    /// business changing because of it.
+    #[test]
+    fn the_bar_widget_reads_the_default_watchlist_whatever_else_exists() {
+        let store = Store::memory().unwrap();
+        store.add_to_root("SPY", None);
+        let scratch = store.add_watchlist("Scratch").unwrap();
+        store.add_to_section(store.root_section(scratch), "BTC", None);
+
+        assert_eq!(symbols(&store.watchlist()), vec!["SPY"]);
+    }
+
     #[test]
     fn sections_keep_the_order_they_were_made_in() {
         let store = Store::memory().unwrap();
         for name in ["First", "Second", "Third"] {
-            store.add_section(name);
+            store.add_section(DEFAULT_WATCHLIST, name);
         }
         let names: Vec<String> = store.watchlist().into_iter().map(|s| s.name).collect();
         assert_eq!(names, vec!["First", "Second", "Third"]);
@@ -840,7 +1113,7 @@ mod tests {
     #[test]
     fn adding_the_same_symbol_twice_is_harmless() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("Watchlist").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "Watchlist").unwrap();
         store.add_to_section(id, "ES", None);
         store.add_to_section(id, "ES", None);
         assert_eq!(store.watchlist()[0].entries.len(), 1);
@@ -857,7 +1130,7 @@ mod tests {
     #[test]
     fn removing_a_section_takes_its_entries() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("Temp").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "Temp").unwrap();
         store.add_to_section(id, "ES", None);
         store.remove_section(id);
         assert!(store.watchlist().is_empty());
@@ -871,7 +1144,7 @@ mod tests {
     #[test]
     fn sections_remember_being_collapsed() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("Futures").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "Futures").unwrap();
         assert!(!store.watchlist()[0].collapsed, "new sections start open");
 
         store.set_section_collapsed(id, true);
@@ -884,7 +1157,7 @@ mod tests {
     #[test]
     fn sections_can_be_renamed_and_entries_removed() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("Old").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "Old").unwrap();
         store.add_to_section(id, "ES", None);
         store.add_to_section(id, "NQ", None);
         store.rename_section(id, "New");
@@ -908,7 +1181,7 @@ mod tests {
     #[test]
     fn entries_can_be_reordered() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("W").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "W").unwrap();
         for symbol in ["A", "B", "C"] {
             store.add_to_section(id, symbol, None);
         }
@@ -930,8 +1203,8 @@ mod tests {
     #[test]
     fn an_entry_can_move_between_sections() {
         let store = Store::memory().unwrap();
-        let a = store.add_section("A").unwrap();
-        let b = store.add_section("B").unwrap();
+        let a = store.add_section(DEFAULT_WATCHLIST, "A").unwrap();
+        let b = store.add_section(DEFAULT_WATCHLIST, "B").unwrap();
         store.add_to_section(a, "ES", None);
         store.add_to_section(a, "NQ", None);
         store.add_to_section(b, "BTC", None);
@@ -950,8 +1223,8 @@ mod tests {
     #[test]
     fn dropping_on_a_section_rather_than_a_row_appends() {
         let store = Store::memory().unwrap();
-        let a = store.add_section("A").unwrap();
-        let b = store.add_section("B").unwrap();
+        let a = store.add_section(DEFAULT_WATCHLIST, "A").unwrap();
+        let b = store.add_section(DEFAULT_WATCHLIST, "B").unwrap();
         store.add_to_section(a, "ES", None);
         store.add_to_section(b, "BTC", None);
         store.move_entry_to_section(a, b, &Entry { symbol: "ES".into(), suffix: None }, None);
@@ -964,7 +1237,7 @@ mod tests {
     #[test]
     fn moving_within_a_section_still_reorders() {
         let store = Store::memory().unwrap();
-        let a = store.add_section("A").unwrap();
+        let a = store.add_section(DEFAULT_WATCHLIST, "A").unwrap();
         for symbol in ["X", "Y", "Z"] {
             store.add_to_section(a, symbol, None);
         }
@@ -978,7 +1251,7 @@ mod tests {
     #[test]
     fn moving_onto_an_unknown_target_appends() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("W").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "W").unwrap();
         for symbol in ["A", "B"] {
             store.add_to_section(id, symbol, None);
         }
@@ -992,7 +1265,7 @@ mod tests {
     #[test]
     fn moving_something_that_is_not_there_is_a_no_op() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("W").unwrap();
+        let id = store.add_section(DEFAULT_WATCHLIST, "W").unwrap();
         store.add_to_section(id, "A", None);
         let entry = |s: &str| Entry { symbol: s.into(), suffix: None };
         store.move_entry(id, &entry("ZZ"), &entry("A"));

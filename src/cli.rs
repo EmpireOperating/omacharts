@@ -238,7 +238,9 @@ mod tests {
     #[test]
     fn a_section_name_with_quotes_does_not_break_the_json() {
         let store = Store::memory().unwrap();
-        let id = store.add_section("My \"best\" picks").unwrap();
+        let id = store
+            .add_section(crate::store::DEFAULT_WATCHLIST, "My \"best\" picks")
+            .unwrap();
         store.add_to_section(id, "ES", None);
 
         let name = json_string(&store.watchlist()[0].name);

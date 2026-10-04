@@ -17,7 +17,7 @@ use gtk::gio;
 use gtk::glib;
 use omacharts_engine::Instrument;
 
-use crate::store::{Entry, Store, ROOT_SECTION};
+use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
 
 /// What a new install starts with, so the rail is never an empty column.
@@ -149,9 +149,15 @@ pub struct Watchlist {
     /// Set while we are selecting a row ourselves, so rebuilding does not
     /// re-load the chart.
     quiet: Cell<bool>,
+    /// Which watchlist the rail is showing. Not which one the bar widget
+    /// shows — that is always the default one.
+    active: Cell<i64>,
+    /// Names the watchlist on screen and offers the rest.
+    switcher: gtk::MenuButton,
 }
 
 const SETTING_COLUMNS: &str = "watchlist_columns";
+const SETTING_ACTIVE: &str = "active_watchlist";
 
 impl Watchlist {
     pub fn new(
@@ -178,13 +184,37 @@ impl Watchlist {
         // Stepped down from under the window's corner controls: see `.rail-header`.
         header.add_css_class("rail-header");
 
+        // The step `.rail-header` takes is thirty pixels of nothing, and the
+        // corner controls only cover its right-hand end. Naming the watchlist
+        // in what is left costs no height at all, which is the only reason
+        // the rail can be told what it is showing without giving up a row.
+        let switcher = gtk::MenuButton::new();
+        switcher.add_css_class("flat");
+        switcher.add_css_class("rail-switcher");
+        switcher.set_halign(gtk::Align::Start);
+        switcher.set_valign(gtk::Align::Start);
+        switcher.set_margin_start(8);
+        switcher.set_margin_top(3);
+
+        let band = gtk::Overlay::new();
+        band.set_child(Some(&header));
+        band.add_overlay(&switcher);
+
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_size_request(248, -1);
-        widget.append(&header);
+        widget.append(&band);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         widget.append(&scroller);
 
         let columns = parse_columns(store.setting(SETTING_COLUMNS).as_deref());
+        // A watchlist deleted in another window, or a setting from a database
+        // that has been rolled back, leaves an id pointing at nothing. The
+        // default is the one that is always there to fall back to.
+        let active = store
+            .setting(SETTING_ACTIVE)
+            .and_then(|id| id.parse().ok())
+            .filter(|id| store.watchlist_exists(*id))
+            .unwrap_or(DEFAULT_WATCHLIST);
 
         let watchlist = Rc::new(Watchlist {
             widget,
@@ -198,6 +228,8 @@ impl Watchlist {
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(columns),
             quiet: Cell::new(false),
+            active: Cell::new(active),
+            switcher: switcher.clone(),
         });
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -209,7 +241,10 @@ impl Watchlist {
         add_symbol.set_tooltip_text(Some("Add a symbol"));
         add_symbol.add_css_class("flat");
         let this = watchlist.clone();
-        add_symbol.connect_clicked(move |_| this.add_symbol_to(ROOT_SECTION));
+        add_symbol.connect_clicked(move |_| {
+            let root = this.store.root_section(this.active.get());
+            this.add_symbol_to(root);
+        });
         actions.append(&add_symbol);
 
         let add_section = gtk::Button::from_icon_name("folder-new-symbolic");
@@ -224,8 +259,31 @@ impl Watchlist {
 
         watchlist.wire_selection();
         watchlist.wire_keys();
+        watchlist.wire_switcher();
         watchlist.rebuild();
         watchlist
+    }
+
+    /// Which watchlist the rail is showing.
+    pub fn active_watchlist(&self) -> i64 {
+        self.active.get()
+    }
+
+    /// Show a different watchlist. An id that names nothing is ignored rather
+    /// than emptying the rail — a chartbook can outlive the watchlist it was
+    /// pointed at, and the rail is not the place to find that out.
+    pub fn set_active_watchlist(self: &Rc<Self>, id: i64) {
+        if id == self.active.get() || !self.store.watchlist_exists(id) {
+            return;
+        }
+        self.active.set(id);
+        self.store.set_setting(SETTING_ACTIVE, &id.to_string());
+        self.rebuild();
+    }
+
+    /// Every watchlist, in display order, as id and name.
+    pub fn watchlists(&self) -> Vec<(i64, String)> {
+        self.store.watchlists()
     }
 
     /// Put the keyboard on the rail, landing on something selected so the
@@ -453,9 +511,11 @@ impl Watchlist {
             self.header.append(&label);
         }
 
+        self.write_switcher();
+
         let mut kinds = Vec::new();
-        for section in self.store.watchlist() {
-            if section.id != ROOT_SECTION {
+        for section in self.store.watchlist_sections(self.active.get()) {
+            if !section.root {
                 self.list.append(&self.section_header(section.id, &section.name, section.collapsed));
                 kinds.push(RowKind::Header { section_id: section.id });
             }
@@ -752,19 +812,258 @@ impl Watchlist {
         row.add_controller(target);
     }
 
+    /// The switcher names the watchlist on screen, in the strip the corner
+    /// controls already reserved.
+    ///
+    /// The chevron is appended here rather than left to the MenuButton so the
+    /// name can ellipsize at a width that clears those controls, instead of
+    /// growing under them.
+    fn write_switcher(&self) {
+        let name = self
+            .store
+            .watchlists()
+            .into_iter()
+            .find(|(id, _)| *id == self.active.get())
+            .map(|(_, name)| name)
+            .unwrap_or_default();
+
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        let label = gtk::Label::new(Some(&name));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(14);
+        label.set_xalign(0.0);
+        let chevron = gtk::Image::from_icon_name("pan-down-symbolic");
+        chevron.set_pixel_size(12);
+        content.append(&label);
+        content.append(&chevron);
+        self.switcher.set_child(Some(&content));
+    }
+
+    /// Build the menu every time it opens, because what it lists is what it
+    /// edits: renaming one and opening it again has to show the new name.
+    fn wire_switcher(self: &Rc<Self>) {
+        let this = self.clone();
+        self.switcher.set_create_popup_func(move |button| {
+            let popover = gtk::Popover::new();
+            popover.add_css_class("menu");
+            popover.set_child(Some(&this.switcher_menu(&popover)));
+            button.set_popover(Some(&popover));
+        });
+    }
+
+    fn switcher_menu(self: &Rc<Self>, popover: &gtk::Popover) -> gtk::Box {
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        menu.set_size_request(200, -1);
+        for (id, name) in self.store.watchlists() {
+            menu.append(&self.switcher_row(id, &name, popover));
+        }
+        menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        menu.append(&self.new_watchlist_row(popover));
+        menu
+    }
+
+    /// One watchlist: its name switches to it, the pencil renames it in
+    /// place, and the bin is simply absent on the one that cannot go.
+    fn switcher_row(self: &Rc<Self>, id: i64, name: &str, popover: &gtk::Popover) -> gtk::Box {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+
+        let tick = gtk::Image::from_icon_name("object-select-symbolic");
+        tick.set_pixel_size(12);
+        // The space is kept on every row, so the names line up down the menu
+        // however the current one moves.
+        tick.set_opacity(if id == self.active.get() { 1.0 } else { 0.0 });
+
+        let label = gtk::Label::new(Some(name));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(16);
+
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        content.append(&tick);
+        content.append(&label);
+
+        let pick = gtk::Button::new();
+        pick.add_css_class("flat");
+        pick.set_hexpand(true);
+        pick.set_child(Some(&content));
+
+        let rename = gtk::Entry::new();
+        rename.set_text(name);
+
+        let stack = gtk::Stack::new();
+        stack.set_hexpand(true);
+        stack.add_named(&pick, Some("label"));
+        stack.add_named(&rename, Some("entry"));
+        row.append(&stack);
+
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        pick.connect_clicked(move |_| {
+            this.set_active_watchlist(id);
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
+        });
+
+        let edit = gtk::Button::from_icon_name("document-edit-symbolic");
+        edit.add_css_class("flat");
+        edit.set_tooltip_text(Some("Rename"));
+        let stack_weak = stack.downgrade();
+        let rename_weak = rename.downgrade();
+        edit.connect_clicked(move |_| {
+            if let (Some(stack), Some(rename)) = (stack_weak.upgrade(), rename_weak.upgrade()) {
+                stack.set_visible_child_name("entry");
+                rename.grab_focus();
+                rename.select_region(0, -1);
+            }
+        });
+        row.append(&edit);
+
+        let this = self.clone();
+        let stack_weak = stack.downgrade();
+        let label_weak = label.downgrade();
+        rename.connect_activate(move |entry| {
+            let text = entry.text().trim().to_string();
+            if !text.is_empty() {
+                this.store.rename_watchlist(id, &text);
+                // The menu is rebuilt the next time it opens, but this one is
+                // still on screen and would otherwise go on showing the name
+                // that has just been changed.
+                if let Some(label) = label_weak.upgrade() {
+                    label.set_text(&text);
+                }
+                this.rebuild();
+            }
+            if let Some(stack) = stack_weak.upgrade() {
+                stack.set_visible_child_name("label");
+            }
+        });
+
+        // The default watchlist has no bin at all. A disabled one would be a
+        // control that exists to be refused, and the rule it enforces —
+        // something has to be left — is not worth explaining twice.
+        if id != DEFAULT_WATCHLIST {
+            let remove = gtk::Button::from_icon_name("user-trash-symbolic");
+            remove.add_css_class("flat");
+            remove.set_tooltip_text(Some("Delete"));
+            let this = self.clone();
+            let popover_weak = popover.downgrade();
+            let name = name.to_string();
+            remove.connect_clicked(move |_| {
+                if let Some(popover) = popover_weak.upgrade() {
+                    popover.popdown();
+                }
+                this.confirm_remove_watchlist(id, &name);
+            });
+            row.append(&remove);
+        }
+
+        row
+    }
+
+    /// Naming it is making it, so the button becomes the field rather than
+    /// opening a second popover on top of this one.
+    fn new_watchlist_row(self: &Rc<Self>, popover: &gtk::Popover) -> gtk::Stack {
+        let stack = gtk::Stack::new();
+
+        let add = gtk::Button::new();
+        add.add_css_class("flat");
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let icon = gtk::Image::from_icon_name("list-add-symbolic");
+        icon.set_pixel_size(12);
+        let label = gtk::Label::new(Some("New watchlist"));
+        label.set_xalign(0.0);
+        label.set_hexpand(true);
+        content.append(&icon);
+        content.append(&label);
+        add.set_child(Some(&content));
+
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("Watchlist name"));
+
+        stack.add_named(&add, Some("button"));
+        stack.add_named(&entry, Some("entry"));
+
+        let stack_weak = stack.downgrade();
+        let entry_weak = entry.downgrade();
+        add.connect_clicked(move |_| {
+            if let (Some(stack), Some(entry)) = (stack_weak.upgrade(), entry_weak.upgrade()) {
+                stack.set_visible_child_name("entry");
+                entry.grab_focus();
+            }
+        });
+
+        let this = self.clone();
+        let popover_weak = popover.downgrade();
+        entry.connect_activate(move |entry| {
+            let name = entry.text().trim().to_string();
+            if !name.is_empty() {
+                // A new watchlist is empty, so there is nothing to look at
+                // until the rail is showing it.
+                if let Some(id) = this.store.add_watchlist(&name) {
+                    this.set_active_watchlist(id);
+                }
+            }
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
+        });
+
+        stack
+    }
+
+    /// Deleting a watchlist takes its symbols with it, so it asks first.
+    fn confirm_remove_watchlist(self: &Rc<Self>, id: i64, name: &str) {
+        let count: usize = self
+            .store
+            .watchlist_sections(id)
+            .iter()
+            .map(|section| section.entries.len())
+            .sum();
+
+        let body = match count {
+            0 => format!("Delete \u{201c}{name}\u{201d}?"),
+            1 => format!("Delete \u{201c}{name}\u{201d} and the symbol in it?"),
+            n => format!("Delete \u{201c}{name}\u{201d} and the {n} symbols in it?"),
+        };
+
+        let dialog = adw::AlertDialog::new(Some("Delete watchlist"), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("delete", "Delete");
+        dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "delete" {
+                return;
+            }
+            this.store.remove_watchlist(id);
+            // Whatever was being looked at has gone, and the one that is
+            // always there is where there is always something to see.
+            if this.active.get() == id {
+                this.active.set(DEFAULT_WATCHLIST);
+                this.store.set_setting(SETTING_ACTIVE, &DEFAULT_WATCHLIST.to_string());
+            }
+            // Not `changed()`: the bar widget shows the default watchlist, and
+            // that is the one watchlist this cannot have deleted.
+            this.rebuild();
+        });
+        dialog.present(Some(&self.widget));
+    }
+
     /// Adding uses the same picker as everywhere else.
     pub fn add_symbol_to(self: &Rc<Self>, section_id: i64) {
-        let title = if section_id == ROOT_SECTION {
-            "Add to watchlist".to_string()
-        } else {
-            let name = self
-                .store
-                .watchlist()
-                .into_iter()
-                .find(|s| s.id == section_id)
-                .map(|s| s.name)
-                .unwrap_or_default();
-            format!("Add to {name}")
+        let section = self
+            .store
+            .watchlist_sections(self.active.get())
+            .into_iter()
+            .find(|s| s.id == section_id);
+        let title = match section {
+            Some(section) if !section.root => format!("Add to {}", section.name),
+            _ => "Add to watchlist".to_string(),
         };
         let this = self.clone();
         self.search.present(&self.widget, &title, move |instrument| {
@@ -786,7 +1085,7 @@ impl Watchlist {
         entry.connect_activate(move |entry| {
             let name = entry.text().trim().to_string();
             if !name.is_empty() {
-                this.store.add_section(&name);
+                this.store.add_section(this.active.get(), &name);
                 this.changed();
             }
             if let Some(popover) = popover_weak.upgrade() {
@@ -807,7 +1106,7 @@ impl Watchlist {
     ) {
         let count = self
             .store
-            .watchlist()
+            .watchlist_sections(self.active.get())
             .into_iter()
             .find(|s| s.id == id)
             .map(|s| s.entries.len())
