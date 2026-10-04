@@ -1197,47 +1197,6 @@ mod tests {
         assert!(store.indicators().is_empty());
     }
 
-    /// A list configured before volume was something you could remove gets
-    /// one added back, exactly once. Starting from a database that has never
-    /// run the step is the only honest way to ask: the step is keyed to the
-    /// schema version now, so a database that has already passed it stays
-    /// passed however the settings around it are poked.
-    #[test]
-    fn a_chart_configured_before_volume_was_an_indicator_keeps_its_volume() {
-        use omacharts_engine::IndicatorKind;
-        let file =
-            std::env::temp_dir().join(format!("omacharts-volume-{}.db", std::process::id()));
-        let _ = std::fs::remove_file(&file);
-
-        {
-            let old = Connection::open(&file).unwrap();
-            old.execute_batch(
-                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
-            )
-            .unwrap();
-            let sma = serde_json::to_string(&[Indicator::new(7, IndicatorKind::Sma)]).unwrap();
-            old.execute("INSERT INTO settings (key, value) VALUES ('indicators', ?1)", params![
-                sma
-            ])
-            .unwrap();
-        }
-
-        let store = Store::open_at(&file).unwrap();
-        let kinds: Vec<IndicatorKind> = store.indicators().iter().map(|i| i.kind).collect();
-        assert_eq!(kinds, vec![IndicatorKind::Volume, IndicatorKind::Sma]);
-        // And the ids do not collide.
-        let ids: Vec<u32> = store.indicators().iter().map(|i| i.id).collect();
-        assert_ne!(ids[0], ids[1]);
-
-        // Taking it off afterwards sticks.
-        store.set_indicators(&[Indicator::new(7, IndicatorKind::Sma)]);
-        drop(store);
-        let store = Store::open_at(&file).unwrap();
-        assert_eq!(store.indicators().len(), 1);
-        drop(store);
-        let _ = std::fs::remove_file(&file);
-    }
-
     #[test]
     fn indicators_round_trip() {
         use omacharts_engine::IndicatorKind;

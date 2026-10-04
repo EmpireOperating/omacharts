@@ -25,6 +25,12 @@
 //!    `Store::set_indicators` breaks on the day that method changes shape,
 //!    years after the step was written and long after anyone remembers why it
 //!    exists. The SQL of the day is frozen in amber here on purpose.
+//!
+//! There is one step, and it is the schema. Rule 1 starts applying the day
+//! Omacharts is released; until then the list is free to be rewritten, and a
+//! single authoritative `CREATE` is a far better thing to inherit than a chain
+//! of upgrades describing shapes that only ever existed on one developer's
+//! laptop.
 
 use std::path::Path;
 
@@ -32,7 +38,7 @@ use rusqlite::{params, Connection};
 
 /// How far the migrations go. A database claiming more than this was written
 /// by a newer Omacharts than the one opening it.
-pub const LATEST: i32 = 4;
+pub const LATEST: i32 = 1;
 
 /// What went wrong before the database was usable.
 #[derive(Debug)]
@@ -96,163 +102,69 @@ pub struct Migration {
 }
 
 /// Everything that has ever been true of this schema.
-pub const MIGRATIONS: &[Migration] = &[
-    Migration {
-        version: 1,
-        name: "the shape Omacharts shipped with",
-        risky: false,
-        // The only step allowed to say IF NOT EXISTS, and it is load-bearing
-        // rather than defensive: every database that existed before there were
-        // migrations reads as version 0, and is otherwise indistinguishable
-        // from an empty file. Written this way it adopts those — doing nothing
-        // at all to a database that already has this shape — and builds the
-        // same thing from nothing for a fresh install. Later steps must not
-        // copy the idiom; from version 2 on, the version number is the truth
-        // and a step that cannot fail is a step that cannot be checked.
-        step: Step::Sql(
-            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS bar_series (
-                 key        TEXT NOT NULL,
-                 interval   TEXT NOT NULL,
-                 first_ts   INTEGER NOT NULL,
-                 last_ts    INTEGER NOT NULL,
-                 count      INTEGER NOT NULL,
-                 fetched_at INTEGER NOT NULL,
-                 ts         BLOB NOT NULL,
-                 open       BLOB NOT NULL,
-                 high       BLOB NOT NULL,
-                 low        BLOB NOT NULL,
-                 close      BLOB NOT NULL,
-                 volume     BLOB NOT NULL,
-                 PRIMARY KEY (key, interval)
-             );
-             CREATE TABLE IF NOT EXISTS custom_themes (
-                 id TEXT PRIMARY KEY, json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS custom_bar_schemes (
-                 id TEXT PRIMARY KEY, json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS watchlist_sections (
-                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                 name      TEXT NOT NULL,
-                 position  INTEGER NOT NULL,
-                 collapsed INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE IF NOT EXISTS watchlist_entries (
-                 section_id INTEGER NOT NULL
-                     REFERENCES watchlist_sections(id) ON DELETE CASCADE,
-                 symbol     TEXT NOT NULL,
-                 suffix     TEXT NOT NULL DEFAULT '',
-                 position   INTEGER NOT NULL,
-                 PRIMARY KEY (section_id, symbol, suffix)
-             );
-             -- Foreign keys are enforced here, so the symbols that are in no
-             -- section still need a section to hang off. It is filtered out of
-             -- the named ones; callers only ever see it as the nameless first.
-             INSERT OR IGNORE INTO watchlist_sections (id, name, position)
-                 VALUES (0, '', -1);",
-        ),
-    },
-    Migration {
-        version: 2,
-        name: "collapsed sections",
-        risky: false,
-        // Shipped as a bare ALTER whose error was swallowed on every launch
-        // after the first, so a database adopted at version 1 may already have
-        // the column. Asking first is how that is told apart from a fresh
-        // install, now that swallowing the answer is no longer the plan.
-        step: Step::Rust(|conn| {
-            if has_column(conn, "watchlist_sections", "collapsed")? {
-                return Ok(());
-            }
-            conn.execute_batch(
-                "ALTER TABLE watchlist_sections
-                     ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0",
-            )
-        }),
-    },
-    Migration {
-        version: 3,
-        name: "volume becomes an indicator",
-        risky: false,
-        // Volume used to be drawn unconditionally. Turning it into something
-        // you can remove would otherwise have removed it from every chart that
-        // had ever been configured, so those get one added back — once, so
-        // that taking it off afterwards sticks.
-        //
-        // The flag this used to be guarded by is still honoured. A database
-        // that ran the old one-shot and then had volume deliberately removed
-        // must not be handed a second one on the way through here.
-        step: Step::Rust(|conn| {
-            const FLAG: &str = "volume_indicator_adopted";
-            let adopted: Option<String> = conn
-                .query_row("SELECT value FROM settings WHERE key = ?1", params![FLAG], |r| r.get(0))
-                .ok();
-            if adopted.is_some() {
-                return Ok(());
-            }
-            set_setting(conn, FLAG, "1")?;
-
-            // Never configured at all: the default already includes volume.
-            let Some(json) = setting(conn, "indicators")? else { return Ok(()) };
-            let Ok(mut indicators) =
-                serde_json::from_str::<Vec<omacharts_engine::Indicator>>(&json)
-            else {
-                return Ok(());
-            };
-            if indicators.iter().any(|i| i.kind == omacharts_engine::IndicatorKind::Volume) {
-                return Ok(());
-            }
-            let id = indicators.iter().map(|i| i.id).max().unwrap_or(0) + 1;
-            indicators.insert(
-                0,
-                omacharts_engine::Indicator::new(id, omacharts_engine::IndicatorKind::Volume),
-            );
-            let Ok(json) = serde_json::to_string(&indicators) else { return Ok(()) };
-            set_setting(conn, "indicators", &json)
-        }),
-    },
-    Migration {
-        version: 4,
-        name: "more than one watchlist",
-        risky: false,
-        // The last step allowed to adopt a shape it finds already there, and
-        // for the same reason version 1 is: this shipped as a bare CREATE and
-        // a swallowed ALTER before there were migrations, so a database can
-        // have it with nothing recording that it does. After this, every step
-        // starts from a version number that means what it says.
-        //
-        // Nothing is moved. Sections written when there was only one watchlist
-        // name none at all, and the column default fills them in as SQLite
-        // adds it — so the migration is the default, and a watchlist somebody
-        // built over months is never rewritten to be preserved.
-        step: Step::Rust(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS watchlists (
-                     id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                     name     TEXT NOT NULL,
-                     position INTEGER NOT NULL
-                 );
-                 INSERT OR IGNORE INTO watchlists (id, name, position)
-                     VALUES (1, 'Default', 0);",
-            )?;
-            if has_column(conn, "watchlist_sections", "watchlist_id")? {
-                return Ok(());
-            }
-            // Spelled out rather than interpolated from `DEFAULT_WATCHLIST`: a
-            // step that has run on somebody's database can never run there
-            // again, so reading a constant here would mean this migration
-            // quietly meant something different for them than for the next
-            // install. `the_default_watchlist_is_the_one_sections_fall_into`
-            // is what keeps the literal and the constant honest instead.
-            conn.execute_batch(
-                "ALTER TABLE watchlist_sections
-                     ADD COLUMN watchlist_id INTEGER NOT NULL DEFAULT 1",
-            )
-        }),
-    },
-];
+pub const MIGRATIONS: &[Migration] = &[Migration {
+    version: 1,
+    name: "the schema",
+    risky: false,
+    // Plain CREATE, not CREATE IF NOT EXISTS. There is no older shape in the
+    // world to adopt, so a create that silently does nothing would only be
+    // able to hide a bug: run twice, this fails loudly, and the version is
+    // what guarantees it is not. Every table the app has is described here
+    // once, in one place, rather than assembled from a history of ALTERs
+    // nobody can read the result of.
+    step: Step::Sql(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+         CREATE TABLE bar_series (
+             key        TEXT NOT NULL,
+             interval   TEXT NOT NULL,
+             first_ts   INTEGER NOT NULL,
+             last_ts    INTEGER NOT NULL,
+             count      INTEGER NOT NULL,
+             fetched_at INTEGER NOT NULL,
+             ts         BLOB NOT NULL,
+             open       BLOB NOT NULL,
+             high       BLOB NOT NULL,
+             low        BLOB NOT NULL,
+             close      BLOB NOT NULL,
+             volume     BLOB NOT NULL,
+             PRIMARY KEY (key, interval)
+         );
+         CREATE TABLE custom_themes (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+         CREATE TABLE custom_bar_schemes (id TEXT PRIMARY KEY, json TEXT NOT NULL);
+         CREATE TABLE watchlists (
+             id       INTEGER PRIMARY KEY AUTOINCREMENT,
+             name     TEXT NOT NULL,
+             position INTEGER NOT NULL
+         );
+         CREATE TABLE watchlist_sections (
+             id        INTEGER PRIMARY KEY AUTOINCREMENT,
+             name      TEXT NOT NULL,
+             position  INTEGER NOT NULL,
+             collapsed INTEGER NOT NULL DEFAULT 0,
+             -- The default is DEFAULT_WATCHLIST, which SQLite wants spelled
+             -- out. `the_default_watchlist_is_the_one_a_section_falls_into`
+             -- is what keeps the literal and the constant honest.
+             watchlist_id INTEGER NOT NULL DEFAULT 1
+         );
+         CREATE TABLE watchlist_entries (
+             section_id INTEGER NOT NULL
+                 REFERENCES watchlist_sections(id) ON DELETE CASCADE,
+             symbol     TEXT NOT NULL,
+             suffix     TEXT NOT NULL DEFAULT '',
+             position   INTEGER NOT NULL,
+             PRIMARY KEY (section_id, symbol, suffix)
+         );
+         -- The watchlist every install has and nobody can delete, and the
+         -- section inside it holding whatever is in no section. Foreign keys
+         -- are enforced here, so that section needs a real row for entries to
+         -- hang off; it is filtered out of the named ones, and callers only
+         -- ever see it as the nameless first.
+         INSERT INTO watchlists (id, name, position) VALUES (1, 'Default', 0);
+         INSERT INTO watchlist_sections (id, name, position, watchlist_id)
+             VALUES (0, '', -1, 1);",
+    ),
+}];
 
 /// Bring a database up to [`LATEST`], or say why it cannot be.
 ///
@@ -318,125 +230,73 @@ fn snapshot(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
-    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
-    use rusqlite::OptionalExtension;
-    conn.query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| r.get(0))
-        .optional()
-}
-
-fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        params![key, value],
-    )?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The watchlist tables as they were before any of this existed: no
-    /// `collapsed`, no version stamped anywhere. This is the shape sitting on
-    /// the disk of everyone who has run Omacharts so far, and the one thing
-    /// the whole scheme has to get right.
-    const BEFORE_MIGRATIONS: &str = "
-        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        CREATE TABLE custom_themes (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-        CREATE TABLE custom_bar_schemes (id TEXT PRIMARY KEY, json TEXT NOT NULL);
-        CREATE TABLE bar_series (
-            key TEXT NOT NULL, interval TEXT NOT NULL,
-            first_ts INTEGER NOT NULL, last_ts INTEGER NOT NULL,
-            count INTEGER NOT NULL, fetched_at INTEGER NOT NULL,
-            ts BLOB NOT NULL, open BLOB NOT NULL, high BLOB NOT NULL,
-            low BLOB NOT NULL, close BLOB NOT NULL, volume BLOB NOT NULL,
-            PRIMARY KEY (key, interval)
-        );
-        CREATE TABLE watchlist_sections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            position INTEGER NOT NULL
-        );
-        CREATE TABLE watchlist_entries (
-            section_id INTEGER NOT NULL
-                REFERENCES watchlist_sections(id) ON DELETE CASCADE,
-            symbol TEXT NOT NULL,
-            suffix TEXT NOT NULL DEFAULT '',
-            position INTEGER NOT NULL,
-            PRIMARY KEY (section_id, symbol, suffix)
-        );
-        INSERT INTO watchlist_sections (id, name, position) VALUES (0, '', -1);
-        INSERT INTO meta (key, value) VALUES ('schema_version', '1');
-    ";
-
-    /// A database from before the migration system, with a watchlist somebody
-    /// built by hand in it.
-    fn legacy() -> Connection {
+    fn fresh() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(BEFORE_MIGRATIONS).unwrap();
-        conn.execute_batch(
-            "INSERT INTO watchlist_sections (id, name, position) VALUES (7, 'Futures', 0);
-             INSERT INTO watchlist_entries (section_id, symbol, suffix, position)
-                 VALUES (7, 'ES', '', 0), (7, 'GC', '', 1), (0, 'SPY', '', 0);",
-        )
-        .unwrap();
+        run(&conn, None).unwrap();
         conn
     }
 
-    fn symbols(conn: &Connection) -> Vec<(i64, String)> {
-        let mut statement = conn
-            .prepare("SELECT section_id, symbol FROM watchlist_entries ORDER BY section_id, position")
-            .unwrap();
-        statement.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
-    }
-
-    fn sections(conn: &Connection) -> Vec<(i64, String, i64)> {
-        let mut statement = conn
-            .prepare("SELECT id, name, position FROM watchlist_sections ORDER BY id")
-            .unwrap();
-        statement
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect()
-    }
-
+    /// Every table the app reads, with the columns it reads from them. The
+    /// schema is one `CREATE` now rather than a history to replay, so this is
+    /// the thing standing between a typo in it and an app that cannot start.
     #[test]
-    fn a_database_from_before_the_migrations_keeps_every_symbol() {
-        let conn = legacy();
-        let before = symbols(&conn);
-        run(&conn, None).unwrap();
-
+    fn a_fresh_database_has_everything_the_app_expects() {
+        let conn = fresh();
         assert_eq!(version(&conn).unwrap(), LATEST);
-        assert_eq!(symbols(&conn), before, "a watchlist went through the upgrade and changed");
-        assert!(has_column(&conn, "watchlist_sections", "collapsed").unwrap());
+        assert_eq!(
+            schema(&conn),
+            vec![
+                "bar_series:key,interval,first_ts,last_ts,count,fetched_at,ts,open,high,low,close,volume",
+                "custom_bar_schemes:id,json",
+                "custom_themes:id,json",
+                "meta:key,value",
+                "settings:key,value",
+                "watchlist_entries:section_id,symbol,suffix,position",
+                "watchlist_sections:id,name,position,collapsed,watchlist_id",
+                "watchlists:id,name,position",
+            ]
+        );
     }
 
+    /// The watchlist that is always there, and the section inside it that
+    /// holds whatever nobody filed. Entries hang off that section by foreign
+    /// key, so an install without it cannot store a loose symbol at all.
     #[test]
-    fn a_fresh_database_runs_the_same_steps_as_an_old_one() {
-        // One code path, exercised by everybody: the alternative is a create
-        // script that drifts away from the sum of the migrations, and nobody
-        // finds out until an upgraded database behaves differently from a new
-        // one for reasons no test covers.
-        let fresh = Connection::open_in_memory().unwrap();
-        run(&fresh, None).unwrap();
-        let upgraded = legacy();
-        run(&upgraded, None).unwrap();
+    fn a_fresh_database_already_has_the_watchlist_nobody_can_delete() {
+        let conn = fresh();
+        let (id, name): (i64, String) = conn
+            .query_row("SELECT id, name FROM watchlists", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((id, name.as_str()), (crate::store::DEFAULT_WATCHLIST, "Default"));
 
-        assert_eq!(schema(&fresh), schema(&upgraded));
+        let root: (i64, i64) = conn
+            .query_row("SELECT id, watchlist_id FROM watchlist_sections", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(root, (crate::store::ROOT_SECTION, crate::store::DEFAULT_WATCHLIST));
+    }
+
+    /// A section written without naming a watchlist belongs to the permanent
+    /// one. The column default is the only thing that decides that, and it is
+    /// a literal in SQL that nothing but this ties to the constant the rest of
+    /// the app resolves the permanent watchlist by.
+    #[test]
+    fn the_default_watchlist_is_the_one_a_section_falls_into() {
+        let conn = fresh();
+        conn.execute("INSERT INTO watchlist_sections (name, position) VALUES ('Mine', 0)", [])
+            .unwrap();
+
+        let owner: i64 = conn
+            .query_row("SELECT watchlist_id FROM watchlist_sections WHERE name = 'Mine'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(owner, crate::store::DEFAULT_WATCHLIST);
     }
 
     fn schema(conn: &Connection) -> Vec<String> {
@@ -454,20 +314,21 @@ mod tests {
 
     #[test]
     fn migrating_twice_changes_nothing_the_second_time() {
-        let conn = legacy();
-        run(&conn, None).unwrap();
-        let after_once = (version(&conn).unwrap(), schema(&conn), symbols(&conn));
+        // Every launch runs this. The second one has to be a read of one
+        // number and nothing else — not least because the schema step would
+        // now fail outright if it were ever handed a database it had built.
+        let conn = fresh();
+        let after_once = (version(&conn).unwrap(), schema(&conn));
         run(&conn, None).unwrap();
 
-        assert_eq!((version(&conn).unwrap(), schema(&conn), symbols(&conn)), after_once);
+        assert_eq!((version(&conn).unwrap(), schema(&conn)), after_once);
     }
 
     #[test]
     fn a_database_from_the_future_is_refused_rather_than_opened() {
         // It is intact and it is theirs. Starting them a blank one beside it
         // looks exactly like having lost the lot.
-        let conn = Connection::open_in_memory().unwrap();
-        run(&conn, None).unwrap();
+        let conn = fresh();
         conn.pragma_update(None, "user_version", LATEST + 1).unwrap();
 
         match run(&conn, None) {
@@ -478,33 +339,89 @@ mod tests {
         }
     }
 
+    /// Three steps, of both kinds, over a database that starts at nothing.
+    ///
+    /// There is one real migration today and there will not be a second until
+    /// after release — so without this, the first upgrade Omacharts ever
+    /// performs on somebody's machine would be the first time a chain of more
+    /// than one step had run anywhere.
+    #[test]
+    fn a_chain_of_steps_runs_in_order_and_stops_at_the_end() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn, &chain(), 3, None).unwrap();
+
+        assert_eq!(version(&conn).unwrap(), 3);
+        assert_eq!(trail(&conn), vec!["first", "second", "third"]);
+    }
+
+    /// A database part way along takes the rest of the chain and no more.
+    /// Re-running a step that has already run is how an upgrade turns into a
+    /// bug report.
+    #[test]
+    fn only_the_steps_a_database_has_not_had_are_applied() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply(&conn, &chain()[..1], 1, None).unwrap();
+        assert_eq!(trail(&conn), vec!["first"]);
+
+        apply(&conn, &chain(), 3, None).unwrap();
+        assert_eq!(trail(&conn), vec!["first", "second", "third"], "a step ran twice");
+    }
+
+    /// Both kinds of step, writing their name as they go.
+    fn chain() -> Vec<Migration> {
+        vec![
+            Migration {
+                version: 1,
+                name: "first",
+                risky: false,
+                step: Step::Sql(
+                    "CREATE TABLE trail (at INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL);
+                     INSERT INTO trail (name) VALUES ('first');",
+                ),
+            },
+            Migration {
+                version: 2,
+                name: "second",
+                risky: false,
+                step: Step::Rust(|conn| {
+                    conn.execute("INSERT INTO trail (name) VALUES ('second')", [])?;
+                    Ok(())
+                }),
+            },
+            Migration {
+                version: 3,
+                name: "third",
+                risky: false,
+                step: Step::Sql("INSERT INTO trail (name) VALUES ('third');"),
+            },
+        ]
+    }
+
+    fn trail(conn: &Connection) -> Vec<String> {
+        let mut statement = conn.prepare("SELECT name FROM trail ORDER BY at").unwrap();
+        statement.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    }
+
     #[test]
     fn a_step_that_fails_leaves_the_version_where_it_was() {
         // The state nothing can recover from is half-applied, so the version
         // and the change it describes share a transaction.
-        const BROKEN: &[Migration] = &[
-            Migration {
-                version: 1,
-                name: "fine",
-                risky: false,
-                step: Step::Sql("CREATE TABLE kept (id INTEGER PRIMARY KEY);"),
-            },
-            Migration {
-                version: 2,
-                name: "throws half way",
-                risky: false,
-                step: Step::Sql(
-                    "CREATE TABLE gone (id INTEGER PRIMARY KEY);
-                     INSERT INTO nonexistent (id) VALUES (1);",
-                ),
-            },
-        ];
+        let mut broken = chain();
+        broken[1] = Migration {
+            version: 2,
+            name: "throws half way",
+            risky: false,
+            step: Step::Sql(
+                "CREATE TABLE gone (id INTEGER PRIMARY KEY);
+                 INSERT INTO nonexistent (id) VALUES (1);",
+            ),
+        };
 
         let conn = Connection::open_in_memory().unwrap();
-        assert!(apply(&conn, BROKEN, 2, None).is_err());
+        assert!(apply(&conn, &broken, 3, None).is_err());
 
         assert_eq!(version(&conn).unwrap(), 1, "the failed step moved the version");
-        assert!(table_exists(&conn, "kept"), "the step that succeeded was rolled back too");
+        assert_eq!(trail(&conn), vec!["first"], "the step before it was rolled back too");
         assert!(!table_exists(&conn, "gone"), "half of the failed step survived");
     }
 
@@ -516,38 +433,6 @@ mod tests {
         )
         .unwrap()
             > 0
-    }
-
-    /// Serialised through the real type rather than written out by hand, so
-    /// the fixture cannot quietly stop matching what the app would store.
-    fn only_an_sma() -> String {
-        let sma = omacharts_engine::Indicator::new(1, omacharts_engine::IndicatorKind::Sma);
-        serde_json::to_string(&vec![sma]).unwrap()
-    }
-
-    #[test]
-    fn a_chart_configured_before_volume_was_an_indicator_is_given_one() {
-        let conn = legacy();
-        set_setting(&conn, "indicators", &only_an_sma()).unwrap();
-        run(&conn, None).unwrap();
-
-        let json = setting(&conn, "indicators").unwrap().unwrap();
-        let indicators: Vec<omacharts_engine::Indicator> = serde_json::from_str(&json).unwrap();
-        assert!(indicators.iter().any(|i| i.kind == omacharts_engine::IndicatorKind::Volume));
-    }
-
-    #[test]
-    fn a_chart_that_already_dropped_volume_does_not_get_it_back() {
-        // The old one-shot set a flag when it ran. Somebody who took volume
-        // off afterwards meant it, and the upgrade must not quietly undo that.
-        let conn = legacy();
-        set_setting(&conn, "volume_indicator_adopted", "1").unwrap();
-        set_setting(&conn, "indicators", &only_an_sma()).unwrap();
-        run(&conn, None).unwrap();
-
-        let json = setting(&conn, "indicators").unwrap().unwrap();
-        let indicators: Vec<omacharts_engine::Indicator> = serde_json::from_str(&json).unwrap();
-        assert!(indicators.iter().all(|i| i.kind != omacharts_engine::IndicatorKind::Volume));
     }
 
     #[test]
@@ -599,72 +484,6 @@ mod tests {
 
         assert!(!backup.exists());
         let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Somebody's sections and symbols, written when there was only one
-    /// watchlist, have to come back exactly — under the watchlist that has
-    /// always been there. Losing somebody's symbols to a schema change is not
-    /// a thing that gets a second chance.
-    #[test]
-    fn a_database_written_before_watchlists_were_plural_keeps_everything() {
-        let conn = legacy();
-        let (before, grouped) = (symbols(&conn), sections(&conn));
-        run(&conn, None).unwrap();
-
-        assert_eq!(symbols(&conn), before, "a symbol moved or vanished");
-        assert_eq!(sections(&conn), grouped, "a section was renamed or reordered");
-        let named: Vec<(i64, String)> = {
-            let mut statement =
-                conn.prepare("SELECT id, name FROM watchlists ORDER BY position").unwrap();
-            statement
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect()
-        };
-        assert_eq!(named, vec![(crate::store::DEFAULT_WATCHLIST, "Default".to_string())]);
-    }
-
-    /// The column default is what performs the migration, so the literal in
-    /// the ALTER and the constant the rest of the app resolves the permanent
-    /// watchlist by have to be the same number. They are written in two files
-    /// and nothing but this connects them.
-    #[test]
-    fn the_default_watchlist_is_the_one_sections_fall_into() {
-        let conn = legacy();
-        run(&conn, None).unwrap();
-
-        let mut statement =
-            conn.prepare("SELECT DISTINCT watchlist_id FROM watchlist_sections").unwrap();
-        let owners: Vec<i64> =
-            statement.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
-        assert_eq!(owners, vec![crate::store::DEFAULT_WATCHLIST]);
-    }
-
-    /// Watchlists shipped as a bare CREATE and a swallowed ALTER before there
-    /// were migrations, so a database can already have the shape with nothing
-    /// recording that it does — which is exactly the state the first machine
-    /// to run this is in.
-    #[test]
-    fn a_database_that_already_has_watchlists_is_adopted_rather_than_rebuilt() {
-        let conn = legacy();
-        conn.execute_batch(
-            "CREATE TABLE watchlists (
-                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, position INTEGER NOT NULL
-             );
-             INSERT INTO watchlists (id, name, position) VALUES (1, 'Renamed by hand', 0);
-             ALTER TABLE watchlist_sections ADD COLUMN watchlist_id INTEGER NOT NULL DEFAULT 1;",
-        )
-        .unwrap();
-        let before = symbols(&conn);
-        run(&conn, None).unwrap();
-
-        assert_eq!(version(&conn).unwrap(), LATEST);
-        assert_eq!(symbols(&conn), before);
-        let name: String = conn
-            .query_row("SELECT name FROM watchlists WHERE id = 1", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(name, "Renamed by hand", "adoption overwrote a watchlist that was already there");
     }
 
     #[test]
