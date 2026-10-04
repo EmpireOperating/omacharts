@@ -78,6 +78,18 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
     }
 
     let json = flag(m, "json");
+
+    // Nothing to do with the database or the window: these reach into an
+    // agent's configuration, and only ever because somebody typed them. See
+    // `super::skill` for why that is the whole design.
+    //
+    // Answered here rather than in the table of arms below because a run over
+    // two agents can half work — installed for one, refused for the other —
+    // and a `Result<String, Fault>` has nowhere to put both halves.
+    if noun == "skill" {
+        return super::skill::run(verb, &chosen_agents(m), json);
+    }
+
     let result = match (noun, verb) {
         ("symbol", "search") => symbol_search(m, json),
         ("symbol", "show") => symbol_show(m, json),
@@ -120,13 +132,6 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "get") => config_get(store, m, json),
         ("config", "set") => config_set(store, m, json),
         ("config", "bars") => config_bars(store, m, json),
-
-        // Nothing to do with the database or the window: these three reach
-        // into a Claude configuration, and only ever because somebody typed
-        // them. See `super::skill` for why that is the whole design.
-        ("skill", "status") => super::skill::status(&skills_dir(m), json),
-        ("skill", "install") => super::skill::install(&skills_dir(m), json),
-        ("skill", "uninstall") => super::skill::uninstall(&skills_dir(m), json),
 
         ("cache", "status") => cache_status(store, json),
         ("cache", "clear") => cache_clear(store, json),
@@ -2051,9 +2056,17 @@ fn man_page() -> String {
     super::completions::man()
 }
 
-/// The skills directory a `skill` verb acts on.
-fn skills_dir(m: &clap::ArgMatches) -> std::path::PathBuf {
-    super::skill::skills_dir(arg(m, "to").map(String::as_str))
+/// The agents, or the one directory, a `skill` verb acts on.
+///
+/// Reads the selection off the command line and leaves every decision about
+/// what it means to `super::skill`, which owns the list of agents.
+fn chosen_agents(m: &clap::ArgMatches) -> Vec<super::skill::Agent> {
+    let selected: Vec<&str> = super::skill::KNOWN
+        .iter()
+        .filter(|known| flag(m, known.flag))
+        .map(|known| known.flag)
+        .collect();
+    super::skill::chosen(&selected, arg(m, "to").map(String::as_str))
 }
 
 #[cfg(test)]
@@ -2770,7 +2783,7 @@ mod tests {
 
     /// Every command in the agent skill is a command that runs.
     ///
-    /// This is the condition the skill ships on. `claude-plugin/skills/omacharts`
+    /// This is the condition the skill ships on. `agents/skills/omacharts`
     /// is prose, and prose about a generated surface rots — a skill that has
     /// drifted is worse than no skill, because it is confidently wrong and the
     /// agent reading it has no way to tell. The surface has
@@ -2786,7 +2799,7 @@ mod tests {
     /// that never made a `pos:1` is exactly that.
     #[test]
     fn every_command_in_the_agent_skill_is_a_command_that_runs() {
-        const SKILL: &str = include_str!("../../claude-plugin/skills/omacharts/SKILL.md");
+        const SKILL: &str = include_str!("../../agents/skills/omacharts/SKILL.md");
 
         let blocks = omacharts_commands_in(SKILL);
         assert!(blocks.len() >= 4, "no commands found in the skill: is it still a markdown file?");

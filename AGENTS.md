@@ -83,12 +83,18 @@ integer without ambiguity, and the JSON can.
 
 ## The skill is part of the surface
 
-`claude-plugin/skills/omacharts/SKILL.md` is the agent-facing skill, wrapped in
-a Claude Code plugin and installed — only ever on request — by
-`omacharts skill install`. It exists for the two things this file and the
-surface cannot do: it is read outside this repo, which is how an agent anywhere
-on the machine knows to reach for omacharts at all, and it carries **workflows**
-rather than vocabulary, because "a 2×2 of the majors at 15m with RSI on each,
+`agents/skills/omacharts/SKILL.md` is the agent-facing skill, installed — only
+ever on request — by `omacharts skill install`, which links it into whichever
+agents the machine has. **One file for all of them:** Claude and Codex both read
+a directory with a `SKILL.md` out of their own config, so a copy each would be a
+second thing to drift. `agents/.claude-plugin/` wraps the same directory as a
+Claude Code plugin, which only Claude has a use for; `src/cli/skill.rs` has the
+reasoning, including why it is a symlink.
+
+It exists for the two things this file and the surface cannot do: it is read
+outside this repo, which is how an agent anywhere on the machine knows to reach
+for omacharts at all, and it carries **workflows** rather than vocabulary,
+because "a 2×2 of the majors at 15m with RSI on each,
 linked" is several commands in an order plus a handful of facts no single
 command's help contains.
 

@@ -417,9 +417,9 @@ chartbooks are not cache and are left alone.
 Everything above is enough for an agent that has already been pointed here.
 The gap is before that: `--help` only answers once something has thought to
 ask, and `AGENTS.md` is only read by an agent already inside this repo. So
-Omacharts ships a skill — `claude-plugin/skills/omacharts/SKILL.md` — whose
-whole job is to be found, anywhere on the machine, when somebody says "what's
-semis doing" or "set me up for the open".
+Omacharts ships a skill — `agents/skills/omacharts/SKILL.md` — whose whole job
+is to be found, anywhere on the machine, when somebody says "what's semis
+doing" or "set me up for the open".
 
 It does not describe the command surface. `omacharts surface --json` already
 does that perfectly and regenerates itself; a hand-written copy would be wrong
@@ -429,68 +429,103 @@ worth reaching for, and the orders commands go in — a 2×2 of linked charts is
 several commands and a handful of facts about `pos:N` and link groups, none of
 which is a word in any one command's help.
 
-There are two ways to install it, and **neither of them happens on its own.**
-
-**The plugin**, which is the route that also makes Claude Code suggest it:
-
-```
-claude plugin marketplace add /usr/share/omacharts/claude-plugin
-claude plugin install omacharts@omacharts
-```
-
-From a clone rather than the package, `./claude-plugin` is the same thing.
-`claude plugin update omacharts` picks up a new version with the app.
-
-**The command**, for somebody who has just installed the package and is
-already in a terminal:
+**One skill, not one per agent.** Claude reads `~/.claude/skills/<name>/`, Codex
+reads `$CODEX_HOME/skills/<name>/`, and both want the same thing: a directory
+with a `SKILL.md` whose frontmatter has a `name` and a `description`. So there
+is one file, and installing points every agent at it. A copy each would be a
+second thing to drift, which is the one failure worth designing against.
 
 ```
 $ omacharts skill install
-/home/you/.claude/skills/omacharts -> /usr/share/omacharts/claude-plugin/skills/omacharts
+installed for Claude: /home/you/.claude/skills/omacharts -> /usr/share/omacharts/agents/skills/omacharts
+installed for Codex: /home/you/.codex/skills/omacharts -> /usr/share/omacharts/agents/skills/omacharts
   [exit 0]
 
 $ omacharts skill status
-installed: /home/you/.claude/skills/omacharts -> /usr/share/omacharts/claude-plugin/skills/omacharts
+installed for Claude: /home/you/.claude/skills/omacharts -> /usr/share/omacharts/agents/skills/omacharts
+not installed for Codex; `omacharts skill install` would write /home/you/.codex/skills/omacharts
   [exit 0]
 
 $ omacharts skill uninstall
-removed /home/you/.claude/skills/omacharts
+removed for Claude: /home/you/.claude/skills/omacharts
   [exit 0]
 ```
 
-Three things about that command are deliberate, and the first is the reason
-the other two exist.
+Four things about that command are deliberate, and the first is the reason the
+rest exist.
 
 **It is never a side effect.** Not the package's post-install, not
-`bin/install`, not the first launch. Somebody installing a charting app has
-not agreed to have their agent's configuration written into, and there is no
+`bin/install`, not the first launch. Somebody installing a charting app has not
+agreed to have their agent's configuration written into, and there is no
 version of "it is only a small file" that makes that assumption all right. One
 explicit command, or nothing.
 
-**It is a symlink, not a copy.** The risk worth designing against is a skill
-that drifts from the CLI, and the skill is kept beside the surface it
-describes with a test that runs its examples — a link keeps that true through
-every package upgrade, where a copy goes stale the first time a command
-changes. Removing the package then leaves a dangling link, which is the right
-way round to fail: a dangling link loads nothing and `skill status` says
-`points at ... which is not there any more`, while a stale copy would go on
-answering, wrongly.
+**It installs for whichever agents you have.** An agent counts as present if
+its configuration directory is there — meaning it has run here and has state —
+**or** its command is on `PATH`, which catches one installed but not yet
+started. Either signal is enough on purpose: a skill installed for an agent you
+do not use is a directory you never look in, while one missing for an agent you
+do use is a failure you would have to notice and diagnose. `--claude` and
+`--codex` name one outright, present or not, because somebody who typed the flag
+has said what they mean. Finding nothing at all is not an error — it says what
+it looked for and writes nothing.
 
-**It refuses rather than clobbers.** Anything already at
-`~/.claude/skills/omacharts` that Omacharts did not put there is left exactly
-as it is, and reported with what to do about it — and `uninstall` is held to
-the same rule, so it can only ever remove the link it made.
+**It is a symlink, not a copy.** The risk worth designing against is a skill
+that drifts from the CLI, and the skill is kept beside the surface it describes
+with a test that runs its examples — a link keeps that true through every
+package upgrade, where a copy goes stale the first time a command changes.
+Removing the package then leaves a dangling link, which is the right way round
+to fail: a dangling link loads nothing and `skill status` says `points at ...
+which is not there any more`, while a stale copy would go on answering,
+wrongly. Codex evidently agrees — the skills directory it ships with is itself
+full of links into `/usr/share`.
+
+**It refuses rather than clobbers, per agent.** Anything already at an agent's
+`skills/omacharts` that Omacharts did not put there is left exactly as it is,
+and `uninstall` is held to the same rule, so it can only ever remove the link
+it made. One agent refused does not hide another working: both are reported,
+and the exit status carries the refusal.
 
 ```
 $ omacharts skill install
-omacharts: /home/you/.claude/skills/omacharts is already a directory, and not
-something Omacharts put there; move it aside and run this again
+installed for Claude: /home/you/.claude/skills/omacharts -> /usr/share/omacharts/agents/skills/omacharts
+omacharts: not installed for Codex: /home/you/.codex/skills/omacharts is already
+a directory, and not something Omacharts put there; move it aside and run this again
   [exit 5]
 ```
 
-Running `install` twice is not an error. `--to DIR` sends all three somewhere
-else — a project's own `.claude/skills` is a real place to want it — and
-`$CLAUDE_CONFIG_DIR` is honoured when it is set.
+So a script that reads only the exit code learns that something it asked for
+did not happen, and one that reads the lines learns which. `--json` puts the
+whole report on stdout as one document either way.
+
+Running `install` twice is not an error. `--to DIR` ignores the agents and uses
+one directory — a project's own `.claude/skills`, say.
+
+### The Claude Code plugin
+
+Claude Code can also take the skill as a plugin, which is worth it for one
+reason: `claude plugin update omacharts` picks up a new skill without a new
+package, and `/plugin` lists and disables it like anything else.
+
+```
+claude plugin marketplace add /usr/share/omacharts/agents
+claude plugin install omacharts@omacharts
+```
+
+From a clone rather than the package, `./agents` is the same thing.
+
+Its `marketplace.json` also declares a `relevance` signal on the `omacharts`
+command, which is meant to suggest the plugin the first time somebody runs
+`omacharts` in a session. Be aware that only fires when the marketplace is
+allowlisted in `pluginSuggestionMarketplaces` in **managed** settings, so on an
+ordinary machine it does nothing yet. The skill's own description is what
+actually does the discovering.
+
+**Codex needs no equivalent.** It has plugins and a marketplace of its own, but
+nothing in them corresponds to a `relevance` signal — a Codex plugin manifest
+carries display metadata, not a discovery trigger — and Codex reads
+`$CODEX_HOME/skills/` directly. So for Codex the skill directory is the whole
+story, and adding a manifest would be a second thing to maintain for nothing.
 
 ## The command groups
 

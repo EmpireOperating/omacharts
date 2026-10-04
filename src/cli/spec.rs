@@ -121,8 +121,19 @@ const COLOURING: &[&str] = &["coloured", "monochrome"];
 /// able to install the skill without writing into the configuration of
 /// whoever is running the tests.
 pub const SKILLS_DIR: &str =
-    "which skills directory to use; defaults to $CLAUDE_CONFIG_DIR/skills, \
-     or ~/.claude/skills";
+    "one skills directory to use instead of any agent's own; \
+     each agent is found through its own variable otherwise";
+
+/// The three `skill` verbs take the same flags, so they are written once.
+///
+/// One per agent, plus the explicit directory. Every agent in
+/// `cli::skill::KNOWN` has to appear here or nobody can ask for it by name, and
+/// `every_agent_has_a_flag_that_selects_it` is what fails when one does not.
+const AGENT_FLAGS: &[Flag] = &[
+    Flag::switch("claude", "just Claude, whether or not it looks installed"),
+    Flag::switch("codex", "just Codex, whether or not it looks installed"),
+    Flag::valued("to", "DIR", SKILLS_DIR),
+];
 
 pub const COLOUR: &str =
     "a palette name — Blue, Amber, Violet, Teal, Rose, Green, Orange, Cyan — \
@@ -626,26 +637,26 @@ pub const SURFACE: &[Noun] = &[
     },
     Noun {
         name: "skill",
-        about: "The agent skill that teaches Claude to drive this app",
+        about: "The agent skill that teaches an agent to drive this app",
         verbs: &[
             Verb {
                 name: "status",
-                about: "Whether the skill is installed, and the paths either end of it",
+                about: "Whether the skill is installed, per agent, and the paths either end of it",
                 args: &[],
-                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                flags: AGENT_FLAGS,
                 example: "omacharts skill status",
                 json: true,
-                // Nothing in the database and nothing on screen: this writes
-                // into a Claude configuration, which no window has to hear
-                // about. `writes` would only make one rebuild for nothing.
+                // Nothing in the database and nothing on screen: these three
+                // reach into an agent's configuration, which no window has to
+                // hear about. `writes` would only make one rebuild for nothing.
                 writes: false,
                 workspace: false,
             },
             Verb {
                 name: "install",
-                about: "Link the skill into Claude's skills directory. Only ever when asked",
+                about: "Link the skill in for whichever agents you have. Only ever when asked",
                 args: &[],
-                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                flags: AGENT_FLAGS,
                 example: "omacharts skill install",
                 json: true,
                 writes: false,
@@ -655,7 +666,7 @@ pub const SURFACE: &[Noun] = &[
                 name: "uninstall",
                 about: "Take the skill back out again, leaving nothing behind",
                 args: &[],
-                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                flags: AGENT_FLAGS,
                 example: "omacharts skill uninstall",
                 json: true,
                 writes: false,

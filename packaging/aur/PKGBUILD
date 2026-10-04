@@ -51,18 +51,20 @@ package() {
   install -Dm644 "assets/icons/$id.svg" \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/$id.svg"
 
-  # The agent skill, and the Claude Code plugin that wraps it. Installed so
-  # that `omacharts skill install` has something to link to, and so the plugin
-  # can be added from a path on the machine rather than fetched again.
+  # The agent skill, and the Claude Code plugin manifest that wraps it.
+  # Installed so that `omacharts skill install` has one directory to link every
+  # agent at, and so the plugin can be added from a path on the machine rather
+  # than fetched again. Codex needs no manifest — the skill directory is the
+  # whole story there.
   #
-  # Putting the files here changes nothing about anybody's agent: neither
-  # route runs on its own. Installing a charting app must not write into a
-  # Claude configuration, so there is no post-install hook here and there is
-  # not going to be one — see src/cli/skill.rs.
-  local plugin="$pkgdir/usr/share/$pkgname/claude-plugin"
-  install -Dm644 claude-plugin/.claude-plugin/plugin.json "$plugin/.claude-plugin/plugin.json"
-  install -Dm644 claude-plugin/.claude-plugin/marketplace.json "$plugin/.claude-plugin/marketplace.json"
-  install -Dm644 claude-plugin/skills/omacharts/SKILL.md "$plugin/skills/omacharts/SKILL.md"
+  # Putting the files here changes nothing about anybody's agent: no route runs
+  # on its own. Installing a charting app must not write into an agent's
+  # configuration, so there is no post-install hook here and there is not going
+  # to be one — see src/cli/skill.rs.
+  local plugin="$pkgdir/usr/share/$pkgname/agents"
+  install -Dm644 agents/.claude-plugin/plugin.json "$plugin/.claude-plugin/plugin.json"
+  install -Dm644 agents/.claude-plugin/marketplace.json "$plugin/.claude-plugin/marketplace.json"
+  install -Dm644 agents/skills/omacharts/SKILL.md "$plugin/skills/omacharts/SKILL.md"
 
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
