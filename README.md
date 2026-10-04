@@ -90,10 +90,7 @@ Or, if you have just installed the package and are already in a terminal:
 omacharts skill install
 ```
 
-Both are opt-in and nothing installs either one for you: putting a charting
-app on your machine is not an agreement to have your agent's configuration
-written into. `omacharts skill --help` has the rest: `uninstall` takes it
-back out, and `status` says where it is. See
+See `omacharts skill --help`, or
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).
 
 ## Roadmap
