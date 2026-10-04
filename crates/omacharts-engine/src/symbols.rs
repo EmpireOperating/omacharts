@@ -256,13 +256,17 @@ impl SearchIndex {
     /// The tiers are what make this feel right: an exact ticker always wins,
     /// but between two equally good textual matches the one people actually
     /// meant — an index, a front-month future, a mega-cap — comes first.
+    ///
+    /// A name that *is* the query counts as exact too. People type `DAX`
+    /// meaning the index, whose canonical symbol is `GDAXI`; without this the
+    /// NASDAQ ETF that happens to own the ticker would win on spelling alone.
 
     fn score(&self, i: usize, q: &str) -> Option<i32> {
         let symbol = &self.symbol_lc[i];
         let name = &self.name_lc[i];
         let item = &self.items[i];
 
-        let textual = if symbol == q {
+        let textual = if symbol == q || name == q {
             1000
         } else if symbol.starts_with(q) {
             700 - (symbol.len() - q.len()).min(20) as i32 * 4
@@ -379,6 +383,26 @@ mod tests {
                 "wrong winner for {ticker}"
             );
         }
+    }
+
+    #[test]
+    fn a_famous_name_beats_a_ticker_squatter() {
+        // `DAX` is the index's name, not its symbol — and a NASDAQ ETF owns
+        // the literal ticker. The index is what people mean.
+        let mut items = seed();
+        items.push(Instrument {
+            symbol: "DAX".into(),
+            name: "Global X DAX Germany ETF".into(),
+            kind: InstrumentKind::Etf,
+            suffix: None,
+            currency: Some("USD".into()),
+            tier: 2,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: Some("NASDAQ".into()),
+        });
+        let idx = SearchIndex::new(items);
+        assert_eq!(idx.get(idx.search("dax", 5)[0].index).unwrap().symbol, "GDAXI");
     }
 
     #[test]
