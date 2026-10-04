@@ -65,10 +65,6 @@ Rough order, and nothing here is a promise.
 - **More data feeds.** Yahoo is one provider behind one interface. Others can
   sit behind the same one, including the paid ones with real-time prices.
 - **More indicators.** MACD and Bollinger bands are the obvious gaps.
-- **Alerts.** A price crossing a level, said quietly, without the app open.
-- **More of the world.** The inventory is every US listing plus a curated set
-  of foreign ones; the rest of the exchanges are a generator away.
-- **Individual futures contracts**, not only the continuous ones.
 
 ## Licence
 
