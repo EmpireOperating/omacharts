@@ -357,7 +357,6 @@ fn indicator_row(
         refresh_for_remove.run();
     });
     row.add_suffix(&remove);
-    row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
 
     let window_for_open = window.clone();
     let refresh_for_open = refresh.clone();
