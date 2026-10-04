@@ -260,12 +260,9 @@ const SETTING_COLOURED_BARS: &str = "coloured_bar_scheme";
 fn colouring_row(context: &Rc<Context>, monochrome: bool) -> adw::ComboRow {
     let row = adw::ComboRow::new();
     row.set_title("Bar colours");
-    // Honest about the cost. Direction lives in the fill of a candle and
-    // nowhere else, so taking the colour out takes it with it — but an OHLC
-    // bar says the same thing with its ticks and loses nothing.
-    row.set_subtitle(
-        "Monochrome draws every bar in one neutral colour — candles then show no          direction, OHLC bars still show it with their ticks.",
-    );
+    // No subtitle: the two answers are "Up and down" and "Monochrome", which
+    // say what they do, and a sentence beside them squeezed the list down to
+    // an ellipsis — the one part of the row that had to be readable.
     row.set_model(Some(&string_list(&["Up and down".to_string(), "Monochrome".to_string()])));
     row.set_selected(u32::from(monochrome));
 
