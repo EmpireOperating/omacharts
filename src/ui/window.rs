@@ -4147,13 +4147,20 @@ impl Window {
 
     /// Chart what the rail just picked.
     ///
-    /// The chart you are looking at always moves — that is what clicking a
-    /// symbol in the list has always meant — and so does every chart in the
-    /// rail's own group, wherever it is.
+    /// A list drives its group, wherever those charts are. The chart you are
+    /// looking at moves because it is in that group, not because it is the one
+    /// you are looking at — a chart you have taken out of the group follows
+    /// nobody, the list included, or unlinking the focused chart would look as
+    /// though it had done nothing at all.
+    ///
+    /// A list in no group is the exception: it still drives the chart in front
+    /// of you. Clicking a symbol has to put it somewhere, and a rail whose
+    /// every click did nothing would read as broken rather than as unlinked.
     pub fn show_from_rail(self: &Rc<Self>, instrument: Instrument) {
         let group =
             self.watchlist.borrow().as_ref().map(|rail| rail.link_group()).unwrap_or_default();
-        self.spread(instrument, group, Some(self.focused.get()));
+        let seed = if group.is_linked() { None } else { Some(self.focused.get()) };
+        self.spread(instrument, group, seed);
     }
 
     /// Put `instrument` on `seed`, on every live chart in `group`, and on
