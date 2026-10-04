@@ -1457,6 +1457,52 @@ impl Window {
         popover
     }
 
+    /// Move the divider the focused chart sits against, by a nudge.
+    ///
+    /// Through the handle on screen rather than through the tree, so that one
+    /// press is exactly a very short drag: the position notify already writes
+    /// the ratio down, already clamps it to what the charts will allow, and
+    /// already waits for the pressing to stop before it saves — which is what a
+    /// held key needs, for the same reason dragging did.
+    ///
+    /// `false` when there is nothing to move, so the key can go on to whatever
+    /// else wants it.
+    fn resize_focused(self: &Rc<Self>, how: pane::Resize) -> bool {
+        // One chart filling the window has no divider on screen: the rest of
+        // the tree is not mounted, and moving a divider nobody can see would
+        // only show itself on restore.
+        if self.maximized.get().is_some() {
+            return false;
+        }
+        // Read the tree and let go of it before touching the handle. Setting a
+        // position emits the notify that records the ratio, and that wants the
+        // layout mutably while this borrow would still be alive.
+        let divider = self.layout.borrow().resize(self.focused.get(), how);
+        let Some((path, ratio)) = divider else { return false };
+        let Some(paned) = self.paned_at(&path) else { return false };
+        let length = if paned.orientation() == gtk::Orientation::Horizontal {
+            paned.width()
+        } else {
+            paned.height()
+        };
+        if length <= 0 {
+            return false;
+        }
+        paned.set_position((length as f64 * ratio).round() as i32);
+        true
+    }
+
+    /// The handle at `path`, counting down from the one the charts are mounted
+    /// in — the same path `build_node` handed out on the way down.
+    fn paned_at(&self, path: &[bool]) -> Option<gtk::Paned> {
+        let mut widget = self.chart_host.first_child()?;
+        for half in path {
+            let paned: gtk::Paned = widget.downcast().ok()?;
+            widget = if *half { paned.start_child()? } else { paned.end_child()? };
+        }
+        widget.downcast().ok()
+    }
+
     /// Remember where a divider was dragged to.
     fn record_ratio(self: &Rc<Self>, path: &[bool], ratio: f64) {
         let next = self.layout.borrow().with_ratio(path, ratio);
@@ -2655,23 +2701,33 @@ impl Window {
                     this.window.close();
                     return glib::Propagation::Stop;
                 }
-                // Walk the chart without leaving it: resolutions sideways,
-                // symbols up and down, whichever pane has the keyboard.
-                //
-                // Sideways takes Shift as well, so that the modifier a window
-                // manager is most likely to have already claimed is not the
-                // one standing between you and the next resolution.
-                Key::Left if ctrl && alt && shift => {
-                    this.step_timeframe(-1);
+                // Ctrl+Alt+Shift and an arrow resizes the focused chart,
+                // growing it the way the arrow points by moving the divider it
+                // sits against. Up and down are the rail's watchlist rotation
+                // as well, so that is tried first and this falls through rather
+                // than swallowing — two things on one key, separated by what
+                // has the keyboard, the way Ctrl+N already is.
+                Key::Left | Key::Right | Key::Up | Key::Down if ctrl && alt && shift => {
+                    if matches!(key, Key::Up | Key::Down)
+                        && this.rotate_watchlist(if key == Key::Up { -1 } else { 1 })
+                    {
+                        return glib::Propagation::Stop;
+                    }
+                    let how = match key {
+                        Key::Left => pane::Resize::Narrower,
+                        Key::Right => pane::Resize::Wider,
+                        Key::Up => pane::Resize::Shorter,
+                        _ => pane::Resize::Taller,
+                    };
+                    if !this.resize_focused(how) {
+                        return glib::Propagation::Proceed;
+                    }
                     return glib::Propagation::Stop;
                 }
-                Key::Right if ctrl && alt && shift => {
-                    this.step_timeframe(1);
-                    return glib::Propagation::Stop;
-                }
-                // And sideways without Shift walks the chartbooks, which is
-                // the larger of the two things sideways could mean: past the
-                // edge of this arrangement and into the next.
+                // Walk the chart without leaving it: chartbooks sideways with
+                // Ctrl+Alt, which is the larger of the things sideways could
+                // mean — past the edge of this arrangement and into the next —
+                // and symbols up and down, whichever pane has the keyboard.
                 Key::Left if ctrl && alt => {
                     this.step_chartbook(-1);
                     return glib::Propagation::Stop;
@@ -2680,23 +2736,25 @@ impl Window {
                     this.step_chartbook(1);
                     return glib::Propagation::Stop;
                 }
-                // Up and down with Shift walks the watchlists, but only with
-                // the keyboard in the rail: it is the one binding in this
-                // grid that is not global, and over a chart these keys belong
-                // to whatever else wants them rather than to a list you are
-                // not looking at.
-                Key::Up | Key::Down if ctrl && alt && shift => {
-                    if !this.rotate_watchlist(if key == Key::Up { -1 } else { 1 }) {
-                        return glib::Propagation::Proceed;
-                    }
-                    return glib::Propagation::Stop;
-                }
                 Key::Up if ctrl && alt => {
                     this.step_symbol(-1);
                     return glib::Propagation::Stop;
                 }
                 Key::Down if ctrl && alt => {
                     this.step_symbol(1);
+                    return glib::Propagation::Stop;
+                }
+                // Resolutions sideways with Ctrl+Shift, which nothing else
+                // claims. Alt is not in it because Ctrl+Alt+Shift and an arrow
+                // resizes the chart now. It stays out of the accelerator table
+                // for the same reason Ctrl+V does: in an entry these two keys
+                // select a word, and the entry has to have them first.
+                Key::Left if ctrl && shift => {
+                    this.step_timeframe(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Right if ctrl && shift => {
+                    this.step_timeframe(1);
                     return glib::Propagation::Stop;
                 }
                 _ => {}
@@ -3065,12 +3123,13 @@ impl Window {
                     ("Ctrl+M", "Give this chart the window, or put it back"),
                     ("Ctrl+L", "Link this chart to the watchlist, or unlink it"),
                     ("Alt+← → ↑ ↓", "Focus the chart that way"),
+                    ("Ctrl+Alt+Shift+← → ↑ ↓", "Resize this chart"),
                 ],
             ),
             (
                 "Chart",
                 &[
-                    ("Ctrl+Alt+Shift+← →", "Previous or next resolution"),
+                    ("Ctrl+Shift+← →", "Previous or next resolution"),
                     ("Ctrl+Alt+↑ ↓", "Previous or next symbol"),
                     ("← →", "Pan"),
                     ("+ −", "Zoom"),

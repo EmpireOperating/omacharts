@@ -222,12 +222,8 @@ impl ChartPane {
         })
     }
 
-    /// Mark this one as the pane that keys and menus act on.
-    ///
-    /// A ring rather than anything louder: with four charts on screen the
-    /// focused one has to be obvious at a glance and invisible the moment you
-    /// stop looking for it.
-    /// Point this chart's strip at the resolution it is showing.
+    /// Point this chart's strip, and the resolution beside its symbol, at the
+    /// resolution it is showing.
     pub fn sync_strip(&self) {
         let current = self.timeframe.get();
         // Keep the keyboard with the resolution it is choosing. Clicking the
@@ -250,8 +246,20 @@ impl ChartPane {
         if let Some(button) = chosen {
             button.grab_focus();
         }
+        self.write_timeframe();
     }
 
+    /// Mark this one as the pane that keys and menus act on.
+    ///
+    /// A ring rather than anything louder: with four charts on screen the
+    /// focused one has to be obvious at a glance and invisible the moment you
+    /// stop looking for it.
+    ///
+    /// The resolution beside the symbol stays put either way. The strip appears
+    /// here and says the same thing, so the label used to stand down for it —
+    /// but a legend that drops a line the moment you focus the chart reads
+    /// differently depending on which pane you are on, and saying the
+    /// resolution twice on one chart is cheaper than that.
     pub fn set_focused(&self, focused: bool) {
         if focused {
             self.root.add_css_class("focused");
@@ -259,7 +267,6 @@ impl ChartPane {
             self.root.remove_css_class("focused");
         }
         self.strip.set_visible(focused);
-        self.timeframe_label.set_visible(!focused);
     }
 
     /// Join a group, or leave. The colour is resolved against the live theme
@@ -316,6 +323,19 @@ impl ChartPane {
             .map(|i| i.display_symbol())
             .unwrap_or_default();
         self.symbol_button.set_label(&symbol);
+        self.write_timeframe();
+    }
+
+    /// The resolution, beside the symbol.
+    ///
+    /// Written from the strip as well as from the readout because the
+    /// resolution changes on its own, with the symbol doing nothing. Reaching
+    /// it only through the readout left the label right by luck — the legend is
+    /// rebuilt when the resolution changes, for the sake of a promoted reset
+    /// period, and that is what happened to rewrite it. The day that rebuild
+    /// becomes conditional the label would go on naming whichever resolution
+    /// the chart was on when its symbol last arrived.
+    fn write_timeframe(&self) {
         self.timeframe_label.set_text(&format!("·  {}", self.timeframe.get().label()));
     }
 }
@@ -489,6 +509,55 @@ fn half() -> f64 {
     0.5
 }
 
+/// How close to an edge a divider may be pushed.
+///
+/// The same bounds a dragged handle is held to, because a key that can park a
+/// divider somewhere the mouse cannot would make the two ways of moving it
+/// disagree about where the ends are. Past this a pane has no chart left in
+/// it, only its own chrome.
+const DIVIDER_MIN: f64 = 0.05;
+const DIVIDER_MAX: f64 = 0.95;
+
+/// How much of a split one press of a resize key moves its divider.
+///
+/// A fiftieth, which is some thirty pixels of a full-width window: large
+/// enough to see a single press land, small enough to stop on the ratio you
+/// meant. Held down at the usual repeat rate it crosses the whole range in
+/// well over a second, so the divider travels rather than jumping to the end.
+const RESIZE_STEP: f64 = 0.02;
+
+/// What a resize key asks for: this chart wider, narrower, taller or shorter.
+///
+/// Named by what happens to the chart rather than by the arrow that was
+/// pressed, because the two only agree half the time. Right makes the focused
+/// chart wider whichever side of its divider it sits on, so the divider goes
+/// right for a chart in the first half and *left* for one in the second — a
+/// `Right` variant would be naming the key in one case and the divider in the
+/// other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Resize {
+    Wider,
+    Narrower,
+    Taller,
+    Shorter,
+}
+
+impl Resize {
+    /// Whether it is a left-right divider that has to move.
+    fn horizontal(self) -> bool {
+        matches!(self, Resize::Wider | Resize::Narrower)
+    }
+
+    /// How far the divider goes, signed the way it is for a chart sitting in
+    /// the first half of its split.
+    fn delta(self) -> f64 {
+        match self {
+            Resize::Wider | Resize::Taller => RESIZE_STEP,
+            Resize::Narrower | Resize::Shorter => -RESIZE_STEP,
+        }
+    }
+}
+
 impl Node {
     pub fn leaf(id: u32) -> Node {
         Node::Leaf(id)
@@ -540,7 +609,7 @@ impl Node {
             Node::Leaf(id) => Node::Leaf(*id),
             Node::Split { horizontal, ratio: current, first, second } => {
                 let (ratio, first, second) = match path.split_first() {
-                    None => (ratio.clamp(0.05, 0.95), first.clone(), second.clone()),
+                    None => (ratio.clamp(DIVIDER_MIN, DIVIDER_MAX), first.clone(), second.clone()),
                     Some((true, rest)) => (
                         *current,
                         Box::new(first.with_ratio(rest, ratio)),
@@ -555,6 +624,55 @@ impl Node {
                 Node::Split { horizontal: *horizontal, ratio, first, second }
             }
         }
+    }
+
+    /// Which halves to descend into to reach the pane `id`, which is also the
+    /// path of every divider standing over it.
+    fn path_to(&self, id: u32) -> Option<Vec<bool>> {
+        match self {
+            Node::Leaf(leaf) => (*leaf == id).then(Vec::new),
+            Node::Split { first, second, .. } => {
+                let (half, mut rest) = match (first.path_to(id), second.path_to(id)) {
+                    (Some(rest), _) => (true, rest),
+                    (None, Some(rest)) => (false, rest),
+                    (None, None) => return None,
+                };
+                rest.insert(0, half);
+                Some(rest)
+            }
+        }
+    }
+
+    /// The divider that resizes the pane `id`: the path to it, and where it
+    /// has to go. Feed both back to `with_ratio`, or to the handle on screen.
+    ///
+    /// The one that moves is the nearest divider *of the matching
+    /// orientation*, not the nearest divider. In a two-by-two every pane has
+    /// both a row divider and a column divider standing over it and the closer
+    /// of the two is the wrong one for two of the four keys — which looks like
+    /// the right pane resizing along the wrong axis.
+    ///
+    /// `None` when there is nothing to move: one chart on its own, or a chart
+    /// in a column asked to be wider. That is a key that does nothing, not an
+    /// error and not a wrap onto some other divider, because no other divider
+    /// is the answer to the question that was asked.
+    pub fn resize(&self, id: u32, how: Resize) -> Option<(Vec<bool>, f64)> {
+        let path = self.path_to(id)?;
+        let mut node = self;
+        let mut found: Option<(Vec<bool>, f64, bool)> = None;
+        for (depth, half) in path.iter().enumerate() {
+            let Node::Split { horizontal, ratio, first, second } = node else { break };
+            if *horizontal == how.horizontal() {
+                found = Some((path[..depth].to_vec(), *ratio, *half));
+            }
+            node = if *half { first } else { second };
+        }
+        let (divider, ratio, first_half) = found?;
+        // A chart in the second half grows by the divider coming towards it,
+        // so the same key moves the ratio the other way. Getting this backwards
+        // is invisible in a test that only ever resizes the left-hand pane.
+        let towards = if first_half { 1.0 } else { -1.0 };
+        Some((divider, (ratio + how.delta() * towards).clamp(DIVIDER_MIN, DIVIDER_MAX)))
     }
 
     /// Point every leaf at its new id, in one pass.
@@ -777,5 +895,107 @@ mod tests {
     fn leaves_come_back_in_layout_order() {
         let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
         assert_eq!(layout.leaves(), vec![1, 3, 2, 4]);
+    }
+
+    /// Both panes of a split answer "wider" by growing, which means the one
+    /// divider between them moves opposite ways depending on which side asked.
+    /// Resizing only the left-hand pane in a test would pass either way.
+    #[test]
+    fn a_chart_in_either_half_of_a_split_grows_when_it_is_asked_to() {
+        let layout = Node::leaf(1).split(1, 2, true);
+
+        let (divider, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        assert_eq!(divider, Vec::<bool>::new());
+        assert!((ratio - 0.52).abs() < 1e-9, "the left pane grows rightwards: {ratio}");
+
+        let (divider, ratio) = layout.resize(2, Resize::Wider).unwrap();
+        assert_eq!(divider, Vec::<bool>::new());
+        assert!((ratio - 0.48).abs() < 1e-9, "the right pane grows leftwards: {ratio}");
+
+        // And narrower is the same divider the other way round again.
+        let (_, ratio) = layout.resize(1, Resize::Narrower).unwrap();
+        assert!((ratio - 0.48).abs() < 1e-9, "{ratio}");
+        let (_, ratio) = layout.resize(2, Resize::Narrower).unwrap();
+        assert!((ratio - 0.52).abs() < 1e-9, "{ratio}");
+    }
+
+    /// Two columns, each divided: every pane has a column divider and a row
+    /// divider over it, and the nearer of the two is the row. Pressing for a
+    /// wider chart has to reach past it to the column divider at the root.
+    #[test]
+    fn a_two_by_two_resizes_on_the_divider_of_the_orientation_asked_for() {
+        let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
+
+        // Top left: the root divider across, its own column's divider down.
+        assert_eq!(layout.resize(1, Resize::Wider), Some((vec![], 0.52)));
+        assert_eq!(layout.resize(1, Resize::Taller), Some((vec![true], 0.52)));
+
+        // Bottom right, in the second half of both: the same two dividers, and
+        // both of them coming towards it.
+        assert_eq!(layout.resize(4, Resize::Wider), Some((vec![], 0.48)));
+        assert_eq!(layout.resize(4, Resize::Taller), Some((vec![false], 0.48)));
+
+        // Bottom left is in the first half across and the second half down, so
+        // the two keys disagree about which way their divider goes.
+        assert_eq!(layout.resize(3, Resize::Wider), Some((vec![], 0.52)));
+        assert_eq!(layout.resize(3, Resize::Taller), Some((vec![true], 0.48)));
+    }
+
+    /// Nothing to move is a key that does nothing. There is no divider that
+    /// way, and no other divider that would be the right answer instead.
+    #[test]
+    fn a_chart_with_no_divider_that_way_does_not_resize() {
+        assert_eq!(Node::leaf(1).resize(1, Resize::Wider), None);
+        assert_eq!(Node::leaf(1).resize(1, Resize::Taller), None);
+
+        let column = Node::leaf(1).split(1, 2, false);
+        assert_eq!(column.resize(1, Resize::Wider), None, "a column has no width to give");
+        assert!(column.resize(1, Resize::Shorter).is_some());
+
+        let row = Node::leaf(1).split(1, 2, true);
+        assert_eq!(row.resize(2, Resize::Taller), None, "a row has no height to give");
+
+        // And a pane that is not in this arrangement at all.
+        assert_eq!(row.resize(9, Resize::Wider), None);
+    }
+
+    /// Held down, a resize key arrives at the end of its travel and stops
+    /// there — at the same place a dragged handle stops, not past it.
+    #[test]
+    fn a_nudged_divider_stops_where_a_dragged_one_does() {
+        let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 0.94);
+        let (divider, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        assert!((ratio - DIVIDER_MAX).abs() < 1e-9, "{ratio}");
+
+        // Twice more and it is still there rather than off the end.
+        let layout = layout.with_ratio(&divider, ratio);
+        let (_, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        assert!((ratio - DIVIDER_MAX).abs() < 1e-9, "{ratio}");
+
+        let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 0.06);
+        let (_, ratio) = layout.resize(1, Resize::Narrower).unwrap();
+        assert!((ratio - DIVIDER_MIN).abs() < 1e-9, "{ratio}");
+    }
+
+    /// What the key press actually does: the divider named is the one that
+    /// moves, and every other divider is left where it was.
+    #[test]
+    fn resizing_moves_one_divider_and_leaves_the_others_alone() {
+        let layout = Node::leaf(1)
+            .split(1, 2, true)
+            .split(1, 3, false)
+            .split(2, 4, false)
+            .with_ratio(&[true], 0.3)
+            .with_ratio(&[false], 0.7);
+
+        let (divider, ratio) = layout.resize(3, Resize::Taller).unwrap();
+        let resized = layout.with_ratio(&divider, ratio);
+
+        let Node::Split { ratio: across, first, second, .. } = &resized else { panic!() };
+        assert!((across - 0.5).abs() < 1e-9, "the columns did not move: {across}");
+        let Node::Split { ratio: left, .. } = &**first else { panic!() };
+        assert!((left - 0.28).abs() < 1e-9, "the left column's divider rose: {left}");
+        let Node::Split { ratio: right, .. } = &**second else { panic!() };
+        assert!((right - 0.7).abs() < 1e-9, "the right column did not move: {right}");
     }
 }
