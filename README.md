@@ -9,8 +9,8 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 ## Features
 
-- **Fast.** Launches in under 200ms and keeps every series it has fetched, so
-  arrowing down a watchlist redraws instantly rather than loading.
+- **Fast.** Instant load, rendering and operation are non-negotiable design
+  principles.
 - **Beautiful.** The chart is the protagonist and the user interface is at its
   service. It follows your Omarchy theme as you change it, and generates an
   indicator palette for whichever theme is active, so things look great without
