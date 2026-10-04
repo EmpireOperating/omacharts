@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use gtk::cairo;
 use gtk::prelude::*;
-use omacharts_engine::indicators::{vwap, Output, Profile};
+use omacharts_engine::indicators::{self as indicators, vwap, Output, Profile};
 use omacharts_engine::{
     Bar, BarScheme, BarStyle, Direction, Indicator, Instrument, Theme, Timeframe,
 };
@@ -29,7 +29,12 @@ const PAD: f64 = 10.0;
 /// Space between the price chart and a pane, and between two panes.
 const PANE_GAP: f64 = 6.0;
 /// The least of the chart price keeps, however many panes are stacked below.
-const MIN_PRICE_SHARE: f64 = 0.45;
+///
+/// Small on purpose. It is here to stop the price plot reaching zero height,
+/// where its own scale stops meaning anything — not to decide how much room a
+/// volume pane deserves. That is the chart owner's business, and a tall pane
+/// under a thin price is a legitimate thing to want.
+const MIN_PRICE_SHARE: f64 = 0.08;
 /// How near a pane's top edge the pointer has to be to grab it.
 const EDGE_GRAB: f64 = 4.0;
 /// The close box in a pane's top right corner.
@@ -223,7 +228,7 @@ fn layout(state: &State, width: f64, height: f64) -> Layout {
     let sum: f64 = wanted.iter().map(|(_, share)| share).sum();
     let squeeze = if sum > 1.0 - MIN_PRICE_SHARE { (1.0 - MIN_PRICE_SHARE) / sum } else { 1.0 };
     let heights: Vec<f64> =
-        wanted.iter().map(|(_, share)| (total_h * share * squeeze).min(220.0)).collect();
+        wanted.iter().map(|(_, share)| total_h * share * squeeze).collect();
     let used = heights.iter().sum::<f64>() + PANE_GAP * wanted.len() as f64;
     let price_h = (total_h - used).max(1.0);
 
@@ -759,7 +764,8 @@ impl ChartView {
                 Drag::PaneEdge { id, share, total_h } => {
                     // Pulling the line up grows the pane under it: the boundary
                     // goes where the hand goes.
-                    let next = (share - offset_y / total_h).clamp(0.05, 0.6);
+                    let next = (share - offset_y / total_h)
+                        .clamp(indicators::MIN_PANE_SHARE, indicators::MAX_PANE_SHARE);
                     if let Some(drawn) = s.indicators.iter_mut().find(|d| d.indicator.id == id) {
                         drawn.output.set_pane_height(next);
                     }

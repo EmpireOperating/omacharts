@@ -379,6 +379,14 @@ pub struct Pane {
     pub band: Option<(f64, f64)>,
 }
 
+/// The least of the chart's height a pane may be dragged down to. Below this
+/// it is a line rather than a strip, and there is nothing to read in it.
+pub const MIN_PANE_SHARE: f64 = 0.05;
+/// The most it may be given. Not a judgement about what looks right — the
+/// chart stays usable well past the point it looks odd, and somebody stacking
+/// a tall volume pane under a sliver of price is entitled to.
+pub const MAX_PANE_SHARE: f64 = 0.95;
+
 impl Output {
     /// The share of the chart's height this indicator wants for its own strip,
     /// if it needs one at all.
@@ -394,7 +402,7 @@ impl Output {
     /// alone — only the box it is drawn in changes, so there is nothing to
     /// recompute while the hand is moving.
     pub fn set_pane_height(&mut self, share: f64) {
-        let share = share.clamp(0.05, 0.6);
+        let share = share.clamp(MIN_PANE_SHARE, MAX_PANE_SHARE);
         match self {
             Output::Volume { height, .. } => *height = share,
             Output::Pane(pane) => pane.height = share,
@@ -427,21 +435,21 @@ pub fn compute(
         )),
         (Kind::Rsi, Params::Rsi { period, height, overbought, oversold }) => Output::Pane(Pane {
             values: oscillators::rsi(bars, *period),
-            height: height.clamp(0.05, 0.6),
+            height: height.clamp(MIN_PANE_SHARE, MAX_PANE_SHARE),
             bounds: Some((0.0, 100.0)),
             guides: vec![*oversold, 50.0, *overbought],
             band: Some((*oversold, *overbought)),
         }),
         (Kind::Atr, Params::Atr { period, height }) => Output::Pane(Pane {
             values: oscillators::atr(bars, *period),
-            height: height.clamp(0.05, 0.6),
+            height: height.clamp(MIN_PANE_SHARE, MAX_PANE_SHARE),
             bounds: None,
             guides: Vec::new(),
             band: None,
         }),
         (Kind::Volume, Params::Volume { height }) => Output::Volume {
             values: bars.iter().map(|bar| bar.volume).collect(),
-            height: height.clamp(0.05, 0.6),
+            height: height.clamp(MIN_PANE_SHARE, MAX_PANE_SHARE),
         },
         (Kind::VolumeProfile, Params::VolumeProfile { reset, rows, value_area, .. }) => {
             Output::Profiles(profile::compute(
