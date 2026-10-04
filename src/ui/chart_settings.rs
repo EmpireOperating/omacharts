@@ -1,8 +1,8 @@
 //! Settings that belong to the chart rather than the app.
 //!
 //! Reached from the gear beside the legend, because that is where you are
-//! looking when you want them. Two pages: how the bars are read, and what is
-//! drawn on top of them.
+//! looking when you want them. Two pages: how the bars are read and scaled,
+//! and what is drawn on top of them.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +15,7 @@ use omacharts_engine::{BarStyle, Indicator, Session};
 use crate::store::Store;
 use crate::ui::colors;
 use crate::ui::dialogs;
+use crate::ui::shortcuts;
 use crate::ui::window::Window;
 
 pub const SETTING_SESSION: &str = "chart_session";
@@ -55,6 +56,7 @@ impl ChartSettings {
         chart_page.set_title("Chart");
         chart_page.set_icon_name(Some("preferences-system-symbolic"));
         chart_page.add(&bars_group(window, &store));
+        chart_page.add(&scales_group(window));
         chart_page.add(&session_group(window, &store));
         dialog.add(&chart_page);
 
@@ -111,20 +113,6 @@ fn bars_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGroup {
     });
     group.add(&row);
 
-    let grid = adw::ActionRow::new();
-    grid.set_title("Gridlines");
-    grid.set_subtitle("The axes and their labels stay either way");
-    let switch = gtk::Switch::new();
-    switch.set_valign(gtk::Align::Center);
-    switch.set_active(window.show_grid());
-    let window_for_grid = window.clone();
-    switch.connect_state_set(move |_, on| {
-        window_for_grid.set_show_grid(on);
-        glib::Propagation::Proceed
-    });
-    grid.add_suffix(&switch);
-    group.add(&grid);
-
     // One switch for the window rather than one per chart: it is about how the
     // charts behave towards each other, which is not a property of any one of
     // them.
@@ -145,6 +133,90 @@ fn bars_group(window: &Rc<Window>, store: &Rc<Store>) -> adw::PreferencesGroup {
     });
     sync.add_suffix(&switch);
     group.add(&sync);
+
+    group
+}
+
+/// What the two scales do: whether price fits the bars by itself, the lines the
+/// scales draw across the chart, and the way back out of a scale you have
+/// stretched into uselessness.
+///
+/// Here because the price scale's own options were only ever reachable by
+/// right-clicking the strip of prices down the right-hand edge, which is a menu
+/// nobody opens unless they already suspect it is there. That menu stays as it
+/// was: these rows drive the same window actions, so the tick in the menu and
+/// the switch here cannot come to different conclusions.
+fn scales_group(window: &Rc<Window>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::new();
+    group.set_title("Scales");
+    // The gestures, which are otherwise something you either know or do not:
+    // nothing on the chart says the prices down the side can be dragged.
+    group.set_description(Some(
+        "Drag the price scale to stretch it, the time scale to squeeze time. \
+         Double-click either to put it back.",
+    ));
+
+    let auto = adw::ActionRow::new();
+    auto.set_title("Auto scale price");
+    auto.set_subtitle(
+        "Fits the visible bars vertically. Turn it off to drag the chart up and down",
+    );
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(window.focused_pane().view.price_auto());
+    let window_for_auto = window.clone();
+    switch.connect_state_set(move |_, on| {
+        // The action toggles rather than taking a value, so it is activated
+        // only when the chart is not already the way the switch now reads.
+        //
+        // Spelled out through WidgetExt because an application window is an
+        // action group in its own right, and that one holds the window's own
+        // actions — it knows nothing of the "chart." group inserted on it.
+        if window_for_auto.focused_pane().view.price_auto() != on {
+            let _ = gtk::prelude::WidgetExt::activate_action(
+                &window_for_auto.window,
+                "chart.auto-scale",
+                None,
+            );
+        }
+        glib::Propagation::Proceed
+    });
+    auto.add_suffix(&switch);
+    auto.set_activatable_widget(Some(&switch));
+    group.add(&auto);
+
+    let grid = adw::ActionRow::new();
+    grid.set_title("Gridlines");
+    grid.set_subtitle("The scales and their labels stay either way");
+    let switch = gtk::Switch::new();
+    switch.set_valign(gtk::Align::Center);
+    switch.set_active(window.show_grid());
+    let window_for_grid = window.clone();
+    switch.connect_state_set(move |_, on| {
+        window_for_grid.set_show_grid(on);
+        glib::Propagation::Proceed
+    });
+    grid.add_suffix(&switch);
+    grid.set_activatable_widget(Some(&switch));
+    group.add(&grid);
+
+    let reset = adw::ActionRow::new();
+    reset.set_title("Reset chart");
+    reset.set_subtitle("Both scales back to how the chart opened, at the latest bars");
+    let button = gtk::Button::with_label("Reset");
+    button.set_valign(gtk::Align::Center);
+    button.set_tooltip_text(Some(&shortcuts::tooltip("Reset chart", "chart.reset-view")));
+    let window_for_reset = window.clone();
+    button.connect_clicked(move |_| {
+        let _ = gtk::prelude::WidgetExt::activate_action(
+            &window_for_reset.window,
+            "chart.reset-view",
+            None,
+        );
+    });
+    reset.add_suffix(&button);
+    reset.set_activatable_widget(Some(&button));
+    group.add(&reset);
 
     group
 }
