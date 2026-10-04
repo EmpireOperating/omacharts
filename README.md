@@ -2,7 +2,10 @@
 
 Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
-![Omacharts](doc/screenshot.png)
+<p align="center">
+  <img src="doc/screenshot.png" width="79%" align="top" alt="Omacharts">
+  <img src="doc/bar-widget.png" width="18%" align="top" alt="The Omarchy bar widget">
+</p>
 
 ## Features
 
