@@ -465,6 +465,40 @@ bars carry their direction again, in the "hollow" scheme
 command: it does not remember the scheme that was in use, so putting the colour
 back lands on the default rather than on the palette you had picked.
 
+## The widget in the Omarchy bar
+
+The bar widget is a plugin folder plus an entry in the shell's layout. The
+switch in Preferences writes both, and so does this:
+
+```
+$ omacharts plugin status
+not in the bar; it would go in /home/you/.config/omarchy/plugins/jorgemanrubia.omacharts
+  [exit 0]
+
+$ omacharts plugin install
+installed in the bar, in /home/you/.config/omarchy/plugins/jorgemanrubia.omacharts
+  [exit 0]
+```
+
+`install` on a widget that is already there brings it up to date rather than
+writing it again, which matters because the widget is installed once and then
+never touched: without that, the bar keeps running whichever version shipped
+the day the switch was flicked.
+
+`uninstall` is idempotent, and a desktop with no Omarchy shell is reported
+rather than refused — having no bar is a fact about the machine, not a command
+that went wrong. Both exit 0:
+
+```
+$ omacharts plugin uninstall
+taken out of the bar
+  [exit 0]
+
+$ omacharts plugin uninstall
+not in the bar, so there was nothing to remove
+  [exit 0]
+```
+
 ## The cached market data
 
 Bars are cached on disk and pruned in the background back under a limit:
@@ -609,6 +643,7 @@ story, and adding a manifest would be a second thing to maintain for nothing.
 | `chart` | the charts inside a chartbook |
 | `config` | stored preferences |
 | `cache` | the cached market data |
+| `plugin` | the widget in the Omarchy bar |
 | `skill` | the agent skill, installed only when asked |
 
 `omacharts <group> --help` and `omacharts <group> <command> --help` both work,

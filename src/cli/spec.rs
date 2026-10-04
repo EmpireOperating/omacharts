@@ -711,6 +711,45 @@ pub const SURFACE: &[Noun] = &[
         ],
     },
     Noun {
+        name: "plugin",
+        about: "The Omacharts widget in the Omarchy bar",
+        verbs: &[
+            Verb {
+                name: "status",
+                about: "Whether the widget is in the bar, and the folder it lives in",
+                args: &[],
+                flags: &[],
+                example: "omacharts plugin status",
+                json: true,
+                // Like the skill verbs: this reaches into ~/.config/omarchy,
+                // which is neither the database nor the arrangement, so a
+                // window that is open has nothing to catch up on.
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "install",
+                about: "Write the widget and add it to the bar, or bring an installed one up to date",
+                args: &[],
+                flags: &[],
+                example: "omacharts plugin install",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "uninstall",
+                about: "Take the widget out of the bar and remove its folder",
+                args: &[],
+                flags: &[],
+                example: "omacharts plugin uninstall",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+        ],
+    },
+    Noun {
         name: "cache",
         about: "The cached market data",
         verbs: &[

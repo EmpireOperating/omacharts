@@ -137,6 +137,10 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "set") => config_set(store, m, json),
         ("config", "bars") => config_bars(store, m, json),
 
+        ("plugin", "status") => plugin_status(json),
+        ("plugin", "install") => plugin_install(json),
+        ("plugin", "uninstall") => plugin_uninstall(json),
+
         ("cache", "status") => cache_status(store, json),
         ("cache", "clear") => cache_clear(store, json),
         ("cache", "limit") => cache_limit(store, m, json),
@@ -1968,6 +1972,81 @@ fn spell_bars(mono: bool) -> &'static str {
         true => "monochrome",
         false => "coloured",
     }
+}
+
+/// The widget in the Omarchy bar.
+///
+/// These three reach into `~/.config/omarchy` rather than the database or the
+/// arrangement, which is why they neither flush nor refresh a window that is
+/// open, and why a desktop with no bar is reported rather than refused: having
+/// no Omarchy shell is a fact about the machine, not a command that went
+/// wrong. The switch in Preferences writes the same two things.
+fn plugin_status(as_json: bool) -> Result<String, Fault> {
+    let home = crate::store::home();
+    let where_at = crate::bar_plugin::location(&home);
+    let at = where_at.display();
+    let (available, installed) =
+        (crate::bar_plugin::available(&home), crate::bar_plugin::installed(&home));
+    match as_json {
+        true => Ok(format!(
+            "{}\n",
+            json!({
+                "id": crate::bar_plugin::PLUGIN_ID,
+                "omarchy": available,
+                "installed": installed,
+                "path": where_at,
+            })
+        )),
+        false => Ok(match (available, installed) {
+            (false, _) => format!("no Omarchy bar on this desktop; nothing in {at}\n"),
+            (true, true) => format!("in the bar, from {at}\n"),
+            (true, false) => format!("not in the bar; it would go in {at}\n"),
+        }),
+    }
+}
+
+fn plugin_install(as_json: bool) -> Result<String, Fault> {
+    let home = crate::store::home();
+    if !crate::bar_plugin::available(&home) {
+        return said(
+            as_json,
+            json!({"omarchy": false, "installed": false}),
+            "no Omarchy bar on this desktop, so there is nowhere to put the widget".to_string(),
+        );
+    }
+    // Already in the bar means bring it up to date rather than write it again:
+    // a widget installed once and never touched runs whichever version shipped
+    // the day the switch was flicked.
+    let already = crate::bar_plugin::installed(&home);
+    let done = match already {
+        true => crate::bar_plugin::refresh(&home),
+        false => crate::bar_plugin::install(&home),
+    };
+    done.map_err(|e| Fault::new(super::EXIT_ERROR, e))?;
+    let at = crate::bar_plugin::location(&home);
+    said(
+        as_json,
+        json!({"omarchy": true, "installed": true, "updated": already, "path": at}),
+        match already {
+            true => format!("already in the bar; brought it up to date in {}", at.display()),
+            false => format!("installed in the bar, in {}", at.display()),
+        },
+    )
+}
+
+fn plugin_uninstall(as_json: bool) -> Result<String, Fault> {
+    let home = crate::store::home();
+    // Idempotent on purpose: a script that takes the widget out should not
+    // have to ask first, and "it was already gone" is the outcome it wanted.
+    if !crate::bar_plugin::installed(&home) {
+        return said(
+            as_json,
+            json!({"installed": false, "removed": false}),
+            "not in the bar, so there was nothing to remove".to_string(),
+        );
+    }
+    crate::bar_plugin::remove(&home).map_err(|e| Fault::new(super::EXIT_ERROR, e))?;
+    said(as_json, json!({"installed": false, "removed": true}), "taken out of the bar".to_string())
 }
 
 fn cache_status(store: &Store, as_json: bool) -> Result<String, Fault> {

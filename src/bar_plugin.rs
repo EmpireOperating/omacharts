@@ -21,6 +21,14 @@ fn plugins_dir(home: &Path) -> PathBuf {
     home.join(".config/omarchy/plugins")
 }
 
+/// The folder the widget is written to.
+///
+/// Public so `plugin status` can say where it looked, which is most of what
+/// makes that command worth typing when the answer is "not installed".
+pub fn location(home: &Path) -> PathBuf {
+    plugins_dir(home).join(PLUGIN_ID)
+}
+
 /// Tell the bar widget the watchlist changed.
 ///
 /// Fire and forget: the widget may not be installed, the shell may not be
@@ -43,7 +51,7 @@ pub fn available(home: &Path) -> bool {
 
 /// Is the widget installed and in the bar?
 pub fn installed(home: &Path) -> bool {
-    if !plugins_dir(home).join(PLUGIN_ID).join("manifest.json").is_file() {
+    if !location(home).join("manifest.json").is_file() {
         return false;
     }
     std::fs::read_to_string(shell_config(home))
@@ -70,7 +78,7 @@ const FILES: &[(&str, &str)] = &[
 
 /// Write the plugin folder and add it to the bar.
 pub fn install(home: &Path) -> Result<(), String> {
-    let target = plugins_dir(home).join(PLUGIN_ID);
+    let target = location(home);
     // Replaced rather than merged: a file we stopped shipping left behind is
     // a file the shell will still load.
     if target.exists() {
@@ -98,7 +106,7 @@ pub fn refresh(home: &Path) -> Result<(), String> {
     if !installed(home) {
         return Ok(());
     }
-    let target = plugins_dir(home).join(PLUGIN_ID);
+    let target = location(home);
     let mut changed = false;
     for (name, contents) in FILES {
         let path = target.join(name);
@@ -132,7 +140,7 @@ fn reload_plugins() {
 /// Take it out of the bar and remove the folder.
 pub fn remove(home: &Path) -> Result<(), String> {
     edit_shell(home, remove_from_layout)?;
-    let target = plugins_dir(home).join(PLUGIN_ID);
+    let target = location(home);
     if target.exists() {
         std::fs::remove_dir_all(&target).map_err(|e| format!("could not remove it: {e}"))?;
     }
