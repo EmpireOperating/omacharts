@@ -6,10 +6,10 @@
 //! actually traded squashed into a corner.
 //!
 //! So the chart can ask for regular hours only. The window is the US cash
-//! session in New York, which is what "RTH" means for everything this app
-//! charts — US equities, the index futures that track them, and the indexes
-//! themselves. Instruments that genuinely trade around the clock are left
-//! alone, because filtering them would only throw data away.
+//! session in New York, which is what "RTH" means for most of what this app
+//! charts — US equities, the index futures that track them, and the US
+//! indexes themselves. Instruments that keep other hours, or no hours at all,
+//! are left alone, because filtering them would only throw data away.
 
 use chrono::{Datelike, TimeZone, Timelike, Weekday};
 use chrono_tz::America::New_York;
@@ -58,8 +58,19 @@ const CLOSE: u32 = 16 * 60;
 ///
 /// FX and crypto have no cash session; neither does anything listed outside
 /// the US, whose hours are not New York's.
+///
+/// A foreign listing says so with its suffix. An index never carries one, so
+/// it says so with its currency instead: the DAX's session is 09:00-17:30 in
+/// Frankfurt and the Nikkei's has closed before New York opens. Holding those
+/// to 09:30-16:00 in New York keeps two hours of the DAX's day and none at
+/// all of the Nikkei's.
 pub fn has_regular_hours(instrument: &Instrument) -> bool {
     if instrument.suffix.is_some() {
+        return false;
+    }
+    // Unknown currency is treated as dollars: it is what a ticker typed into
+    // the search field with nothing behind it turns out to be.
+    if !matches!(instrument.currency.as_deref(), None | Some("USD")) {
         return false;
     }
     matches!(
@@ -100,6 +111,8 @@ pub fn in_regular_hours(ts: i64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use chrono_tz::Asia::Tokyo;
+
     use super::*;
 
     fn instrument(kind: InstrumentKind, suffix: Option<&str>) -> Instrument {
@@ -114,6 +127,11 @@ mod tests {
             overrides: Vec::new(),
             exchange: None,
         }
+    }
+
+    /// The same instrument, quoted somewhere in particular.
+    fn priced_in(kind: InstrumentKind, currency: &str) -> Instrument {
+        Instrument { currency: Some(currency.into()), ..instrument(kind, None) }
     }
 
     fn bar(ts: i64) -> Bar {
@@ -210,6 +228,38 @@ mod tests {
         let madrid = instrument(InstrumentKind::Equity, Some("MC"));
         assert!(!has_regular_hours(&madrid));
         assert_eq!(filter(&bars, Session::Regular, &madrid, true).len(), bars.len());
+    }
+
+    #[test]
+    fn an_index_quoted_abroad_keeps_its_own_hours() {
+        // The Nikkei's whole session is overnight in New York, so holding it
+        // to the cash session there would leave nothing on the chart at all.
+        let nikkei = priced_in(InstrumentKind::Index, "JPY");
+        assert!(!has_regular_hours(&nikkei));
+
+        let bars: Vec<Bar> = (9..15)
+            .map(|h| bar(Tokyo.with_ymd_and_hms(2024, 3, 13, h, 0, 0).single().unwrap().timestamp()))
+            .collect();
+        assert!(!bars.iter().any(|b| in_regular_hours(b.ts)), "the fixture should be overnight");
+        assert_eq!(filter(&bars, Session::Regular, &nikkei, true).len(), bars.len());
+
+        // The DAX fares differently and no better: Frankfurt's 09:00-17:30 and
+        // New York's 09:30-16:00 overlap for about two hours, so filtering
+        // keeps a quarter of the day and calls it the session.
+        let dax = priced_in(InstrumentKind::Index, "EUR");
+        assert!(!has_regular_hours(&dax));
+    }
+
+    #[test]
+    fn a_dollar_index_still_has_a_cash_session() {
+        // The S&P really is on New York hours, and so is a ticker typed into
+        // the search field with no listing behind it to say otherwise.
+        assert!(has_regular_hours(&priced_in(InstrumentKind::Index, "USD")));
+        assert!(has_regular_hours(&instrument(InstrumentKind::Equity, None)));
+
+        let bars = vec![bar(wednesday_at(4, 0)), bar(wednesday_at(12, 0))];
+        let spx = priced_in(InstrumentKind::Index, "USD");
+        assert_eq!(filter(&bars, Session::Regular, &spx, true).len(), 1);
     }
 
     #[test]
