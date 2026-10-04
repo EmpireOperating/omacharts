@@ -33,3 +33,82 @@ jobs:
             omacharts-*-x86_64-linux.tar.gz
             omacharts-*-x86_64-linux.tar.gz.sha256
           generate_release_notes: true
+
+  # The version appears in three places that a tag cannot float: the README's
+  # download line names the file, and the PKGBUILD carries the version and the
+  # digest of the tarball GitHub builds for the tag. The digest can only be
+  # taken once the tag exists, which is why this runs here rather than before.
+  sync:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Write the new version into the README and the PKGBUILD
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
+          digest=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+          test -n "$digest"
+
+          sed -i -E "s|omacharts-[0-9]+\.[0-9]+\.[0-9]+-1-x86_64\.pkg\.tar\.zst|omacharts-${version}-1-x86_64.pkg.tar.zst|g" README.md
+          sed -i -E "s|^pkgver=.*|pkgver=${version}|" packaging/aur/PKGBUILD
+          sed -i -E "s|^sha256sums=.*|sha256sums=('${digest}')|" packaging/aur/PKGBUILD
+
+          git diff --stat
+      - name: Commit it back
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo "Nothing to change — the tag was cut with the version already written."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "Write ${GITHUB_REF_NAME} into the README and the PKGBUILD
+
+          Done by the release workflow: the download line names the file and
+          the PKGBUILD carries the version and the tarball's digest, and none
+          of the three can be floated by the tag."
+          git push origin main
+
+  # The package people actually install, built the way the PKGBUILD says and
+  # attached to the release. After `sync`, so it uses the PKGBUILD carrying
+  # this tag's version and digest — which also means a release that gets this
+  # far has proved the PKGBUILD works against the tarball GitHub serves.
+  package:
+    needs: sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Dependencies
+        run: pacman -Syu --noconfirm git rust gtk4 libadwaita github-cli
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Build the package
+        run: |
+          set -euo pipefail
+          # makepkg refuses to run as root, which is all a container has.
+          useradd -m builder
+          cp packaging/aur/PKGBUILD /home/builder/
+          chown -R builder:builder /home/builder
+          su builder -c 'cd ~ && makepkg --noconfirm'
+          mv /home/builder/omacharts-*-x86_64.pkg.tar.zst . 2>/dev/null || true
+          ls -l omacharts-*.pkg.tar.zst
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The debug package is a by-product nobody installs.
+          gh release upload "$GITHUB_REF_NAME" \
+            $(ls omacharts-*-x86_64.pkg.tar.zst | grep -v -- '-debug-') --clobber

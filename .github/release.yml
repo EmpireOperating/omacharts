@@ -1,0 +1,16 @@
+# How GitHub groups the notes it generates for a release. Without this every
+# merged change lands in one undifferentiated list, which is the difference
+# between notes somebody reads and notes somebody scrolls past.
+changelog:
+  exclude:
+    labels:
+      - chore
+    authors:
+      - github-actions[bot]
+  categories:
+    - title: Added
+      labels: [feature, enhancement]
+    - title: Fixed
+      labels: [bug, fix]
+    - title: Changed
+      labels: ['*']
