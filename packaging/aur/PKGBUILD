@@ -2,7 +2,7 @@
 pkgname=omacharts
 pkgver=0.1.0
 pkgrel=1
-pkgdesc='Fast, beautiful market charts for the Linux desktop'
+pkgdesc='Fast, beautiful market charts for Omarchy'
 arch=('x86_64' 'aarch64')
 url='https://github.com/jorgemanrubia/omacharts'
 license=('MIT')

@@ -1,7 +1,7 @@
 {
   "name": "omacharts",
   "version": "0.1.0",
-  "description": "Drive Omacharts, the Linux desktop market-charting app, from its CLI: put symbols on screen, build and rearrange chart layouts, and manage watchlists.",
+  "description": "Drive Omacharts, the market-charting app for Omarchy, from its CLI: put symbols on screen, build and rearrange chart layouts, and manage watchlists.",
   "author": {
     "name": "Jorge Manrubia",
     "url": "https://github.com/jorgemanrubia"

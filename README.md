@@ -1,20 +1,16 @@
 # Omacharts
 
-Fast, beautiful market charts for the Linux desktop.
+Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 ![Omacharts](doc/screenshot.png)
-
-For looking at charts quickly, at a high level — lots of symbols, higher
-timeframes, nothing in the way of the drawing. Not a trading tool: no orders,
-no broker, no P&L.
 
 ## Features
 
 - **Fast.** Launches in under 200ms and keeps every series it has fetched, so
   arrowing down a watchlist redraws instantly rather than loading.
-- **It wears your theme.** Follows the Omarchy desktop theme as you change it —
+- **It wears your theme.** Follows the Omarchy desktop theme as you change it,
   and generates an indicator palette for whichever theme is active, so overlays
-  come out distinguishable, legible against the candles, and harmonious with
+  come out distinguishable, legible against the candles, and in keeping with
   everything else on screen. Any of the 22 themes, including the awkward ones.
 - **Tiled charts.** Split horizontally or vertically, as deep as you like. Each
   chart keeps its own symbol, resolution, indicators and settings.
@@ -22,10 +18,13 @@ no broker, no P&L.
   and it stays where you left it.
 - **Keyboard first.** Type a letter to find a symbol, a number to set a
   resolution.
-- **Indicators** — moving averages, VWAP with bands, volume, volume profile,
-  RSI, ATR — each in its own resizable strip.
+- **Indicators.** Moving averages, VWAP with bands, volume, volume profile,
+  RSI and ATR, each in its own resizable strip.
 - **A bar widget** for the Omarchy bar: your watchlist with sparklines, live,
   still there after the window closes.
+- **Agent ready.** A rich CLI covers everything the window does, and says what
+  it can do in a form a script or an agent can read. Commands land in a window
+  that is already open.
 
 ## Installing
 
@@ -40,15 +39,13 @@ cargo build --release
 
 ## Data
 
-Yahoo Finance's public endpoint — no account, no key — cached locally in
+Yahoo Finance's public endpoint, no account or key needed, cached locally in
 SQLite. Prices are delayed about 15 minutes, which is invisible on the
 timeframes this is built for. Not affiliated with Yahoo.
 
 ## Known limits
 
-The symbol inventory is a curated few hundred instruments compiled into the
-binary; search will not find anything outside it. A full inventory built from
-exchange listings is planned. Futures are continuous contracts only.
+Futures are continuous contracts only.
 
 ## Licence
 
@@ -56,7 +53,7 @@ MIT. See [LICENSE](LICENSE).
 
 ## From a terminal
 
-Everything the window can do, `omacharts` can do from a command line — and a
+Everything the window can do, `omacharts` can do from a command line, and a
 command takes effect in a window that is already open, straight away.
 
 ```
@@ -70,7 +67,7 @@ command surface in a form a script can read.
 ## From Claude
 
 Because the whole command surface is machine-readable, an agent can drive this
-app as well as a person can — it just has to know the app is there. Omacharts
+app as well as a person can. It just has to know the app is there, so Omacharts
 ships a skill that makes Claude reach for it when you say "what's semis doing"
 or "set me up for the open", from anywhere on the machine.
 
@@ -89,6 +86,6 @@ omacharts skill install
 
 Both are opt-in and nothing installs either one for you: putting a charting
 app on your machine is not an agreement to have your agent's configuration
-written into. `omacharts skill uninstall` takes it back out, and
-`omacharts skill status` says where it is. See
+written into. `omacharts skill --help` has the rest: `uninstall` takes it
+back out, and `status` says where it is. See
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).

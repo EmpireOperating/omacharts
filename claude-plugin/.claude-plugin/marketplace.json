@@ -10,7 +10,7 @@
     {
       "name": "omacharts",
       "source": "./",
-      "description": "Drive Omacharts, the Linux desktop market-charting app, from its CLI: put symbols on screen, build and rearrange chart layouts, and manage watchlists.",
+      "description": "Drive Omacharts, the market-charting app for Omarchy, from its CLI: put symbols on screen, build and rearrange chart layouts, and manage watchlists.",
       "category": "productivity",
       "keywords": ["charts", "markets", "finance", "omacharts", "omarchy"],
       "relevance": {
