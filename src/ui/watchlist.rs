@@ -178,6 +178,29 @@ enum RowKind {
     },
 }
 
+impl RowKind {
+    fn section_id(&self) -> i64 {
+        match self {
+            RowKind::Header { section_id } | RowKind::Entry { section_id, .. } => *section_id,
+        }
+    }
+}
+
+/// Which section a new symbol belongs in.
+///
+/// Beside whatever is highlighted. The rail is one list of several sections,
+/// so adding always to the root puts the symbol at the top of the rail, a long
+/// way from the Energy symbol you were looking at when you asked for it.
+/// Section titles are rows like any other and carry their own section, which
+/// is what makes highlighting a title and adding put the symbol inside that
+/// section rather than above it.
+///
+/// `sections` is the section each row belongs to, in list order. Nothing
+/// highlighted leaves nothing to infer from, so it falls to the root.
+fn section_for_new_symbol(sections: &[i64], selected: Option<usize>, root: i64) -> i64 {
+    selected.and_then(|at| sections.get(at)).copied().unwrap_or(root)
+}
+
 pub struct Watchlist {
     pub widget: gtk::Box,
     list: gtk::ListBox,
@@ -202,11 +225,33 @@ pub struct Watchlist {
     active: Cell<i64>,
     /// Names the watchlist on screen and offers the rest.
     switcher: gtk::MenuButton,
+    /// The empty state's first offer, when that is all the rail holds.
+    /// Somewhere for the keyboard to land on a list with no rows in it.
+    empty_focus: RefCell<Option<gtk::Button>>,
     /// Told whenever the rail starts showing a different watchlist, so the
     /// window can write the choice down against the chartbook it belongs to.
     /// One hook for every way of switching, because a second route to the
     /// same state is a second route that can forget to save.
     on_switch: RefCell<Option<Rc<dyn Fn()>>>,
+}
+
+/// The rail's own New keys, for saying so where somebody is looking for them.
+///
+/// Neither is in the shortcuts table, and for different reasons. Ctrl+N is
+/// there as the window's new-chartbook and means a symbol only while the
+/// keyboard is in the rail. Ctrl+Shift+N is not there at all, because an
+/// application accelerator is owned everywhere, and taking a key from the
+/// whole app to serve one list is not a trade worth making.
+const NEW_SYMBOL_ACCEL: &str = "<Ctrl>n";
+const NEW_SECTION_ACCEL: &str = "<Ctrl><Shift>n";
+
+/// An accelerator in the desktop's own words — "Ctrl+N" here, something else
+/// on a machine set up differently. `shortcuts::label` does this from the
+/// table; these two keys are not in it.
+fn key_label(accel: &str) -> Option<String> {
+    let (key, mods) = gtk::accelerator_parse(accel)?;
+    let label = gtk::accelerator_get_label(key, mods);
+    (!label.is_empty()).then(|| label.to_string())
 }
 
 const SETTING_COLUMNS: &str = "watchlist_columns";
@@ -301,6 +346,7 @@ impl Watchlist {
             link_group: Cell::new(LinkGroup::None),
             active: Cell::new(active),
             switcher: switcher.clone(),
+            empty_focus: RefCell::new(None),
             on_switch: RefCell::new(None),
         });
 
@@ -313,10 +359,7 @@ impl Watchlist {
         add_symbol.set_tooltip_text(Some("Add a symbol"));
         add_symbol.add_css_class("flat");
         let this = watchlist.clone();
-        add_symbol.connect_clicked(move |_| {
-            let root = this.store.root_section(this.active.get());
-            this.add_symbol_to(root);
-        });
+        add_symbol.connect_clicked(move |_| this.add_symbol());
         actions.append(&add_symbol);
 
         let add_section = gtk::Button::from_icon_name("folder-new-symbolic");
@@ -334,6 +377,72 @@ impl Watchlist {
         watchlist.wire_switcher();
         watchlist.rebuild();
         watchlist
+    }
+
+    /// What a watchlist with nothing in it says for itself.
+    ///
+    /// Common rather than rare now that there can be several watchlists:
+    /// making one lands you here, so this is the first thing somebody sees
+    /// after creating one. Quiet enough to belong in a rail that hides its
+    /// own buttons until you reach for them — muted text and two links, no
+    /// card and no illustration — but not so quiet that a new watchlist looks
+    /// like a column that failed to draw.
+    fn empty_state(self: &Rc<Self>) -> gtk::Box {
+        let state = gtk::Box::new(gtk::Orientation::Vertical, 10);
+        state.set_halign(gtk::Align::Center);
+        // Above centre rather than on it: centred in a tall rail it reads as
+        // a dialog, and at the top it reads as a row that did not arrive.
+        state.set_valign(gtk::Align::Center);
+        state.set_margin_bottom(72);
+        state.set_margin_start(18);
+        state.set_margin_end(18);
+
+        let title = gtk::Label::new(Some("Nothing on this watchlist yet"));
+        // Adwaita's own muted colour rather than an opacity of ours: half of
+        // a dark label on white is far quieter than half of a light one on
+        // black, and this has to read on both.
+        title.add_css_class("dim-label");
+        title.set_wrap(true);
+        title.set_justify(gtk::Justification::Center);
+        state.append(&title);
+
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        actions.set_halign(gtk::Align::Center);
+
+        let symbol = gtk::Button::with_label("Add a symbol");
+        symbol.add_css_class("flat");
+        symbol.add_css_class("subtle-link");
+        symbol.add_css_class("rail-empty-action");
+        let this = self.clone();
+        symbol.connect_clicked(move |_| this.add_symbol());
+        actions.append(&symbol);
+        *self.empty_focus.borrow_mut() = Some(symbol.clone());
+
+        let section = gtk::Button::with_label("Add a section");
+        section.add_css_class("flat");
+        section.add_css_class("subtle-link");
+        section.add_css_class("rail-empty-action");
+        let this = self.clone();
+        section.connect_clicked(move |button| this.prompt_new_section(button));
+        actions.append(&section);
+        state.append(&actions);
+
+        // Somebody looking at an empty rail is exactly the person who wants
+        // to know the keys, and there is nowhere better in the app to say so.
+        if let (Some(for_symbol), Some(for_section)) =
+            (key_label(NEW_SYMBOL_ACCEL), key_label(NEW_SECTION_ACCEL))
+        {
+            let keys = gtk::Label::new(Some(&format!(
+                "{for_symbol} adds a symbol\n{for_section} adds a section"
+            )));
+            keys.add_css_class("dim-label");
+            keys.add_css_class("caption");
+            keys.set_wrap(true);
+            keys.set_justify(gtk::Justification::Center);
+            state.append(&keys);
+        }
+
+        state
     }
 
     /// Which watchlist the rail is showing.
@@ -474,6 +583,11 @@ impl Watchlist {
         if let Some(row) = row {
             self.list.select_row(Some(&row));
             row.grab_focus();
+        } else if let Some(offer) = self.empty_focus.borrow().as_ref() {
+            // With no rows there is nothing to land on, and a rail the
+            // keyboard cannot reach is a rail whose shortcuts do not work —
+            // including the two the empty state has just advertised.
+            offer.grab_focus();
         } else {
             self.list.grab_focus();
         }
@@ -579,6 +693,30 @@ impl Watchlist {
             glib::Propagation::Stop
         });
         self.list.add_controller(keys);
+
+        // New, for the two things a rail is made of: plain for a symbol,
+        // Shift for the section that holds them.
+        //
+        // Only the section half is here. Ctrl+N is an application accelerator
+        // and those are dispatched above the focused widget, so the key never
+        // reaches the rail at all — the window asks `add_symbol_if_focused`
+        // instead. Nothing claims Ctrl+Shift+N, so this one can simply be
+        // listened for. On the rail's own widget rather than on the list,
+        // because the keyboard being anywhere in the rail is the gate, and an
+        // event arriving here is that gate rather than a second reading of it.
+        let keys = gtk::EventControllerKey::new();
+        let this = self.clone();
+        keys.connect_key_pressed(move |_, key, _, state| {
+            let wanted = gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK;
+            if !matches!(key, gtk::gdk::Key::n | gtk::gdk::Key::N)
+                || !state.contains(wanted)
+            {
+                return glib::Propagation::Proceed;
+            }
+            this.prompt_new_section(&this.list);
+            glib::Propagation::Stop
+        });
+        self.widget.add_controller(keys);
     }
 
     /// Remove whatever is highlighted, and leave the highlight where it was so
@@ -707,7 +845,17 @@ impl Watchlist {
                 });
             }
         }
+        let empty = kinds.is_empty();
         *self.rows.borrow_mut() = kinds;
+
+        // A placeholder is a child of the list like any other, so clearing the
+        // rows above took the last one with it. Built here rather than kept
+        // around because an empty rail is the only time anybody sees it.
+        if empty {
+            self.list.set_placeholder(Some(&self.empty_state()));
+        } else {
+            *self.empty_focus.borrow_mut() = None;
+        }
 
         if let Some(index) = selected {
             if let Some(row) = self.list.row_at_index(index) {
@@ -1261,6 +1409,29 @@ impl Watchlist {
         dialog.present(Some(&self.widget));
     }
 
+    /// Add a symbol beside the highlight: the rail's own New.
+    pub fn add_symbol(self: &Rc<Self>) {
+        let root = self.store.root_section(self.active.get());
+        let selected = self.list.selected_row().map(|row| row.index().max(0) as usize);
+        let sections: Vec<i64> = self.rows.borrow().iter().map(RowKind::section_id).collect();
+        self.add_symbol_to(section_for_new_symbol(&sections, selected, root));
+    }
+
+    /// The same, for a key the window owns.
+    ///
+    /// `false` when the keyboard is not in the rail, so Ctrl+N goes on to make
+    /// a chartbook. The decision belongs here rather than in a key controller
+    /// on the list: Ctrl+N is an application accelerator, and those are
+    /// dispatched above the focused widget, so a controller on the rail would
+    /// never be offered the key at all.
+    pub fn add_symbol_if_focused(self: &Rc<Self>) -> bool {
+        if !self.has_focus() {
+            return false;
+        }
+        self.add_symbol();
+        true
+    }
+
     /// Adding uses the same picker as everywhere else.
     pub fn add_symbol_to(self: &Rc<Self>, section_id: i64) {
         let section = self
@@ -1268,18 +1439,34 @@ impl Watchlist {
             .watchlist_sections(self.active.get())
             .into_iter()
             .find(|s| s.id == section_id);
-        let title = match section {
+        let title = match &section {
             Some(section) if !section.root => format!("Add to {}", section.name),
             _ => "Add to watchlist".to_string(),
         };
+        let folded = section.map(|section| section.collapsed).unwrap_or(false);
         let this = self.clone();
         self.search.present(&self.widget, &title, move |instrument| {
             this.store.add_to_section(section_id, &instrument.symbol, instrument.suffix.as_deref());
+            // Folded, the symbol arrives where nobody can watch it arrive,
+            // which reads as the add having quietly failed.
+            if folded {
+                this.store.set_section_collapsed(section_id, false);
+            }
             this.changed();
+            // Land on what was just added. It goes to the end of its section,
+            // which on a full rail is below the fold.
+            if this.pick(&instrument)
+                && let Some(row) = this.list.selected_row()
+            {
+                row.grab_focus();
+            }
         });
     }
 
-    fn prompt_new_section(self: &Rc<Self>, anchor: &gtk::Button) {
+    /// Anchored to whatever asked for it: the control at the foot of the rail
+    /// when it was clicked, and the list itself when it was a key, so the box
+    /// opens where the person pressing it is already looking.
+    fn prompt_new_section(self: &Rc<Self>, anchor: &impl IsA<gtk::Widget>) {
         let entry = gtk::Entry::new();
         entry.set_placeholder_text(Some("Section name"));
 
@@ -1437,6 +1624,73 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The section each row belongs to, laid out the way `rebuild` lays the
+    /// rail out: every named section's title, then its symbols, with the
+    /// root's symbols carrying no title of their own.
+    fn row_sections(store: &Store, watchlist: i64) -> Vec<i64> {
+        let mut rows = Vec::new();
+        for section in store.watchlist_sections(watchlist) {
+            if !section.root {
+                rows.push(section.id);
+            }
+            rows.extend(section.entries.iter().map(|_| section.id));
+        }
+        rows
+    }
+
+    /// Adding while something is highlighted means adding beside it. Going to
+    /// the root instead put the symbol at the top of the rail, sections away
+    /// from the one it was asked for.
+    #[test]
+    fn a_new_symbol_joins_the_section_the_highlight_is_in() {
+        let store = Store::memory().unwrap();
+        let root = store.root_section(DEFAULT_WATCHLIST);
+        store.add_to_section(root, "SPY", None);
+        let energy = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(energy, "CL", None);
+        store.add_to_section(energy, "NG", None);
+
+        let rows = row_sections(&store, DEFAULT_WATCHLIST);
+        assert_eq!(rows, vec![root, energy, energy, energy], "SPY, the title, CL, NG");
+
+        assert_eq!(section_for_new_symbol(&rows, Some(3), root), energy, "on a symbol");
+        assert_eq!(section_for_new_symbol(&rows, Some(1), root), energy, "on the title");
+        assert_eq!(section_for_new_symbol(&rows, Some(0), root), root, "on a loose symbol");
+    }
+
+    /// Nothing highlighted names no section, and neither does a highlight left
+    /// pointing past the end of a rail that has since grown shorter.
+    #[test]
+    fn with_nothing_highlighted_a_new_symbol_falls_to_the_root() {
+        let store = Store::memory().unwrap();
+        let root = store.root_section(DEFAULT_WATCHLIST);
+        let energy = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(energy, "CL", None);
+
+        let rows = row_sections(&store, DEFAULT_WATCHLIST);
+        assert_eq!(section_for_new_symbol(&rows, None, root), root);
+        assert_eq!(section_for_new_symbol(&rows, Some(99), root), root);
+    }
+
+    /// The other half of "to the end": the store appends within a section, so
+    /// the rail only ever has to choose which section.
+    #[test]
+    fn a_new_symbol_lands_after_the_ones_already_there() {
+        let store = Store::memory().unwrap();
+        let energy = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        for symbol in ["CL", "NG", "BZ"] {
+            store.add_to_section(energy, symbol, None);
+        }
+
+        let section = store
+            .watchlist_sections(DEFAULT_WATCHLIST)
+            .into_iter()
+            .find(|s| s.id == energy)
+            .expect("the section should be there");
+        let symbols: Vec<&str> = section.entries.iter().map(|e| e.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["CL", "NG", "BZ"]);
+    }
 
     /// The symbols move and the name goes with them, which is the whole of
     /// what the menu item promises. They land in the new list's root rather

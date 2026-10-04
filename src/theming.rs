@@ -410,6 +410,12 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .subtle-link:hover { opacity: 1; }
 .subtle-link:disabled { opacity: 0.25; }
 
+/* The two offers an empty rail makes. Buttons, so the keyboard can reach
+   them, but Adwaita draws button text bold and bold is exactly wrong here:
+   they would be the two loudest things in a column that has nothing else in
+   it, which is the opposite of an invitation. */
+.rail-empty-action { font-weight: normal; }
+
 /* Keys read as keys. */
 .keycap {
   font-size: 0.85em;
