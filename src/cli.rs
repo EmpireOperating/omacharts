@@ -362,14 +362,32 @@ pub fn usage() -> String {
     parser::command().render_help().to_string()
 }
 
-/// The window as something a command can refresh, when it is able to be one.
+/// Implemented for `Rc<Window>` rather than for `Window`, so that `&self` is
+/// already the `Rc` the window's own methods are written against — rebuilding
+/// an arrangement builds widgets that hold the window, and a method that does
+/// that cannot be handed a bare reference. The alternative, recovering an `Rc`
+/// from a `&Window`, is a use-after-free waiting to happen.
+impl Live for Rc<crate::ui::Window> {
+    fn flush_workspace(&self) {
+        crate::ui::Window::save_workspace(self);
+    }
+
+    fn reload_workspace(&self) {
+        crate::ui::Window::reload_workspace(self);
+    }
+
+    fn reload_watchlists(&self) {
+        crate::ui::Window::reload_watchlists(self);
+    }
+}
+
+/// The window as something a command can refresh.
 ///
-/// `Window` has to carry three methods for this to return anything — see
-/// [`Live`]. Until it does, a command still runs against the database and
-/// still answers the terminal; what it does not do is redraw what is on
-/// screen, so the rail catches up the next time something touches it.
-pub fn live(_window: &Rc<crate::ui::Window>) -> Option<Box<dyn Live>> {
-    None
+/// An `Option` because the same function is asked in a process that has no
+/// window — there, a command still runs against the database and still answers
+/// the terminal, and there is simply nothing on screen to catch up.
+pub fn live(window: &Rc<crate::ui::Window>) -> Option<Box<dyn Live>> {
+    Some(Box::new(window.clone()))
 }
 
 #[cfg(test)]

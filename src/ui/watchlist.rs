@@ -233,6 +233,10 @@ pub struct Watchlist {
     /// One hook for every way of switching, because a second route to the
     /// same state is a second route that can forget to save.
     on_switch: RefCell<Option<Rc<dyn Fn()>>>,
+    /// Asked which chartbook is using a watchlist, so the switcher can refuse
+    /// one that is spoken for. The chartbooks live in the window; the rail
+    /// only knows how to ask about one list at a time.
+    using: RefCell<Option<Rc<dyn Fn(i64) -> Option<String>>>>,
 }
 
 /// The rail's own New keys, for saying so where somebody is looking for them.
@@ -348,6 +352,7 @@ impl Watchlist {
             switcher: switcher.clone(),
             empty_focus: RefCell::new(None),
             on_switch: RefCell::new(None),
+            using: RefCell::new(None),
         });
 
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -497,6 +502,28 @@ impl Watchlist {
     /// cannot be picked. `None` means the group is free, or is this list's.
     pub fn group_held_by(&self, group: LinkGroup) -> Option<(i64, String)> {
         group_held_by(&self.store, group, self.active.get())
+    }
+
+    /// Answer which chartbook is using a watchlist, for the switcher.
+    ///
+    /// Set by the window, because that is where the chartbooks are. Asked
+    /// while the menu is being built rather than remembered, so a chartbook
+    /// renamed since the last time it opened is named as it is called now.
+    pub fn connect_chartbook_using(&self, using: impl Fn(i64) -> Option<String> + 'static) {
+        *self.using.borrow_mut() = Some(Rc::new(using));
+    }
+
+    /// The chartbook using this watchlist, when it is not this rail's own.
+    ///
+    /// The list on screen belongs to the chartbook on screen by definition, so
+    /// it is never reported as spoken for — not even where a book written
+    /// before one list meant one book still claims it as well.
+    fn chartbook_using(&self, id: i64) -> Option<String> {
+        if id == self.active.get() {
+            return None;
+        }
+        let ask = self.using.borrow().clone();
+        ask.and_then(|ask| ask(id))
     }
 
     /// Join a group, or leave it. Remembered against the watchlist rather
@@ -824,6 +851,42 @@ impl Watchlist {
     pub fn changed(self: &Rc<Self>) {
         self.rebuild();
         crate::bar_plugin::notify_changed();
+    }
+
+    /// The same, for a change made outside this window — a command typed in a
+    /// terminal while the app is open.
+    ///
+    /// Two things `changed` does not have to worry about and this does. The
+    /// list the rail is showing may have been deleted, which would leave an
+    /// empty rail with a dead id behind it. And how far down the rows somebody
+    /// had scrolled is lost by any rebuild, because emptying the list collapses
+    /// the scrollbar's range to nothing on the way through — which is fine when
+    /// the user asked for the change and wrong when it happened somewhere else.
+    pub fn reload(self: &Rc<Self>) {
+        let fell_back = !self.store.watchlist_exists(self.active.get());
+        if fell_back {
+            self.active.set(DEFAULT_WATCHLIST);
+            self.store.set_setting(SETTING_ACTIVE, &DEFAULT_WATCHLIST.to_string());
+        }
+
+        let scroller = self
+            .list
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>();
+        let offset = scroller.as_ref().map(|view| view.vadjustment().value());
+
+        self.changed();
+
+        // Only where the rail is still showing the same list: a fallback is a
+        // different list, and the top of it is where to be.
+        if let (Some(scroller), Some(offset), false) = (scroller, offset, fell_back) {
+            // Once the new rows have been given a size, because an adjustment
+            // clamps to a range that is still the old one.
+            glib::idle_add_local_once(move || scroller.vadjustment().set_value(offset));
+        }
+        if fell_back {
+            self.announce_switch();
+        }
     }
 
     /// Rebuild the whole rail. A few dozen rows, so there is nothing to gain
@@ -1247,6 +1310,22 @@ impl Watchlist {
         let pick = gtk::Button::new();
         pick.add_css_class("flat");
         pick.set_hexpand(true);
+
+        // A watchlist is one chartbook's, so one another book is using is not
+        // on offer — and the row names the book that has it rather than merely
+        // refusing, which would leave nothing to understand. The same two
+        // words the chain's popover uses for a group another list holds, so
+        // the app says "taken, and here is by whom" one way.
+        if let Some(book) = self.chartbook_using(id) {
+            let owner = gtk::Label::new(Some(&book));
+            owner.add_css_class("dim-label");
+            owner.add_css_class("caption");
+            owner.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            content.append(&owner);
+            // The button only: the pencil and the bin act on the watchlist
+            // itself, which is nobody's to begin with.
+            pick.set_sensitive(false);
+        }
         pick.set_child(Some(&content));
 
         let rename = gtk::Entry::new();

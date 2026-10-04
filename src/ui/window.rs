@@ -319,6 +319,66 @@ mod tests {
         assert!(parse_workspace("{}").is_none());
         assert!(parse_workspace(r#"{"books": [], "active": 0}"#).is_none());
     }
+
+    /// A chartbook with nothing in it but the list beside it: enough for the
+    /// questions about who is using which watchlist.
+    fn book(watchlist: Option<i64>) -> Chartbook {
+        Chartbook {
+            name: String::new(),
+            layout: Node::leaf(1),
+            focused: 1,
+            panes: Vec::new(),
+            watchlist,
+            sidebar_shown: None,
+            sidebar_width: None,
+        }
+    }
+
+    /// A watchlist belongs to one chartbook, and the switcher has to be able to
+    /// say which — a row that only refuses leaves nothing to understand.
+    #[test]
+    fn a_watchlist_another_chartbook_is_using_is_spoken_for() {
+        let books = vec![book(Some(7)), book(Some(8))];
+
+        assert_eq!(book_using(&books, 0, 8), Some(1), "the second book has it");
+        assert_eq!(book_using(&books, 1, 7), Some(0), "and the first has the other");
+        assert_eq!(book_using(&books, 0, 9), None, "a list nobody is using is free");
+    }
+
+    /// The list the rail is showing is the active chartbook's by definition, so
+    /// the book on screen is never told its own list is taken — not even where
+    /// a second book claims it as well, which nothing stops a hand-edited
+    /// workspace from saying.
+    #[test]
+    fn a_chartbook_is_never_told_its_own_list_is_in_use() {
+        let books = vec![book(Some(7)), book(Some(7))];
+
+        assert_eq!(book_using(&books, 0, 7), Some(1), "somebody else does claim it");
+        assert_eq!(book_using(&books, 1, 7), Some(0), "whichever way round you ask");
+    }
+
+    /// The default list is the one that cannot be deleted and the one every
+    /// fallback lands on. Letting one chartbook keep it would leave a second
+    /// book with nowhere at all to be.
+    #[test]
+    fn the_default_watchlist_is_every_chartbooks_to_show() {
+        let books = vec![book(Some(DEFAULT_WATCHLIST)), book(Some(DEFAULT_WATCHLIST))];
+
+        assert_eq!(book_using(&books, 1, DEFAULT_WATCHLIST), None);
+        assert_eq!(book_using(&books, 0, DEFAULT_WATCHLIST), None);
+    }
+
+    /// Or the switcher slowly fills with rows held by chartbooks nobody can
+    /// find. The books are the only record of who is using what, so removing
+    /// one is all it takes.
+    #[test]
+    fn removing_a_chartbook_frees_the_watchlist_it_was_using() {
+        let mut books = vec![book(Some(7)), book(Some(8))];
+        assert_eq!(book_using(&books, 0, 8), Some(1));
+
+        books.remove(1);
+        assert_eq!(book_using(&books, 0, 8), None);
+    }
 }
 
 /// Pop a real menu up where the pointer is.
@@ -494,6 +554,30 @@ struct Workspace {
 /// written. A book keeps an empty name until somebody types one.
 fn default_book_name(ordinal: usize) -> String {
     format!("Chartbook {ordinal}")
+}
+
+/// Which chartbook is using `watchlist`, other than the one at `besides`.
+///
+/// A watchlist belongs to one chartbook: two books showing one list would
+/// fight over it, because which list the rail shows is written down against
+/// whichever book was saved last.
+///
+/// A scan of the books rather than an index beside them. There are a handful,
+/// and a second record of who is using what is a second record that can come
+/// to disagree with the books themselves.
+///
+/// The default watchlist is nobody's. It is the one that cannot be deleted and
+/// the one every fallback lands on, so a rule that let one book keep it would
+/// leave a second book with nowhere to be.
+fn book_using(books: &[Chartbook], besides: usize, watchlist: i64) -> Option<usize> {
+    if watchlist == DEFAULT_WATCHLIST {
+        return None;
+    }
+    books
+        .iter()
+        .enumerate()
+        .find(|(at, book)| *at != besides && book.watchlist == Some(watchlist))
+        .map(|(at, _)| at)
 }
 
 /// Read what was written down, in whichever shape it was written.
@@ -677,6 +761,11 @@ impl Window {
             saver.save_soon();
         });
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
+
+        // Which chartbook has a watchlist is a question only the window can
+        // answer, and the switcher is where it gets asked.
+        let books = this.clone();
+        watchlist.connect_chartbook_using(move |id| books.book_using_watchlist(id));
 
         let holder = watchlist.clone();
         watchlist.link_button().set_popover(Some(&this.link_popover(
@@ -1432,7 +1521,11 @@ impl Window {
     ///
     /// The book on screen is the only one that can have changed, so it is
     /// folded back into the list first. Everything else is already data.
-    fn save_workspace(self: &Rc<Self>) {
+    ///
+    /// Public because a command typed in a terminal reads and writes the same
+    /// stored arrangement, and what is on screen is only in memory until this
+    /// runs — see [`crate::cli::Live`].
+    pub fn save_workspace(self: &Rc<Self>) {
         {
             let mut books = self.books.borrow_mut();
             let active = self.active.get().min(books.len().saturating_sub(1));
@@ -1466,6 +1559,51 @@ impl Window {
             return false;
         }
         true
+    }
+
+    /// Read the arrangement back and rebuild from it, after something outside
+    /// the window changed it — a command typed in a terminal.
+    ///
+    /// Anything the window holds that is not written down has to be carried
+    /// across by hand, and there is one such thing: which chart had the window
+    /// to itself. It is carried by position rather than by id, because
+    /// `materialise_book` hands out fresh pane ids every time it runs.
+    pub fn reload_workspace(self: &Rc<Self>) {
+        let filled = self
+            .maximized
+            .get()
+            .and_then(|id| self.layout.borrow().leaves().iter().position(|leaf| *leaf == id));
+        let books = self.books.borrow().clone();
+        let active = self.active.get();
+
+        if !self.restore_workspace() {
+            // An arrangement that cannot be rebuilt leaves the charts alone:
+            // `materialise_book` refuses before it touches a widget, so what is
+            // on screen is still what the window had. Only the list of books it
+            // emptied on the way out has to be put back.
+            *self.books.borrow_mut() = books;
+            self.active.set(active);
+            return;
+        }
+
+        let leaves = self.layout.borrow().leaves();
+        let refilled = filled.filter(|_| leaves.len() > 1).and_then(|at| leaves.get(at).copied());
+        if let Some(id) = refilled {
+            self.maximized.set(Some(id));
+            self.rebuild_layout();
+        }
+        // A command can add or remove a whole chartbook, which is the one
+        // change that shows outside the charts themselves.
+        self.rebuild_book_strip();
+    }
+
+    /// Draw the rail again, after something outside the window changed a
+    /// watchlist.
+    pub fn reload_watchlists(self: &Rc<Self>) {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        if let Some(rail) = rail {
+            rail.reload();
+        }
     }
 
     /// Build a chartbook into widgets, replacing whatever is on screen.
@@ -1553,8 +1691,13 @@ impl Window {
         width: Option<i32>,
     ) {
         let rail = self.watchlist.borrow().as_ref().cloned();
-        if let (Some(rail), Some(id)) = (rail, watchlist) {
-            rail.set_active_watchlist(id);
+        if let Some(rail) = rail {
+            // A book that names no list keeps the one in front of you, which is
+            // what the window's settings left there — but it is still asked for,
+            // so that two books cannot end up on one list by both saying
+            // nothing about it.
+            let wanted = watchlist.unwrap_or_else(|| rail.active_watchlist());
+            rail.set_active_watchlist(self.rail_for_book(wanted));
         }
         self.set_rail_shown(shown.unwrap_or_else(|| self.store.setting_bool(SHOW_WATCHLIST, true)));
         self.want_sidebar_width(width.unwrap_or_else(|| self.stored_sidebar_width()));
@@ -1568,6 +1711,50 @@ impl Window {
         match self.books.borrow().get(index) {
             Some(book) if !book.name.is_empty() => book.name.clone(),
             _ => default_book_name(index + 1),
+        }
+    }
+
+    /// The chartbook using this watchlist, named, if one other than the book on
+    /// screen is.
+    ///
+    /// The book on screen is left out by its position rather than by what it
+    /// says it is using: its stored field is only written when the workspace is
+    /// saved, so between a switch and the next save it still names the list the
+    /// rail has already moved off.
+    fn book_using_watchlist(&self, watchlist: i64) -> Option<String> {
+        let at = book_using(&self.books.borrow(), self.active.get(), watchlist)?;
+        Some(self.book_label(at))
+    }
+
+    /// Which watchlist every chartbook is using, the one on screen included.
+    ///
+    /// For the one question `book_using_watchlist` cannot answer: what a
+    /// chartbook that does not exist yet may be handed. The book on screen is
+    /// read from the rail, for the same reason the other reads it from the
+    /// books — what is written down against it is a save behind.
+    fn watchlists_in_use(&self) -> Vec<i64> {
+        let live = self.watchlist.borrow().as_ref().map(|rail| rail.active_watchlist());
+        let active = self.active.get();
+        self.books
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(at, book)| if at == active { live } else { book.watchlist })
+            .collect()
+    }
+
+    /// Which list a chartbook ends up showing, given the one it asked for.
+    ///
+    /// Two ways of not getting it: the list has been deleted since the book was
+    /// written down, or another chartbook is using it. Both land on the default,
+    /// which is the list that is always there and is never anybody's.
+    fn rail_for_book(&self, wanted: i64) -> i64 {
+        let available =
+            self.store.watchlist_exists(wanted) && self.book_using_watchlist(wanted).is_none();
+        if available {
+            wanted
+        } else {
+            DEFAULT_WATCHLIST
         }
     }
 
@@ -1641,12 +1828,21 @@ impl Window {
     /// the bottom edge of the window is easy to miss entirely.
     pub fn new_chartbook(self: &Rc<Self>) {
         let proposed = default_book_name(self.books.borrow().len() + 1);
-        let lists = self
+        let all = self
             .watchlist
             .borrow()
             .as_ref()
             .map(|rail| rail.watchlists())
             .unwrap_or_default();
+        // A watchlist is one chartbook's, so the ones already spoken for are not
+        // on offer here either — offering one would be offering to take it off
+        // the book that has it.
+        let taken = self.watchlists_in_use();
+        let lists: Vec<(i64, String)> = all
+            .iter()
+            .filter(|(id, _)| *id == DEFAULT_WATCHLIST || !taken.contains(id))
+            .cloned()
+            .collect();
 
         let name = adw::EntryRow::new();
         name.set_title("Name");
@@ -1654,6 +1850,11 @@ impl Window {
 
         let chosen = adw::ComboRow::new();
         chosen.set_title("Watchlist");
+        // Said rather than left to be noticed: a list somebody can see in the
+        // rail and cannot find in this menu needs a reason given.
+        if lists.len() < all.len() {
+            chosen.set_subtitle("Lists other chartbooks are using are not shown");
+        }
         let names: Vec<&str> = lists.iter().map(|(_, name)| name.as_str()).collect();
         chosen.set_model(Some(&gtk::StringList::new(&names)));
         let at = lists.iter().position(|(id, _)| *id == DEFAULT_WATCHLIST).unwrap_or(0);
