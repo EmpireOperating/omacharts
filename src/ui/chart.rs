@@ -1548,7 +1548,12 @@ fn draw_crosshair(
         cr.set_font_size(11.0);
         if let Ok(extents) = cr.text_extents(&label) {
             let w = extents.width() + 10.0;
-            let x = (snapped_x - w / 2.0).clamp(plot_x, plot_x + plot_w - w);
+            // Split a window enough times and the label is wider than the
+            // chart it belongs to, which puts the right edge left of the left
+            // one. `clamp` panics on that, inside a draw callback, which does
+            // not unwind — so the whole app goes rather than one chart drawing
+            // badly for a moment.
+            let x = (snapped_x - w / 2.0).clamp(plot_x, (plot_x + plot_w - w).max(plot_x));
             let y = height - TIME_AXIS_H + 2.0;
             colors::set_source(cr, crosshair);
             cr.rectangle(x, y, w, TIME_AXIS_H - 4.0);
