@@ -2898,12 +2898,28 @@ impl Window {
                     return glib::Propagation::Stop;
                 }
                 // Back to the chart, from wherever the keyboard ended up —
-                // but a dialog gets Escape first. Closing what is open is what
-                // Escape means, and this controller sits on the window, above
-                // everything presented into it.
+                // unless a dialog is open, which is then what Escape closes.
+                //
+                // A dialog normally closes itself and this never runs: the
+                // shortcut that does it sits on the sheet the dialog is drawn
+                // in, so it only ever sees a key on its way up from whatever
+                // inside the dialog holds the keyboard, and the key never
+                // reaches the window at all. Arriving here means the dialog
+                // has not got the keyboard — it never took it, or something
+                // took it back — and the sheet will never hear the key. This
+                // controller is the last thing above it, so the closing is
+                // done here.
                 Key::Escape => {
-                    if this.window.visible_dialog().is_some() {
-                        return glib::Propagation::Proceed;
+                    if let Some(dialog) = this.window.visible_dialog() {
+                        // A pushed page pops rather than taking the dialog
+                        // with it, which is what Escape means inside one.
+                        if let Some(prefs) = dialog.downcast_ref::<adw::PreferencesDialog>() {
+                            if prefs.pop_subpage() {
+                                return glib::Propagation::Stop;
+                            }
+                        }
+                        dialog.close();
+                        return glib::Propagation::Stop;
                     }
                     this.focused_pane().view.area.grab_focus();
                     return glib::Propagation::Stop;

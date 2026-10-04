@@ -35,10 +35,16 @@ pub fn commit_on_ctrl_enter(dialog: &impl IsA<gtk::Widget>, commit: impl Fn() + 
 
 /// Close a dialog from Escape in its search box.
 ///
-/// Everything else here already works: an `AdwDialog` closes itself on
-/// Escape, a popover inside one closes only the popover, and a pushed subpage
-/// pops rather than taking the whole dialog with it. A `GtkSearchEntry` is the
-/// one hole. It claims Escape and emits `stop-search` instead — and then does
+/// Everything else inside a dialog already works: an `AdwDialog` closes itself
+/// on Escape, a popover inside one closes only the popover, and a pushed
+/// subpage pops rather than taking the whole dialog with it. All of that is
+/// the dialog's own shortcut, which sits on the sheet the dialog is drawn in
+/// and so only ever sees a key on its way up from whatever holds the keyboard
+/// inside it — a dialog the keyboard has left hears nothing, which is the
+/// window's problem to catch and not this one's.
+///
+/// A `GtkSearchEntry` is the one hole in here. It claims Escape and emits
+/// `stop-search` instead — and then does
 /// nothing at all with it, not even clearing the text, because the clearing
 /// everyone remembers belongs to `GtkSearchBar` and there is no search bar
 /// here. So Escape in the box is simply dead unless something listens.

@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use omacharts_engine::indicators::{self, Kind, LineStyle, Params, Reset, Stroke};
+use omacharts_engine::indicators::{
+    self, Kind, LineStyle, Params, Reset, Stroke, MAX_PANE_SHARE, MIN_PANE_SHARE,
+};
 use omacharts_engine::theme::ColorChoice;
 use omacharts_engine::{BarStyle, Indicator, Session};
 
@@ -642,6 +644,7 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
         Panel::Subpage(dialog) => {
             let subpage = adw::NavigationPage::new(&toolbar, &indicator.label());
             dialog.push_subpage(&subpage);
+            focus_first_parameter(&page);
         }
         Panel::Add => {
             let modal = adw::Dialog::new();
@@ -698,8 +701,47 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
             });
 
             modal.present(Some(&window.window));
+            focus_first_parameter(&page);
         }
     }
+}
+
+/// Land the keyboard on the first thing you came to change.
+///
+/// A panel opens on its first parameter — the period, usually — so the figure
+/// can be typed straight away rather than reached for. Which control that is
+/// differs by indicator, and GTK's own forward-tab rule finds it without this
+/// having to know: a period for a moving average, an anchor for a VWAP, a
+/// slider for a volume pane. Starting from the page rather than the dialog is
+/// what skips the Cancel button in the header.
+///
+/// It waits for the panel to be on screen, because a row that has not been
+/// mapped yet cannot take the keyboard — the same frame-late lesson as the
+/// sidebar, which cannot be focused until the frame after it is revealed. Once
+/// only: the panel is mapped again every time it is scrolled back into view.
+///
+/// Whatever it lands on that can be typed into has its value selected: the
+/// number already there is a default, and replacing one is quicker than
+/// editing it a character at a time.
+fn focus_first_parameter(page: &adw::PreferencesPage) {
+    let landed = std::cell::Cell::new(false);
+    page.connect_map(move |page| {
+        if landed.replace(true) {
+            return;
+        }
+        if !page.child_focus(gtk::DirectionType::TabForward) {
+            return;
+        }
+        let Some(window) = page.root().and_then(|root| root.downcast::<gtk::Window>().ok()) else {
+            return;
+        };
+        let Some(focus) = gtk::prelude::GtkWindowExt::focus(&window) else {
+            return;
+        };
+        if let Ok(text) = focus.downcast::<gtk::Text>() {
+            text.select_region(0, -1);
+        }
+    });
 }
 
 /// The indicator's own line: colour, weight, pattern.
@@ -1052,21 +1094,22 @@ fn parameters_group(
             for row in rows_rows(window, refresh, id, *rows) {
                 group.add(&row);
             }
-            group.add(&spin_row(
-                window,
-                refresh,
-                id,
-                "Value area %",
-                *value_area * 100.0,
-                10.0,
-                100.0,
-                1.0,
-                move |indicator, value| {
-                    if let Params::VolumeProfile { value_area, .. } = &mut indicator.params {
-                        *value_area = value / 100.0;
-                    }
-                },
-            ));
+            group.add(
+                &percent_row(
+                    window,
+                    refresh,
+                    id,
+                    "Value area %",
+                    *value_area,
+                    0.10,
+                    1.0,
+                    move |indicator, share| {
+                        if let Params::VolumeProfile { value_area, .. } = &mut indicator.params {
+                            *value_area = share;
+                        }
+                    },
+                ),
+            );
         }
     }
     group
@@ -1201,25 +1244,28 @@ fn band_groups(
         shaded.add_suffix(&fill);
         group.add(&shaded);
 
-        // How much of the colour that shading gets. It is a backdrop, so the
-        // range stops well short of opaque.
-        group.add(&spin_row(
-            window,
-            refresh,
-            id,
-            "Shading %",
-            band.alpha() * 100.0,
-            2.0,
-            60.0,
-            1.0,
-            move |indicator, value| {
-                if let Params::Vwap { bands, .. } = &mut indicator.params {
-                    if let Some(band) = bands.get_mut(index) {
-                        band.fill_alpha = Some(value / 100.0);
+        // How much of the colour that shading gets, between the ends the
+        // engine's own clamp allows a band: never quite invisible, and
+        // stopping well short of opaque, because it is a backdrop and the bars
+        // have to stay readable through it.
+        group.add(
+            &percent_row(
+                window,
+                refresh,
+                id,
+                "Shading %",
+                band.alpha(),
+                0.02,
+                0.6,
+                move |indicator, share| {
+                    if let Params::Vwap { bands, .. } = &mut indicator.params {
+                        if let Some(band) = bands.get_mut(index) {
+                            band.fill_alpha = Some(share);
+                        }
                     }
-                }
-            },
-        ));
+                },
+            ),
+        );
 
         let current = band
             .color
@@ -1339,33 +1385,137 @@ fn spin_row(
     row
 }
 
+/// A proportion: a slider to aim with, and a box to say it in.
+///
+/// Every percentage in here is chosen by feel — a pane is about a third, a
+/// shading is barely there — and a pair of − and + buttons is the wrong shape
+/// for that question. The box beside the slider is for the times you already
+/// know the figure and would rather type it than aim at it.
+///
+/// One `GtkAdjustment` drives both, so there is one value rather than two
+/// controls that have to be kept in step: dragging moves the number as it
+/// goes, and typing moves the handle.
+///
+/// The range arrives as the fractions the thing is really stored in, and
+/// 0–100 is only how it is shown. Callers that did the arithmetic themselves
+/// are how one of these ends up off by a hundred with nobody noticing.
+#[allow(clippy::too_many_arguments)]
+fn percent_row(
+    window: &Rc<Window>,
+    refresh: &Refresh,
+    id: u32,
+    title: &str,
+    share: f64,
+    least: f64,
+    most: f64,
+    apply: impl Fn(&mut Indicator, f64) + 'static,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+
+    let adjustment = percent_adjustment(share, least, most);
+
+    let slider = gtk::Scale::new(gtk::Orientation::Horizontal, Some(&adjustment));
+    slider.set_draw_value(false);
+    slider.set_round_digits(0);
+    slider.set_size_request(180, -1);
+    slider.set_valign(gtk::Align::Center);
+
+    let entry = percent_entry(&adjustment);
+
+    row.add_suffix(&slider);
+    row.add_suffix(&entry);
+
+    let window = window.clone();
+    let refresh = refresh.clone();
+    adjustment.connect_value_changed(move |adjustment| {
+        let share = as_share(adjustment.value());
+        update(&window, id, |indicator| apply(indicator, share));
+        refresh.run();
+    });
+    row
+}
+
+/// The box a percentage can be typed into.
+///
+/// The figure is committed on Enter or on leaving the box, never per
+/// keystroke: the 5 on the way to 50 would otherwise reach the chart and
+/// redraw it on the way past. Anything outside the range is pulled back to the
+/// nearest end it allows rather than refused — the figure you can have is more
+/// use than a complaint about the one you cannot — and anything that is not a
+/// number at all leaves the value where it was.
+fn percent_entry(adjustment: &gtk::Adjustment) -> gtk::SpinButton {
+    let entry = gtk::SpinButton::new(Some(adjustment), 1.0, 0);
+    entry.set_valign(gtk::Align::Center);
+    entry.set_numeric(true);
+    entry.set_snap_to_ticks(true);
+    entry.set_update_policy(gtk::SpinButtonUpdatePolicy::IfValid);
+    entry.set_width_chars(3);
+    entry.set_max_width_chars(3);
+    entry
+}
+
+/// A stored fraction as the whole percent a person reads, and back.
+///
+/// One place does this arithmetic, in both directions. A caller doing its own
+/// is how a row ends up off by a hundred with nobody noticing until a chart
+/// looks wrong.
+fn as_percent(share: f64) -> f64 {
+    share * 100.0
+}
+
+/// The percent on the row as the fraction the indicator is stored in.
+fn as_share(percent: f64) -> f64 {
+    percent / 100.0
+}
+
+/// The one value a percentage row runs on, in whole percent.
+///
+/// Both controls share it, which is what keeps them from drifting apart, and
+/// it is where the range is enforced: a figure past either end is pulled back
+/// to the end rather than written through to be clamped later somewhere the
+/// person who typed it cannot see.
+///
+/// Whole percent. Nothing on the chart shows a tenth of one, and a slider that
+/// stops between figures is a slider the box then disagrees with.
+fn percent_adjustment(share: f64, least: f64, most: f64) -> gtk::Adjustment {
+    gtk::Adjustment::new(
+        as_percent(share),
+        as_percent(least),
+        as_percent(most),
+        1.0,
+        10.0,
+        0.0,
+    )
+}
+
 /// How much of the chart an indicator's own strip takes.
 ///
 /// One row for every indicator that has a strip, rather than one per kind: the
 /// question is the same whichever of them is asking it.
+///
+/// The ends come from the engine's own clamp rather than from a pair of
+/// numbers typed in here, which is the only way the slider and the chart agree
+/// about what the extremes are.
 fn pane_height_row(
     window: &Rc<Window>,
     refresh: &Refresh,
     id: u32,
     height: f64,
-) -> adw::SpinRow {
-    spin_row(
+) -> adw::ActionRow {
+    percent_row(
         window,
         refresh,
         id,
         "Pane height %",
-        height * 100.0,
-        5.0,
-        60.0,
-        1.0,
-        move |indicator, value| {
-            let share = value / 100.0;
-            match &mut indicator.params {
-                Params::Volume { height }
-                | Params::Rsi { height, .. }
-                | Params::Atr { height, .. } => *height = share,
-                _ => {}
-            }
+        height,
+        MIN_PANE_SHARE,
+        MAX_PANE_SHARE,
+        move |indicator, share| match &mut indicator.params {
+            Params::Volume { height }
+            | Params::Rsi { height, .. }
+            | Params::Atr { height, .. } => *height = share,
+            _ => {}
         },
     )
 }
@@ -1596,8 +1746,8 @@ fn pick_indicator(window: &Rc<Window>, refresh: &Refresh) {
         }
     });
 
-    // Only the box needs saying. Escape anywhere else in here already closes
-    // the dialog, which is why there is no controller for it.
+    // Only the box needs saying. Escape on anything else inside the dialog
+    // already closes it, which is why there is no controller for it.
     dialogs::close_on_search_escape(&entry, &dialog);
 
     dialog.present(Some(&window.window));
@@ -1605,3 +1755,41 @@ fn pick_indicator(window: &Rc<Window>, refresh: &Refresh) {
 }
 
 use gtk::glib;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // GTK objects are not built in here. Starting GTK is something one test in
+    // the suite may do, from its own thread, and a second one asking would
+    // take the whole run down with it — so these ask the arithmetic the rows
+    // are built from instead.
+
+    #[test]
+    fn a_stored_fraction_is_shown_as_whole_percent() {
+        assert_eq!(as_percent(0.16), 16.0, "a sixth of the chart reads as 16%");
+        assert_eq!(as_percent(0.02), 2.0, "and the faintest shading as 2%");
+    }
+
+    /// The row reads one way and writes the other, so a figure that survives
+    /// the trip is the only thing standing between a pane height and a value
+    /// a hundred times the one that was chosen.
+    #[test]
+    fn a_percentage_comes_back_as_the_fraction_it_was_shown_from() {
+        for share in [MIN_PANE_SHARE, 0.16, 0.5, MAX_PANE_SHARE] {
+            assert_eq!(as_share(as_percent(share)), share);
+        }
+    }
+
+    /// A slider that moves in whole percent can only land on the extremes if
+    /// the extremes are whole percentages. Were the engine to clamp a pane to
+    /// 0.055 of the chart, the least it allows would be a figure no slider in
+    /// here could reach and no box could be typed.
+    #[test]
+    fn the_ends_of_a_pane_are_figures_a_whole_percent_row_can_reach() {
+        for end in [MIN_PANE_SHARE, MAX_PANE_SHARE] {
+            let shown = as_percent(end);
+            assert_eq!(shown, shown.round(), "{end} is not a whole percentage");
+        }
+    }
+}
