@@ -34,6 +34,13 @@ pub struct SymbolSearch {
     /// Instruments on display, parallel to the list rows.
     shown: Rc<RefCell<Vec<Instrument>>>,
     handler: Handler,
+    /// True from the moment the picker is asked to open until it has settled.
+    ///
+    /// An entry selects what it holds when it gains focus, and on the first
+    /// open that focus is installed by the dialog being mapped — after
+    /// anything this code can schedule. Rather than race it, the selection is
+    /// undone whenever it appears during this window.
+    opening: Rc<std::cell::Cell<bool>>,
 }
 
 impl SymbolSearch {
@@ -76,6 +83,7 @@ impl SymbolSearch {
             index,
             shown: Rc::new(RefCell::new(Vec::new())),
             handler: Rc::new(RefCell::new(None)),
+            opening: Rc::new(std::cell::Cell::new(false)),
         });
         search.wire();
         search.populate("");
@@ -83,6 +91,28 @@ impl SymbolSearch {
     }
 
     fn wire(self: &Rc<Self>) {
+        // Undo the select-all an entry does when it gains focus, for as long
+        // as the picker is still opening. Typing a letter on the chart opens
+        // this with that letter in the box, and a selected letter is one the
+        // next keystroke replaces — so "S" then "H" searched for "H".
+        //
+        // Watching the selection rather than the focus, because the focus that
+        // does this is installed by the dialog's own mapping on the first open
+        // and lands after everything this code can schedule. A selection that
+        // nobody asked for cannot arrive too late to be undone.
+        if let Some(text) = self.entry.delegate().and_then(|d| d.downcast::<gtk::Text>().ok()) {
+            let opening = self.opening.clone();
+            text.connect_notify_local(Some("selection-bound"), move |text, _| {
+                if !opening.get() || text.selection_bounds().is_none() {
+                    return;
+                }
+                // -1 is the end. Putting the caret there collapses the
+                // selection, which fires this again — harmlessly, there being
+                // nothing selected the second time.
+                text.set_position(-1);
+            });
+        }
+
         // Typing. Every keystroke re-runs the search against memory, which is
         // cheap enough that debouncing would only add latency.
         let (list, index, shown) = (self.list.clone(), self.index.clone(), self.shown.clone());
@@ -182,6 +212,7 @@ impl SymbolSearch {
         on_pick: impl Fn(Instrument) + 'static,
     ) {
         *self.handler.borrow_mut() = Some(Box::new(on_pick));
+        self.opening.set(true);
         self.dialog.set_title(title);
         self.entry.set_text(query);
         self.entry.set_position(-1);
@@ -189,16 +220,13 @@ impl SymbolSearch {
         self.dialog.present(Some(parent));
         self.entry.grab_focus();
         self.entry.set_position(-1);
-        // The first time the picker opens, `present` is also realizing and
-        // mapping it, and the focus that mapping installs arrives after this
-        // function has returned. An entry that gains focus selects what it
-        // holds, so the letter that summoned the picker was selected and the
-        // next keystroke replaced it instead of following it — the first time
-        // only, because afterwards the dialog is already built and the focus
-        // above is the one that sticks. Collapsing the selection once more,
-        // after everything settles, puts the cursor at the end either way.
-        let entry = self.entry.clone();
-        glib::idle_add_local_once(move || entry.set_position(-1));
+        // Long enough for the dialog to finish opening and install its own
+        // focus, short enough to be over before anybody reads the first
+        // result. After this a selection in the box is one the user made.
+        let opening = self.opening.clone();
+        glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+            opening.set(false);
+        });
     }
 }
 
