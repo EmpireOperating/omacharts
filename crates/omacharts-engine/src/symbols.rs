@@ -269,25 +269,37 @@ impl SearchIndex {
         let name = &self.name_lc[i];
         let item = &self.items[i];
 
-        let textual = if symbol == q || name == q {
-            1000
+        // Two ladders rather than one, because a ticker and a name are not
+        // the same kind of evidence and the weights below treat them
+        // differently. The rungs are the same numbers either way, so taking
+        // the better of the two is the chain of `else if` this used to be.
+        let symbolic = if symbol == q {
+            Some(EXACT)
         } else if symbol.starts_with(q) {
-            700 - (symbol.len() - q.len()).min(20) as i32 * 4
-        } else if name.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
-            500
-        } else if name.starts_with(q) {
-            450
+            // A longer ticker is a worse answer: `aa` means Alcoa before it
+            // means AAON.
+            Some(700 - (symbol.len() - q.len()).min(20) as i32 * 4)
         } else if symbol.contains(q) {
-            320
+            Some(320)
+        } else {
+            None
+        };
+
+        let nominal = if name == q {
+            Some(EXACT)
+        } else if name.split(|c: char| !c.is_alphanumeric()).any(|w| w == q) {
+            Some(500)
+        } else if name.starts_with(q) {
+            Some(450)
         } else if name
             .split(|c: char| !c.is_alphanumeric())
             .any(|w| w.starts_with(q))
         {
-            300
+            Some(300)
         } else if name.contains(q) {
-            180
+            Some(180)
         } else {
-            return None;
+            None
         };
 
         let tier_weight = match item.tier {
@@ -311,9 +323,38 @@ impl SearchIndex {
         // whole point: `aa` should find Alcoa before AAON. It reorders a band
         // from within; it never promotes one match over a better one.
         let fame = item.popularity as i32 * 6;
-        Some(textual + tier_weight + kind_weight + fame)
+        let prior = tier_weight + kind_weight + fame;
+
+        // A ticker is a label anyone can collide with: eleven thousand of them
+        // are four letters or fewer, so `tes` being the start of one is weak
+        // evidence and gets the prior once. A name is something you have to
+        // know before you can type it, so matching one is evidence twice over
+        // — that this is the row you meant, and that you knew its name at all
+        // — and the prior counts twice. Without this a test issue called TEST
+        // outranked Tesla, and four leveraged ETFs outranked crude oil.
+        //
+        // It cannot promote anything over an exact match. The best a partial
+        // can reach is 500 + 2 × 204 = 908, against the 1000 an exact scores
+        // before a single weight is added, and
+        // `an_exact_ticker_outscores_the_best_possible_partial` holds that
+        // moat open.
+        let by_symbol = symbolic.map(|textual| textual + prior);
+        let by_name = nominal.map(|textual| textual + prior * 2);
+        by_symbol.max(by_name)
     }
 }
+
+/// What a query that *is* the ticker, or *is* the name, scores before weights.
+///
+/// Far enough above every partial band that no combination of tier, kind and
+/// fame can reach it from below: typing GC gives gold and typing TSLA gives
+/// Tesla, whatever else happens to share the letters.
+const EXACT: i32 = 1000;
+
+/// The most any row can add to its textual band: tier 0, an index or a future,
+/// and a household name. Only a bound, and only the test that pins it uses it.
+#[cfg(test)]
+const MAX_PRIOR: i32 = 120 + 30 + 9 * 6;
 
 /// The curated inventory shipped in the binary.
 ///
@@ -387,6 +428,12 @@ mod tests {
         }
     }
 
+    /// The same, as a fund — which carries a kind weight a share does not, so
+    /// it is the harder thing to outrank.
+    fn fund(row: Instrument) -> Instrument {
+        Instrument { kind: InstrumentKind::Etf, ..row }
+    }
+
     #[test]
     fn the_seed_parses() {
         let items = seed();
@@ -437,6 +484,97 @@ mod tests {
         });
         let idx = SearchIndex::new(items);
         assert_eq!(idx.get(idx.search("dax", 5)[0].index).unwrap().symbol, "GDAXI");
+    }
+
+    /// A listing whose ticker happens to start with your letters, against the
+    /// company whose *name* does. Nobody typing `tes` wants a structured
+    /// product called TEST; they want Tesla, and the only thing separating the
+    /// two is that one of them is a household name.
+    #[test]
+    fn a_famous_name_beats_a_ticker_that_merely_shares_the_letters() {
+        let mut items = seed();
+        // The curated file carries no ranking; a curated row picks one up from
+        // the listing it displaces when the two halves are merged, which is
+        // the state search actually runs against.
+        for row in &mut items {
+            if row.symbol == "TSLA" {
+                row.popularity = 9;
+            }
+        }
+        items.push(fund(listed("TEST", "YieldMax TSLA Performance & Distribution ETF", 3)));
+        items.push(fund(listed("TESL", "Simplify Volt TSLA Revolution ETF", 1)));
+        let idx = SearchIndex::new(items);
+        assert_eq!(idx.get(idx.search("tes", 5)[0].index).unwrap().symbol, "TSLA");
+    }
+
+    /// The same thing one rung further down: `oil` is a whole word of the
+    /// futures root's name, and four leveraged ETFs own tickers beginning
+    /// OIL. A curated front-month contract is what the app is for.
+    #[test]
+    fn a_curated_name_beats_the_tickers_that_squat_on_the_word() {
+        let mut items = seed();
+        for (symbol, name) in [
+            ("OILK", "ProShares K-1 Free Crude Oil ETF"),
+            ("OILU", "MicroSectors Oil & Gas Exp. & Prod. 3x ETN"),
+            ("OILD", "MicroSectors Oil & Gas Exp. & Prod. -3x ETN"),
+            ("OILT", "Texas Capital Texas Oil Index ETF"),
+        ] {
+            items.push(fund(listed(symbol, name, 4)));
+        }
+        let idx = SearchIndex::new(items);
+        assert_eq!(idx.get(idx.search("oil", 5)[0].index).unwrap().symbol, "CL");
+    }
+
+    /// The floor the whole search stands on: typing a ticker in full gives you
+    /// that ticker. Promoting name matches is only safe while no stack of
+    /// weights can climb from a partial band to the exact one, so this builds
+    /// the worst case on purpose — the dullest possible exact match against a
+    /// rival that is curated, an index, a household name, and matches both as
+    /// a ticker prefix and as a whole word of its name.
+    #[test]
+    fn an_exact_ticker_outscores_the_best_possible_partial() {
+        let exact = Instrument {
+            symbol: "ZZZ".into(),
+            name: "Nothing In Particular".into(),
+            kind: InstrumentKind::Equity,
+            suffix: None,
+            currency: None,
+            tier: 2,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: None,
+            popularity: 0,
+        };
+        let rival = Instrument {
+            symbol: "ZZZA".into(),
+            name: "Zzz Everything Index".into(),
+            kind: InstrumentKind::Index,
+            tier: 0,
+            popularity: 9,
+            ..exact.clone()
+        };
+        let idx = SearchIndex::new(vec![rival, exact]);
+        let hits = idx.search("zzz", 2);
+        assert_eq!(idx.get(hits[0].index).unwrap().symbol, "ZZZ");
+        assert!(
+            hits[0].score - hits[1].score >= EXACT - (500 + 2 * MAX_PRIOR),
+            "the moat has narrowed: {} vs {}",
+            hits[0].score,
+            hits[1].score
+        );
+    }
+
+    /// Cheap and exhaustive: every instrument anyone curated answers to its own
+    /// ticker. One curated row shadowing another is the kind of thing a weight
+    /// change causes and nobody notices until they type it.
+    #[test]
+    fn every_curated_ticker_finds_itself() {
+        let idx = index();
+        for item in seed() {
+            let hits = idx.search(&item.symbol, 1);
+            let first = idx.get(hits[0].index).unwrap();
+            assert_eq!(first.symbol, item.symbol, "{} found {} first", item.symbol, first.symbol);
+        }
     }
 
     #[test]
