@@ -157,6 +157,7 @@ const SHORTCUT_SECTIONS: &[(&str, &[(&str, &str)])] = &[
             ("+ −", "Zoom"),
             ("End", "Jump to the latest bar"),
             ("Alt+R", "Reset the view"),
+            ("Ctrl+Shift+G", "Show or hide the gridlines"),
             ("Esc", "Back to the chart"),
         ],
     ),
@@ -866,6 +867,15 @@ mod tests {
         assert!(rail.iter().any(|row| row.contains("Ctrl+B")));
     }
 
+    /// The gridlines have a key of their own, and the sheet is where somebody
+    /// who half remembers it goes looking.
+    #[test]
+    fn the_gridlines_key_is_on_the_sheet() {
+        let row = vec!["Ctrl+Shift+G — Show or hide the gridlines"];
+        assert_eq!(found("gridlines"), row);
+        assert_eq!(found("ctrl shift g"), row);
+    }
+
     #[test]
     fn a_key_nobody_has_matches_nothing_at_all() {
         assert!(found("xyzzy").is_empty());
@@ -1225,6 +1235,7 @@ pub struct Window {
     linked_action: RefCell<Option<gio::SimpleAction>>,
     bar_style_action: RefCell<Option<gio::SimpleAction>>,
     session_action: RefCell<Option<gio::SimpleAction>>,
+    grid_action: RefCell<Option<gio::SimpleAction>>,
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
@@ -1318,6 +1329,7 @@ impl Window {
             linked_action: RefCell::new(None),
             bar_style_action: RefCell::new(None),
             session_action: RefCell::new(None),
+            grid_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             chart_host: chart_host.clone(),
             book_strip: book_strip.clone(),
@@ -1701,6 +1713,9 @@ impl Window {
         }
         if let Some(action) = self.session_action.borrow().as_ref() {
             action.set_state(&pane.session.get().key().to_variant());
+        }
+        if let Some(action) = self.grid_action.borrow().as_ref() {
+            action.set_state(&pane.show_grid.get().to_variant());
         }
     }
 
@@ -4736,13 +4751,29 @@ impl Window {
         self.save_workspace();
     }
 
+    /// Whether the focused chart is drawing gridlines.
+    ///
+    /// Read off the chart rather than off the setting, because the setting is
+    /// only what a chart opens with: two charts in a split are entitled to
+    /// disagree, and the one being asked about is the focused one.
     pub fn show_grid(&self) -> bool {
-        self.store.setting_bool(SETTING_SHOW_GRID, true)
+        self.focused_pane().show_grid.get()
     }
 
+    /// The one way the gridlines are turned on and off, so the key, the chart
+    /// menu and the settings dialog cannot come to different conclusions.
     pub fn set_show_grid(self: &Rc<Self>, show: bool) {
+        let pane = self.focused_pane();
+        pane.show_grid.set(show);
+        pane.view.set_show_grid(show);
+        // What this chart is doing now is also what the next one opens with.
         self.store.set_setting_bool(SETTING_SHOW_GRID, show);
-        self.focused_pane().view.set_show_grid(show);
+        // The menu's tick, for when the answer came from the key or from the
+        // settings dialog rather than from the menu itself.
+        self.sync_chart_actions(&pane);
+        // Written down with the rest of the arrangement, or the chart comes
+        // back tomorrow with the gridlines it had yesterday.
+        self.save_workspace();
     }
 
     /// How many rows the profile with this id is drawing right now.
@@ -4832,6 +4863,11 @@ impl Window {
             sessions.append_item(&item);
         }
         menu.append_submenu(Some("Session"), &sessions);
+
+        // With the other two choices about how the chart is drawn, and drawn
+        // as a tick: "Gridlines" as a plain row could not say whether this
+        // chart has any.
+        shortcuts::append(&menu, "Gridlines", "chart.grid");
 
         // The layout, in its own section: splitting and closing are about the
         // arrangement rather than about what this chart draws.
@@ -4935,6 +4971,15 @@ impl Window {
         });
         actions.add_action(&session);
         *self.session_action.borrow_mut() = Some(session);
+
+        // Stateful over a boolean rather than taking one, because a key has
+        // nothing to hand it: Ctrl+Shift+G means the other way round from
+        // however this chart is drawn now.
+        let grid = gio::SimpleAction::new_stateful("grid", None, &self.show_grid().to_variant());
+        let this = self.clone();
+        grid.connect_activate(move |_, _| this.set_show_grid(!this.show_grid()));
+        actions.add_action(&grid);
+        *self.grid_action.borrow_mut() = Some(grid);
 
         let split_h = gio::SimpleAction::new("split-h", None);
         let this = self.clone();

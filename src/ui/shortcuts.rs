@@ -56,6 +56,9 @@ pub const BINDINGS: &[Binding] = &[
     // instead only moves which layouts it is broken on. Punctuation can be
     // bound here, but only bare, the way `question` below is.
     global("chart.settings", &["<Ctrl><Shift>s"]),
+    // Shift as well, because Ctrl+G on its own is "find the next one" to
+    // everything with a box you can type in, and this window has one.
+    global("chart.grid", &["<Ctrl><Shift>g"]),
     // O, not P: printing a chart is a thing this will grow, and the key
     // everything else on the desktop prints with has to still be free when it
     // does. A screenshot of the chartbook is the same key with Shift, the way
@@ -188,5 +191,15 @@ mod tests {
             let binding = binding(action).expect(action);
             assert!(!binding.global, "{action} must stay out of the accelerator table");
         }
+    }
+
+    /// Nothing is typed into a box with Ctrl+Shift+G, so the gridlines are
+    /// the application's to own — and what it owns is a letter rather than a
+    /// shifted punctuation key, for the reason the table says above.
+    #[test]
+    fn the_gridlines_are_an_accelerator_the_application_owns() {
+        let binding = binding("chart.grid").expect("chart.grid");
+        assert!(binding.global, "the grid key has to work over a chart");
+        assert_eq!(binding.accels, ["<Ctrl><Shift>g"]);
     }
 }
