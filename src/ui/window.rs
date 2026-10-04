@@ -27,6 +27,7 @@ use crate::ui::pane::{ChartPane, Node};
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
+use crate::ui::shortcuts;
 use crate::ui::watchlist::{Quote, Watchlist, DEFAULTS};
 use gtk::gio;
 
@@ -952,8 +953,8 @@ impl Window {
     /// everything a header bar's blank space did.
     fn build_corner(self: &Rc<Self>, split: &gtk::Paned) -> gtk::WindowHandle {
         let menu = gio::Menu::new();
-        menu.append(Some("Preferences"), Some("win.preferences"));
-        menu.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
+        shortcuts::append(&menu, "Preferences", "win.preferences");
+        shortcuts::append(&menu, "Keyboard Shortcuts", "win.shortcuts");
         let menu_button = gtk::MenuButton::new();
         menu_button.set_icon_name("open-menu-symbolic");
         menu_button.set_menu_model(Some(&menu));
@@ -965,7 +966,7 @@ impl Window {
 
         let toggle = gtk::ToggleButton::new();
         toggle.set_icon_name("sidebar-show-right-symbolic");
-        toggle.set_tooltip_text(Some("Watchlist (Ctrl+B)"));
+        toggle.set_tooltip_text(Some(&shortcuts::tooltip("Watchlist", "win.watchlist")));
         toggle.add_css_class("flat");
         toggle.set_active(split.end_child().map(|rail| rail.is_visible()).unwrap_or(false));
         let split_weak = split.downgrade();
@@ -1184,6 +1185,12 @@ impl Window {
 
 
     fn wire_shortcuts(self: &Rc<Self>) {
+        // Everything the application can own outright, which is also
+        // what makes the menus draw the key beside the row.
+        if let Some(app) = self.window.application().and_downcast::<adw::Application>() {
+            shortcuts::install(&app);
+        }
+
         let preferences = gio::SimpleAction::new("preferences", None);
         let this = self.clone();
         preferences.connect_activate(move |_, _| this.open_preferences());
@@ -1208,17 +1215,6 @@ impl Window {
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
 
             match key {
-                // Find a symbol. Ctrl+K is what modern apps use; Ctrl+F is
-                // what this desktop uses for find.
-                Key::k | Key::f if ctrl => {
-                    this.open_search();
-                    return glib::Propagation::Stop;
-                }
-                // One key for the rail: open it, focus it, then close it.
-                Key::b if ctrl => {
-                    this.toggle_watchlist();
-                    return glib::Propagation::Stop;
-                }
                 // Ctrl+L: follow the rail, or stop following it.
                 Key::l | Key::L if ctrl => {
                     let pane = this.focused_pane();
@@ -1260,20 +1256,6 @@ impl Window {
                     this.add_indicator();
                     return glib::Propagation::Stop;
                 }
-                // Ctrl+I goes to the indicators; Ctrl+Shift+, to the chart's
-                // settings, pairing with Ctrl+, for the app's.
-                Key::i | Key::I if ctrl => {
-                    this.open_indicators();
-                    return glib::Propagation::Stop;
-                }
-                Key::less | Key::comma if ctrl && shift => {
-                    this.open_chart_settings();
-                    return glib::Propagation::Stop;
-                }
-                Key::comma if ctrl => {
-                    this.open_preferences();
-                    return glib::Propagation::Stop;
-                }
                 // Bare "?" as well as Ctrl+?, because it is what people try
                 // first and it collides with nothing: the type-to-search path
                 // only takes letters and digits.
@@ -1285,10 +1267,6 @@ impl Window {
                 // window, but both keys exist because people reach for both.
                 Key::w | Key::q if ctrl => {
                     this.window.close();
-                    return glib::Propagation::Stop;
-                }
-                Key::r | Key::R if alt => {
-                    this.focused_pane().view.reset_view();
                     return glib::Propagation::Stop;
                 }
                 // Walk the chart without leaving it: resolutions sideways,
@@ -1386,7 +1364,6 @@ impl Window {
                 return glib::Propagation::Proceed;
             }
             match key {
-                Key::h | Key::H => this.split_focused(true),
                 Key::v | Key::V => this.split_focused(false),
                 Key::x | Key::X => this.close_focused(),
                 _ => return glib::Propagation::Proceed,
@@ -2238,17 +2215,17 @@ impl Window {
         // The layout, in its own section: splitting and closing are about the
         // arrangement rather than about what this chart draws.
         let layout = gio::Menu::new();
-        layout.append(Some("Split horizontally"), Some("chart.split-h"));
-        layout.append(Some("Split vertically"), Some("chart.split-v"));
+        shortcuts::append(&layout, "Split horizontally", "chart.split-h");
+        shortcuts::append(&layout, "Split vertically", "chart.split-v");
         if self.panes.borrow().len() > 1 {
-            layout.append(Some("Close chart"), Some("chart.close"));
+            shortcuts::append(&layout, "Close chart", "chart.close");
         }
         menu.append_section(None, &layout);
 
         let rest = gio::Menu::new();
-        rest.append(Some("Linked to watchlist"), Some("chart.linked"));
-        rest.append(Some("Indicators…"), Some("chart.indicators"));
-        rest.append(Some("Chart settings…"), Some("chart.settings"));
+        shortcuts::append(&rest, "Linked to watchlist", "chart.linked");
+        shortcuts::append(&rest, "Indicators…", "chart.indicators");
+        shortcuts::append(&rest, "Chart settings…", "chart.settings");
         menu.append_section(None, &rest);
 
         // Hung off the window rather than the chart it was opened on: a menu
@@ -2275,7 +2252,7 @@ impl Window {
         let menu = gio::Menu::new();
         menu.append(Some("Auto scale price"), Some("chart.auto-scale"));
         let rest = gio::Menu::new();
-        rest.append(Some("Reset chart"), Some("chart.reset-view"));
+        shortcuts::append(&rest, "Reset chart", "chart.reset-view");
         menu.append_section(None, &rest);
 
         let area = self.focused_pane().view.area.clone();

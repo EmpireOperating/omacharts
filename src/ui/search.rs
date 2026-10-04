@@ -24,6 +24,9 @@ type Handler = Rc<RefCell<Option<Box<dyn Fn(Instrument)>>>>;
 pub struct SymbolSearch {
     dialog: adw::Dialog,
     list: gtk::ListBox,
+    /// The list's window onto itself, so a selection moved by the
+    /// keyboard can be brought into it.
+    scroller: gtk::ScrolledWindow,
     entry: gtk::SearchEntry,
     index: crate::inventory::Inventory,
     /// Instruments on display, parallel to the list rows.
@@ -66,6 +69,7 @@ impl SymbolSearch {
         let search = Rc::new(SymbolSearch {
             dialog,
             list,
+            scroller,
             entry,
             index,
             shown: Rc::new(RefCell::new(Vec::new())),
@@ -117,6 +121,7 @@ impl SymbolSearch {
         // Up and down move the selection while focus stays in the entry.
         let keys = gtk::EventControllerKey::new();
         let list = self.list.clone();
+        let scroller = self.scroller.clone();
         keys.connect_key_pressed(move |_, key, _, _| {
             let rows = row_count(&list);
             if rows == 0 {
@@ -130,6 +135,11 @@ impl SymbolSearch {
             };
             if let Some(row) = list.row_at_index(next) {
                 list.select_row(Some(&row));
+                // Focus stays in the entry so typing carries on, and
+                // the list does not scroll itself for a selection it
+                // was not given focus for: arrowing past the bottom
+                // moved a highlight nobody could see.
+                reveal(&scroller, &list, &row);
             }
             glib::Propagation::Stop
         });
@@ -221,6 +231,34 @@ fn repopulate(
     // Always leave the best match highlighted, so Enter is enough.
     if let Some(first) = list.row_at_index(0) {
         list.select_row(Some(&first));
+        // A new query is a new list: whatever was scrolled to belonged
+        // to the old one.
+        if let Some(scroller) =
+            list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>()
+        {
+            scroller.vadjustment().set_value(0.0);
+        }
+    }
+}
+
+/// Bring a row into the window, moving as little as will do it.
+///
+/// The row's own bounds within the list, which is the coordinate space
+/// the scroll offset is in. Nothing happens when it is already visible,
+/// so holding Down scrolls one row at a time from the bottom edge
+/// rather than centring the selection and throwing the list about.
+fn reveal(scroller: &gtk::ScrolledWindow, list: &gtk::ListBox, row: &gtk::ListBoxRow) {
+    let Some(bounds) = row.compute_bounds(list) else { return };
+    let adjustment = scroller.vadjustment();
+    let top = bounds.y() as f64;
+    let bottom = top + bounds.height() as f64;
+    let seen = adjustment.value();
+    let page = adjustment.page_size();
+
+    if top < seen {
+        adjustment.set_value(top);
+    } else if bottom > seen + page {
+        adjustment.set_value(bottom - page);
     }
 }
 

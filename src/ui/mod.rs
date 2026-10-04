@@ -7,6 +7,7 @@ pub mod pane;
 pub mod palette;
 pub mod preferences;
 pub mod search;
+pub mod shortcuts;
 pub mod watchlist;
 pub mod window;
 
