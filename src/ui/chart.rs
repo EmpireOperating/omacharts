@@ -62,14 +62,23 @@ pub struct Drawn {
 pub struct Hover {
     pub bar: Bar,
     pub index: usize,
+    /// The price the pointer is actually at, read off this chart's scale —
+    /// not the bar's close. Between two bars at different resolutions the bar
+    /// is a different thing on each chart; the price is the same number.
+    pub price: f64,
+}
+
+/// Another chart's pointer, in the only terms two charts can both read.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Echo {
+    pub ts: i64,
+    pub price: f64,
 }
 
 struct State {
     bars: Vec<Bar>,
-    /// A time another chart's pointer is on, drawn here as a crosshair with
-    /// no price line: the pointer is not over this chart, so there is no
-    /// price under it to report.
-    echo: Option<i64>,
+    /// Where another chart's pointer is, drawn here as a quieter crosshair.
+    echo: Option<Echo>,
     theme: Theme,
     scheme: BarScheme,
     instrument: Option<Instrument>,
@@ -166,6 +175,33 @@ impl Layout {
     fn edge_at(&self, y: f64) -> Option<u32> {
         self.panes.iter().find(|pane| (y - Layout::edge(pane)).abs() <= EDGE_GRAB).map(|p| p.id)
     }
+}
+
+/// The price scale over the visible bars, padded so candles never touch the
+/// edges, and then held to whatever vertical window the user has dragged to.
+///
+/// Shared rather than inlined because the pointer has to answer the same
+/// question the drawing does: the price under the crosshair is only the same
+/// number on two charts if both worked it out from the same scale.
+///
+/// `None` when the bars carry nothing finite to measure.
+fn price_range(state: &State, bars: &[Bar]) -> Option<(f64, f64)> {
+    let (mut low, mut high) = (f64::MAX, f64::MIN);
+    for b in bars {
+        low = low.min(b.low);
+        high = high.max(b.high);
+    }
+    if !low.is_finite() || !high.is_finite() {
+        return None;
+    }
+    if (high - low).abs() < f64::EPSILON {
+        high += 1.0;
+        low -= 1.0;
+    }
+    let span = high - low;
+    low -= span * 0.04;
+    high += span * 0.04;
+    Some(state.price_window(low, high))
 }
 
 /// Volume, RSI and ATR each want a strip of their own, stacked under the price
@@ -360,16 +396,18 @@ impl ChartView {
         view
     }
 
-    /// Show where another chart's pointer is, by time.
+    /// Show where another chart's pointer is, in time and in price.
     ///
-    /// Two charts of the same symbol at different resolutions do not share bar
-    /// indices, and two charts of different symbols do not share a price — but
-    /// they always share a clock, so the time is the only thing worth echoing.
-    pub fn set_echo(&self, ts: Option<i64>) {
+    /// Bar indices are not shared — two resolutions of the same symbol count
+    /// their bars differently — so both halves travel as values and each
+    /// chart maps them through its own scales. Price is worth carrying
+    /// because an echo only ever reaches charts in the same link group, and a
+    /// group shares a symbol: the number means the same thing at both ends.
+    pub fn set_echo(&self, echo: Option<Echo>) {
         let changed = {
             let mut state = self.state.borrow_mut();
-            let changed = state.echo != ts;
-            state.echo = ts;
+            let changed = state.echo != echo;
+            state.echo = echo;
             changed
         };
         if changed {
@@ -840,13 +878,23 @@ fn notify_hover(
         let s = state.borrow();
         let (first, visible) = s.slice();
         match (s.pointer, visible) {
-            (Some((x, _)), v) if v > 0 => {
+            (Some((x, y)), v) if v > 0 => {
                 let plot_w = (area.width() as f64 - PRICE_AXIS_W - PAD).max(1.0);
                 let frac = (x - PAD) / plot_w;
                 if (0.0..=1.0).contains(&frac) {
                     let index = (first as f64 + frac * visible as f64).floor() as usize;
-                    s.bars.get(index.min(s.bars.len().saturating_sub(1)))
-                        .map(|bar| Hover { bar: *bar, index })
+                    let plan = layout(&s, area.width() as f64, area.height() as f64);
+                    let range = price_range(&s, &s.bars[first..first + visible]);
+                    s.bars.get(index.min(s.bars.len().saturating_sub(1))).map(|bar| Hover {
+                        bar: *bar,
+                        index,
+                        price: match range {
+                            Some((low, high)) => {
+                                high - (y - plan.plot_y) / plan.price_h * (high - low)
+                            }
+                            None => bar.close,
+                        },
+                    })
                 } else {
                     None
                 }
@@ -879,27 +927,14 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     let plan = layout(state, width, height);
     let (plot_x, plot_w, plot_y, price_h) = (plan.plot_x, plan.plot_w, plan.plot_y, plan.price_h);
 
-    // Price scale over what is visible, padded so candles never touch the
-    // edges.
-    let (mut low, mut high) = (f64::MAX, f64::MIN);
     let mut max_volume: f64 = 0.0;
     for b in bars {
-        low = low.min(b.low);
-        high = high.max(b.high);
         max_volume = max_volume.max(b.volume);
     }
-    if !low.is_finite() || !high.is_finite() {
+    let Some((low, high)) = price_range(state, bars) else {
         draw_placeholder(cr, width, height, state);
         return;
-    }
-    if (high - low).abs() < f64::EPSILON {
-        high += 1.0;
-        low -= 1.0;
-    }
-    let span = high - low;
-    low -= span * 0.04;
-    high += span * 0.04;
-    let (low, high) = state.price_window(low, high);
+    };
 
     let to_y = |price: f64| plot_y + price_h * (high - price) / (high - low);
     let bar_w = plot_w / visible as f64;
@@ -972,8 +1007,10 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
     // crosshair wins: an echo under your own pointer is a second line saying
     // the same thing.
     if state.pointer.is_none() {
-        if let Some(ts) = state.echo {
-            draw_echo(cr, state, bars, plot_x, bar_w, plot_y, height, ts);
+        if let Some(echo) = state.echo {
+            draw_echo(
+                cr, state, bars, plot_x, plot_w, bar_w, plot_y, price_h, height, echo, &to_y,
+            );
         }
     }
 
@@ -1547,27 +1584,46 @@ fn label_on_axis(
     let _ = state;
 }
 
-/// Where another chart is pointing: the same dashes as the crosshair, but
-/// only the time line, and quieter — it is somebody else's pointer.
+/// Another chart's pointer: the same dashes as the crosshair, both lines, and
+/// quieter — it is somebody else's pointer, not yours.
+///
+/// The time half can miss — this chart may not be showing that moment at all
+/// — while the price half always draws and is simply clipped to the price
+/// pane when it falls outside it. Clipping rather than testing on purpose: a
+/// line nudged to the nearest edge would be pointing at a price that is not
+/// the price, and leaving it out would hide the very thing worth carrying
+/// across.
 #[allow(clippy::too_many_arguments)]
 fn draw_echo(
     cr: &cairo::Context,
     state: &State,
     bars: &[Bar],
     plot_x: f64,
+    plot_w: f64,
     bar_w: f64,
     plot_y: f64,
+    price_h: f64,
     height: f64,
-    ts: i64,
+    echo: Echo,
+    to_y: &impl Fn(f64) -> f64,
 ) {
-    let Some(index) = nearest_bar(bars, ts) else { return };
-    let x = (plot_x + (index as f64 + 0.5) * bar_w).round() + 0.5;
     cr.save().ok();
     cr.set_dash(&[2.0, 3.0], 0.0);
     cr.set_line_width(1.0);
     colors::set_source_alpha(cr, &state.theme.ui.crosshair, 0.3);
-    cr.move_to(x, plot_y);
-    cr.line_to(x, height - TIME_AXIS_H);
+
+    if let Some(index) = nearest_bar(bars, echo.ts) {
+        let x = (plot_x + (index as f64 + 0.5) * bar_w).round() + 0.5;
+        cr.move_to(x, plot_y);
+        cr.line_to(x, height - TIME_AXIS_H);
+        let _ = cr.stroke();
+    }
+
+    cr.rectangle(plot_x, plot_y, plot_w, price_h);
+    cr.clip();
+    let y = to_y(echo.price).round() + 0.5;
+    cr.move_to(plot_x, y);
+    cr.line_to(plot_x + plot_w, y);
     let _ = cr.stroke();
     cr.restore().ok();
 }

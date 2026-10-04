@@ -1664,17 +1664,35 @@ impl Window {
         dialog.set_default_response(Some("create"));
         dialog.set_close_response("cancel");
 
-        let committing = dialog.clone();
-        crate::ui::dialogs::commit_on_ctrl_enter(&dialog, move || {
-            // The binding has no emitter for this signal, and a dialog that
-            // can only be finished with the mouse is the thing Ctrl+Enter is
-            // for.
-            committing.emit_by_name::<()>("response", &[&"create"]);
-        });
+        // Finishing from the keyboard, by the one route that creates a
+        // chartbook. The binding has no emitter for this signal, so the signal
+        // is emitted by name — and the dialog is then closed by hand, because
+        // only a real response does that for us. A button press arrives at the
+        // same handler having already closed itself.
+        let finish: Rc<dyn Fn()> = {
+            let dialog = dialog.clone();
+            Rc::new(move || {
+                dialog.emit_by_name::<()>("response", &[&"create"]);
+                dialog.close();
+            })
+        };
+
+        let committing = finish.clone();
+        crate::ui::dialogs::commit_on_ctrl_enter(&dialog, move || committing());
+
+        // An EntryRow keeps Return for itself and emits this instead, so the
+        // dialog's default response never hears the key that was meant for
+        // it. Typing a name and pressing Return is one gesture and should
+        // finish one thing.
+        let typing = finish.clone();
+        name.connect_entry_activated(move |_| typing());
 
         let this = self.clone();
+        // Three ways in and one chartbook out: the key paths emit the response
+        // and then close, and a close carries its own response behind it.
+        let done = Cell::new(false);
         dialog.connect_response(None, move |_, response| {
-            if response != "create" {
+            if response != "create" || done.replace(true) {
                 return;
             }
             let typed = name.text().trim().to_string();

@@ -488,6 +488,8 @@ pub const OMARCHY_ID: &str = "omarchy";
 /// The bar scheme that takes its colours from the active theme's palette.
 /// Default, so candles match the desktop too.
 pub const THEME_BARS_ID: &str = "theme";
+/// The same, with the direction colours spent: one neutral for every bar.
+pub const THEME_MONO_ID: &str = "theme-mono";
 /// Fallback theme when Omarchy is not installed.
 pub const FALLBACK_THEME_ID: &str = "midnight";
 
@@ -644,6 +646,110 @@ pub fn theme_bars(theme: &Theme) -> BarScheme {
         up,
         down,
         neutral: theme.ui.text_muted.clone(),
+    }
+}
+
+/// What a monochrome bar is held to against the chart behind it.
+///
+/// A floor well above the grid's, because this is not furniture: with the
+/// direction colours spent, this one colour is the entire price series, and
+/// everything the chart is for is read off it. The ceiling exists because a
+/// chart is a dense field of these rather than a line of text, and a theme
+/// whose foreground is near-white on near-black would otherwise hand back a
+/// wall of glare.
+pub const MONO_CONTRAST: ContrastBand = ContrastBand::new(4.5, 10.0);
+
+/// How much colour a monochrome bar keeps.
+///
+/// Not none, which is what makes it the theme's monochrome rather than a
+/// generic grey. A foreground is rarely a dead neutral — Gruvbox's is a warm
+/// sand, Nord's a cool slate — and keeping a trace of that is what stops a
+/// quiet chart looking like one pasted in from another application.
+///
+/// It is a cap and not a target: a theme whose text is already neutral keeps
+/// its neutral, and only the tinted ones are pulled back to here. Staying
+/// clear of the direction colours is [`set_apart`]'s job rather than this
+/// one's — some palettes derive a Green with less chroma than this, so a cap
+/// alone could never have promised it.
+const MONO_CHROMA: f64 = 0.03;
+
+/// How far a monochrome bar must sit from the colours it replaces.
+///
+/// The usual threshold for two colours reading as one. It matters here
+/// because some palettes have no green at all — Omarchy's `vantablack` and
+/// `white` are both of them — and the Green swatch derived for those is a
+/// plain grey. Left alone, the neutral would land on it, and every bar in a
+/// monochrome chart would be the exact colour the coloured chart uses for
+/// *up*: not a quieter chart, a chart quietly claiming the market only ever
+/// rose.
+const MONO_APART: f64 = 0.06;
+
+/// Move `colour`'s lightness until it is at least `minimum` from everything in
+/// `others`, without leaving `band` against `ground`.
+///
+/// Lightness rather than hue, because the thing being moved is meant to be
+/// neutral and a hue is exactly what it must not acquire. Nearer steps are
+/// tried before further ones and both directions at each distance, so the
+/// answer is the smallest move that works rather than the first direction
+/// that happens to. A colour with nowhere to go inside the band is returned
+/// unchanged: being slightly too close to a swatch is a smaller failure than
+/// being too dark to see.
+fn set_apart(
+    colour: &str,
+    others: &[&str],
+    ground: &str,
+    band: ContrastBand,
+    minimum: f64,
+) -> String {
+    let clears = |hex: &str| others.iter().all(|other| delta_e(hex, other) >= minimum);
+    if clears(colour) {
+        return colour.to_string();
+    }
+    let Some(base) = Oklch::of(colour) else { return colour.to_string() };
+    for step in 1..=60 {
+        for away in [-1.0, 1.0] {
+            let candidate = base.with_lightness(base.l + away * step as f64 * LIGHTNESS_STEP).hex();
+            if band.holds(contrast_ratio(&candidate, ground)) && clears(&candidate) {
+                return candidate;
+            }
+        }
+    }
+    colour.to_string()
+}
+
+/// Candles in one neutral colour, for people who would rather read a chart
+/// than be signalled at by one.
+///
+/// Direction is simply not shown. That is the whole of the trade and it is
+/// deliberate: the alternative — hollow for up, filled for down — keeps the
+/// information but costs the quiet, and it vanishes anyway below about three
+/// pixels a bar, where candles are drawn as hairlines with no body to fill.
+/// An OHLC chart loses nothing at all, since its open and close ticks say
+/// which way the bar went without reference to colour.
+pub fn theme_mono_bars(theme: &Theme) -> BarScheme {
+    let coloured = theme_bars(theme);
+    let ink = held_to(&theme.ui.text, &theme.ui.background, MONO_CONTRAST, Some(MONO_CHROMA));
+    let ink = set_apart(
+        &ink,
+        &[&coloured.up, &coloured.down],
+        &theme.ui.background,
+        MONO_CONTRAST,
+        MONO_APART,
+    );
+    BarScheme {
+        id: THEME_MONO_ID.to_string(),
+        name: "Monochrome".to_string(),
+        source: Source::BuiltIn,
+        // The same dimming the coloured scheme gives volume, so the two read
+        // as the same chart with the colour taken out rather than as two
+        // different ones.
+        volume_up: mix(&ink, &theme.ui.background, 0.45),
+        volume_down: mix(&ink, &theme.ui.background, 0.45),
+        up: ink.clone(),
+        up_fill: ink.clone(),
+        down: ink.clone(),
+        down_fill: ink.clone(),
+        neutral: ink,
     }
 }
 
@@ -1184,6 +1290,45 @@ mod tests {
         assert_eq!(bars.up, theme.swatch("Green").unwrap().hex);
         assert_eq!(bars.down, theme.swatch("Rose").unwrap().hex);
         assert_eq!(bars.id, THEME_BARS_ID);
+    }
+
+    #[test]
+    fn the_monochrome_scheme_spends_every_direction_colour() {
+        // The point of it: nothing about a bar's colour says which way it
+        // went, so a chart cannot half-signal by leaving one of the six
+        // slots behind.
+        for theme in builtin_themes() {
+            let mono = theme_mono_bars(&theme);
+            assert_eq!(mono.up, mono.down, "{}", theme.name);
+            assert_eq!(mono.up, mono.up_fill, "{}", theme.name);
+            assert_eq!(mono.down, mono.down_fill, "{}", theme.name);
+            assert_eq!(mono.up, mono.neutral, "{}", theme.name);
+            assert_eq!(mono.volume_up, mono.volume_down, "{}", theme.name);
+            assert_eq!(mono.id, THEME_MONO_ID, "{}", theme.name);
+        }
+    }
+
+    #[test]
+    fn a_monochrome_bar_never_wears_the_colour_it_replaced() {
+        // A neutral that landed on the up colour would not read as the
+        // absence of a signal; it would read as every bar having risen.
+        for theme in builtin_themes() {
+            let coloured = theme_bars(&theme);
+            let ink = theme_mono_bars(&theme).up;
+            for (what, hex) in [("up", &coloured.up), ("down", &coloured.down)] {
+                let apart = delta_e(&ink, hex);
+                assert!(apart >= MONO_APART, "{} {what}: {ink} vs {hex} is {apart:.3}", theme.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_monochrome_bar_can_be_seen_on_its_own_chart() {
+        for theme in builtin_themes() {
+            let ink = theme_mono_bars(&theme).up;
+            let ratio = contrast_ratio(&ink, &theme.ui.background);
+            assert!(ratio >= MONO_CONTRAST.floor, "{}: {ratio:.2}", theme.name);
+        }
     }
 
     #[test]

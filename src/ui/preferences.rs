@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::theme::{
     BarScheme, BarSlot, Source, Theme, UiSlot, FALLBACK_THEME_ID, OMARCHY_ID, SWATCH_NAMES,
-    THEME_BARS_ID,
+    THEME_BARS_ID, THEME_MONO_ID,
 };
 
 use crate::cache;
@@ -221,7 +221,10 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
         .collect();
     let selected = ids.iter().position(|id| id == theming.scheme_id()).unwrap_or(0);
     let source = theming.bar_scheme().source;
+    let monochrome = theming.scheme_id() == THEME_MONO_ID;
     drop(theming);
+
+    group.add(&colouring_row(context, monochrome));
 
     let row = adw::ComboRow::new();
     row.set_title("Bar scheme");
@@ -240,6 +243,57 @@ fn bars_group(context: &Rc<Context>) -> adw::PreferencesGroup {
 
     group.add(&duplicate_row(context, source, false));
     group
+}
+
+/// Which scheme to go back to when the colour is put back.
+///
+/// Monochrome is a scheme like any other, so choosing it would otherwise
+/// throw away whatever was selected before — and somebody trying it out and
+/// changing their mind would land on the default rather than on the palette
+/// they had spent time picking.
+const SETTING_COLOURED_BARS: &str = "coloured_bar_scheme";
+
+/// Colour or no colour, said in those terms.
+///
+/// The scheme list below can already express this — monochrome is one of its
+/// entries — but only if you know that is what you are looking for. This is
+/// the question people actually arrive with, so it is asked plainly and the
+/// list is left to the people who want to choose a palette.
+fn colouring_row(context: &Rc<Context>, monochrome: bool) -> adw::ComboRow {
+    let row = adw::ComboRow::new();
+    row.set_title("Bar colours");
+    // Honest about the cost. Direction lives in the fill of a candle and
+    // nowhere else, so taking the colour out takes it with it — but an OHLC
+    // bar says the same thing with its ticks and loses nothing.
+    row.set_subtitle(
+        "Monochrome draws every bar in one neutral colour — candles then show no          direction, OHLC bars still show it with their ticks.",
+    );
+    row.set_model(Some(&string_list(&["Up and down".to_string(), "Monochrome".to_string()])));
+    row.set_selected(u32::from(monochrome));
+
+    let ctx = context.clone();
+    row.connect_selected_notify(move |row| {
+        let wants_mono = row.selected() == 1;
+        {
+            let mut theming = ctx.theming.borrow_mut();
+            if (theming.scheme_id() == THEME_MONO_ID) == wants_mono {
+                return;
+            }
+            if wants_mono {
+                ctx.store.set_setting(SETTING_COLOURED_BARS, theming.scheme_id());
+                theming.select_bar_scheme(THEME_MONO_ID, &ctx.store);
+            } else {
+                let back = ctx
+                    .store
+                    .setting(SETTING_COLOURED_BARS)
+                    .unwrap_or_else(|| THEME_BARS_ID.to_string());
+                theming.select_bar_scheme(&back, &ctx.store);
+            }
+        }
+        apply(&ctx);
+        rebuild(&ctx);
+    });
+    row
 }
 
 /// "Duplicate" for things you cannot edit, "Delete" for the ones you can.

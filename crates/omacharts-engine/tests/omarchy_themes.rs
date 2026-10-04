@@ -16,7 +16,8 @@ use std::path::Path;
 use omacharts_engine::frame::{MIN_FROM_CANDLE, MIN_FROM_FURNITURE, MIN_GUTTER, RING_CONTRAST};
 use omacharts_engine::omarchy::{AXIS_CONTRAST, CROSSHAIR_CONTRAST, GRID_CONTRAST};
 use omacharts_engine::theme::{
-    contrast_ratio, delta_e, hue_gap, theme_bars, Direction, Oklch, SWATCH_SEQUENCE,
+    contrast_ratio, delta_e, hue_gap, theme_bars, theme_mono_bars, Direction, Oklch,
+    MONO_CONTRAST, SWATCH_SEQUENCE,
 };
 use omacharts_engine::link::{self, LinkGroup};
 use omacharts_engine::{omarchy, palette, Theme};
@@ -527,6 +528,33 @@ fn every_link_group_is_a_different_colour_in_every_theme() {
                     b.label(),
                 );
             }
+        }
+    }
+}
+
+
+/// Monochrome bars are one colour carrying the whole price series, so the
+/// derivation has to get two things right for palettes nobody has written yet:
+/// the colour has to be readable on that theme's chart, and it must not be the
+/// colour that theme already uses for a rising bar.
+///
+/// The second is the one that bites. Omarchy ships palettes with no green in
+/// them at all — `vantablack` and `white` are both monochrome to begin with —
+/// and the Green swatch derived for those is a plain grey sitting exactly
+/// where a neutral wants to be.
+#[test]
+fn every_monochrome_bar_is_legible_and_unlike_the_colours_it_replaces() {
+    for (name, theme) in fixtures() {
+        let coloured = theme_bars(&theme);
+        let mono = theme_mono_bars(&theme);
+        assert_eq!(mono.up, mono.down, "{name}: a direction colour survived");
+
+        let ratio = contrast_ratio(&mono.up, &theme.ui.background);
+        assert!(ratio >= MONO_CONTRAST.floor, "{name}: {} is {ratio:.2} on its chart", mono.up);
+
+        for (what, hex) in [("up", &coloured.up), ("down", &coloured.down)] {
+            let apart = delta_e(&mono.up, hex);
+            assert!(apart > 0.06, "{name}: monochrome {} reads as {what} {hex} ({apart:.3})", mono.up);
         }
     }
 }
