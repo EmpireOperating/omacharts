@@ -107,9 +107,6 @@ fn rebuild(context: &Rc<Context>) {
         }
     }
 
-    // Where the app shows up outside its own window belongs with how it looks.
-    groups.extend(desktop_group());
-
     for group in &groups {
         context.page.add(group);
     }
@@ -487,6 +484,12 @@ fn bar_colors_group(context: &Rc<Context>, group_name: &str) -> adw::Preferences
 /// Everything that is not about how the app looks: what the charts offer, and
 /// where their data comes from.
 fn build_general_page(context: &Rc<Context>) {
+    // First thing in the dialog: whether Omacharts is in the bar is the one
+    // setting about the app rather than about a chart, and it is the one
+    // people come looking for.
+    for group in desktop_group() {
+        context.general_page.add(&group);
+    }
     context.general_page.add(&resolutions_group(context));
     build_market_data(context);
 }
