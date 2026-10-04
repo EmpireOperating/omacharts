@@ -9,7 +9,8 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 ## Features
 
-- **Fast.** Instant load, rendering and operation.
+- **Fast.** Instant load, rendering and interactions. The pillar for everything
+  else.
 - **Beautiful.** The chart is the protagonist and the user interface is at its
   service. It follows your Omarchy theme as you change it, and generates an
   indicator palette for whichever theme is active, so things look great without
