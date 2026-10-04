@@ -81,6 +81,30 @@ exit codes, and a worked example per command. `--help` is the path for people
 and is held to the same standard, but prose cannot say that a flag takes an
 integer without ambiguity, and the JSON can.
 
+## The skill is part of the surface
+
+`claude-plugin/skills/omacharts/SKILL.md` is the agent-facing skill, wrapped in
+a Claude Code plugin and installed — only ever on request — by
+`omacharts skill install`. It exists for the two things this file and the
+surface cannot do: it is read outside this repo, which is how an agent anywhere
+on the machine knows to reach for omacharts at all, and it carries **workflows**
+rather than vocabulary, because "a 2×2 of the majors at 15m with RSI on each,
+linked" is several commands in an order plus a handful of facts no single
+command's help contains.
+
+It deliberately **does not** describe the command surface. That is generated,
+it regenerates itself, and a prose copy of it is wrong by the second release —
+confidently wrong, which is worse for an agent than nothing at all. One line
+points at `omacharts surface --json` and that is the whole of it.
+
+Which makes drift the only real way this gets worse, so it is tested:
+**`every_command_in_the_agent_skill_is_a_command_that_runs`** pulls every
+`omacharts` line out of the skill's fenced blocks and runs each block, in
+order, against a seeded store — and requires exit 0, not merely that it parses.
+A workflow is a claim about an order, and "set the chart at `pos:1`" can parse
+perfectly after a split that never made one. If you change a command, that test
+is what tells you the skill needs changing too.
+
 ## Adding a command
 
 1. Add a `Verb` to the right `Noun` in `src/cli/spec.rs`. Give it a real

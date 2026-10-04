@@ -114,6 +114,16 @@ const COLOURING: &[&str] = &["coloured", "monochrome"];
 /// re-resolved every time the theme changes, and a hex is the one the user
 /// picked and is never touched again. Offering only hex would quietly opt
 /// every scripted indicator out of following the desktop's theme.
+/// Where `skill install` writes, and how to send it somewhere else.
+///
+/// A flag rather than only an environment variable because a project's own
+/// `.claude/skills` is a real place to want it, and because a test has to be
+/// able to install the skill without writing into the configuration of
+/// whoever is running the tests.
+pub const SKILLS_DIR: &str =
+    "which skills directory to use; defaults to $CLAUDE_CONFIG_DIR/skills, \
+     or ~/.claude/skills";
+
 pub const COLOUR: &str =
     "a palette name — Blue, Amber, Violet, Teal, Rose, Green, Orange, Cyan — \
      which follows the theme, or #rrggbb, which does not";
@@ -610,6 +620,45 @@ pub const SURFACE: &[Noun] = &[
                 example: "omacharts config bars monochrome",
                 json: true,
                 writes: true,
+                workspace: false,
+            },
+        ],
+    },
+    Noun {
+        name: "skill",
+        about: "The agent skill that teaches Claude to drive this app",
+        verbs: &[
+            Verb {
+                name: "status",
+                about: "Whether the skill is installed, and the paths either end of it",
+                args: &[],
+                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                example: "omacharts skill status",
+                json: true,
+                // Nothing in the database and nothing on screen: this writes
+                // into a Claude configuration, which no window has to hear
+                // about. `writes` would only make one rebuild for nothing.
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "install",
+                about: "Link the skill into Claude's skills directory. Only ever when asked",
+                args: &[],
+                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                example: "omacharts skill install",
+                json: true,
+                writes: false,
+                workspace: false,
+            },
+            Verb {
+                name: "uninstall",
+                about: "Take the skill back out again, leaving nothing behind",
+                args: &[],
+                flags: &[Flag::valued("to", "DIR", SKILLS_DIR)],
+                example: "omacharts skill uninstall",
+                json: true,
+                writes: false,
                 workspace: false,
             },
         ],

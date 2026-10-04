@@ -33,7 +33,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
     {
         return Outcome::ok(format!(
             "{}\n",
-            super::watchlist_json(args.iter().any(|arg| arg == "--refresh"))
+            super::watchlist_json(args.iter().any(|arg| arg == "--refresh"), live)
         ));
     }
 
@@ -91,7 +91,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("watchlist", "remove") => watchlist_add(store, m, json, false),
         ("watchlist", "move") => watchlist_move(store, m, json),
         ("watchlist", "link") => watchlist_link(store, m, json),
-        ("watchlist", "feed") => Ok(super::watchlist_json(flag(m, "refresh"))),
+        ("watchlist", "feed") => Ok(super::watchlist_json(flag(m, "refresh"), live)),
 
         ("section", "list") => section_list(store, m, json),
         ("section", "create") => section_create(store, m, json),
@@ -120,6 +120,13 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "get") => config_get(store, m, json),
         ("config", "set") => config_set(store, m, json),
         ("config", "bars") => config_bars(store, m, json),
+
+        // Nothing to do with the database or the window: these three reach
+        // into a Claude configuration, and only ever because somebody typed
+        // them. See `super::skill` for why that is the whole design.
+        ("skill", "status") => super::skill::status(&skills_dir(m), json),
+        ("skill", "install") => super::skill::install(&skills_dir(m), json),
+        ("skill", "uninstall") => super::skill::uninstall(&skills_dir(m), json),
 
         ("cache", "status") => cache_status(store, json),
         ("cache", "clear") => cache_clear(store, json),
@@ -2044,6 +2051,11 @@ fn man_page() -> String {
     super::completions::man()
 }
 
+/// The skills directory a `skill` verb acts on.
+fn skills_dir(m: &clap::ArgMatches) -> std::path::PathBuf {
+    super::skill::skills_dir(arg(m, "to").map(String::as_str))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2687,6 +2699,7 @@ mod tests {
         fn flush_workspace(&self) {}
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
+        fn warm(&self, _instruments: &[omacharts_engine::Instrument]) {}
     }
 
     /// Every example in the table is a command that runs.
@@ -2711,8 +2724,23 @@ mod tests {
                     continue;
                 }
                 let store = seeded();
-                let args: Vec<String> =
+                let mut args: Vec<String> =
                     verb.example.split_whitespace().map(String::from).collect();
+                // A verb that writes outside the database is told where to
+                // write. `skill install` is the case: running the tests must
+                // not install a skill into the configuration of whoever is
+                // running them, and the example is run rather than skipped
+                // because what this test is for — an argument the table
+                // describes and the arm never reads — is exactly as worth
+                // catching there as anywhere else.
+                if verb.flags.iter().any(|flag| flag.long == "to") {
+                    let scratch = std::env::temp_dir()
+                        .join(format!("omacharts-example-{}", std::process::id()))
+                        .join(verb.name);
+                    let _ = std::fs::remove_dir_all(&scratch);
+                    args.push("--to".to_string());
+                    args.push(scratch.to_string_lossy().into_owned());
+                }
                 let outcome = dispatch(&args, &store, Some(&NoWindow));
                 assert_ne!(
                     outcome.code,
@@ -2737,6 +2765,89 @@ mod tests {
         run("chart split horizontal --book Macro", &store);
         run("chartbook create Semis --watchlist Semis --symbol NVDA", &store);
         run("chart indicator add rsi --book Macro", &store);
+        store
+    }
+
+    /// Every command in the agent skill is a command that runs.
+    ///
+    /// This is the condition the skill ships on. `claude-plugin/skills/omacharts`
+    /// is prose, and prose about a generated surface rots — a skill that has
+    /// drifted is worse than no skill, because it is confidently wrong and the
+    /// agent reading it has no way to tell. The surface has
+    /// `every_example_in_the_table_is_a_command_that_runs` holding it honest,
+    /// so the skill gets the same treatment, out of the same file the plugin
+    /// installs.
+    ///
+    /// Held to a higher bar than the table's own examples: each fenced block is
+    /// run as a block, in order, against one store, and every line has to
+    /// succeed outright rather than merely parse. A workflow is the thing the
+    /// skill is for, and "these six commands in this order" is a claim that can
+    /// be false while all six parse — `chart set --chart pos:1` after a split
+    /// that never made a `pos:1` is exactly that.
+    #[test]
+    fn every_command_in_the_agent_skill_is_a_command_that_runs() {
+        const SKILL: &str = include_str!("../../claude-plugin/skills/omacharts/SKILL.md");
+
+        let blocks = omacharts_commands_in(SKILL);
+        assert!(blocks.len() >= 4, "no commands found in the skill: is it still a markdown file?");
+
+        for block in &blocks {
+            // One store per block. Each is a recipe somebody starts from
+            // wherever they are, not a continuation of the one above it.
+            let store = skill_seed();
+            for line in block {
+                let args: Vec<String> = std::iter::once("omacharts".to_string())
+                    .chain(line.split_whitespace().map(String::from))
+                    .collect();
+                let outcome = dispatch(&args, &store, Some(&NoWindow));
+                assert_eq!(
+                    outcome.code,
+                    super::super::EXIT_OK,
+                    "the skill says {line:?}, and that does not work: {}{}",
+                    outcome.err,
+                    outcome.out
+                );
+            }
+        }
+    }
+
+    /// The `omacharts` lines of each fenced code block, block by block.
+    ///
+    /// Prose around them is left alone: the skill is written for somebody to
+    /// read, and only what it puts in a fence is something it is telling an
+    /// agent to type.
+    fn omacharts_commands_in(markdown: &str) -> Vec<Vec<String>> {
+        let mut blocks: Vec<Vec<String>> = Vec::new();
+        let mut current: Vec<String> = Vec::new();
+        let mut fenced = false;
+        for line in markdown.lines() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                if !fenced && !current.is_empty() {
+                    blocks.push(std::mem::take(&mut current));
+                }
+                continue;
+            }
+            if let Some(rest) = line.trim().strip_prefix("omacharts ").filter(|_| fenced) {
+                current.push(rest.to_string());
+            }
+        }
+        blocks
+    }
+
+    /// A store the skill's own workflows start from: one chartbook of two
+    /// charts, and a watchlist no chartbook has claimed.
+    ///
+    /// Deliberately not `seeded()`. That one hands the Semis watchlist to a
+    /// Semis chartbook, and a watchlist belongs to one chartbook — so the
+    /// skill's "build a chartbook around this list" would be refused for a
+    /// reason that is about the fixture rather than about the skill.
+    fn skill_seed() -> Store {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        run("watchlist add Semis NVDA AMD AVGO TSM MU", &store);
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
         store
     }
 }

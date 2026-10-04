@@ -412,6 +412,86 @@ the cache will be pruned back under 2.0 GB
 `cache clear` throws every cached series away. Settings, watchlists and
 chartbooks are not cache and are left alone.
 
+## Teaching an agent about this app
+
+Everything above is enough for an agent that has already been pointed here.
+The gap is before that: `--help` only answers once something has thought to
+ask, and `AGENTS.md` is only read by an agent already inside this repo. So
+Omacharts ships a skill — `claude-plugin/skills/omacharts/SKILL.md` — whose
+whole job is to be found, anywhere on the machine, when somebody says "what's
+semis doing" or "set me up for the open".
+
+It does not describe the command surface. `omacharts surface --json` already
+does that perfectly and regenerates itself; a hand-written copy would be wrong
+by the second release, and more confidently wrong than no copy at all. The
+skill carries the two things the surface structurally cannot: that this app is
+worth reaching for, and the orders commands go in — a 2×2 of linked charts is
+several commands and a handful of facts about `pos:N` and link groups, none of
+which is a word in any one command's help.
+
+There are two ways to install it, and **neither of them happens on its own.**
+
+**The plugin**, which is the route that also makes Claude Code suggest it:
+
+```
+claude plugin marketplace add /usr/share/omacharts/claude-plugin
+claude plugin install omacharts@omacharts
+```
+
+From a clone rather than the package, `./claude-plugin` is the same thing.
+`claude plugin update omacharts` picks up a new version with the app.
+
+**The command**, for somebody who has just installed the package and is
+already in a terminal:
+
+```
+$ omacharts skill install
+/home/you/.claude/skills/omacharts -> /usr/share/omacharts/claude-plugin/skills/omacharts
+  [exit 0]
+
+$ omacharts skill status
+installed: /home/you/.claude/skills/omacharts -> /usr/share/omacharts/claude-plugin/skills/omacharts
+  [exit 0]
+
+$ omacharts skill uninstall
+removed /home/you/.claude/skills/omacharts
+  [exit 0]
+```
+
+Three things about that command are deliberate, and the first is the reason
+the other two exist.
+
+**It is never a side effect.** Not the package's post-install, not
+`bin/install`, not the first launch. Somebody installing a charting app has
+not agreed to have their agent's configuration written into, and there is no
+version of "it is only a small file" that makes that assumption all right. One
+explicit command, or nothing.
+
+**It is a symlink, not a copy.** The risk worth designing against is a skill
+that drifts from the CLI, and the skill is kept beside the surface it
+describes with a test that runs its examples — a link keeps that true through
+every package upgrade, where a copy goes stale the first time a command
+changes. Removing the package then leaves a dangling link, which is the right
+way round to fail: a dangling link loads nothing and `skill status` says
+`points at ... which is not there any more`, while a stale copy would go on
+answering, wrongly.
+
+**It refuses rather than clobbers.** Anything already at
+`~/.claude/skills/omacharts` that Omacharts did not put there is left exactly
+as it is, and reported with what to do about it — and `uninstall` is held to
+the same rule, so it can only ever remove the link it made.
+
+```
+$ omacharts skill install
+omacharts: /home/you/.claude/skills/omacharts is already a directory, and not
+something Omacharts put there; move it aside and run this again
+  [exit 5]
+```
+
+Running `install` twice is not an error. `--to DIR` sends all three somewhere
+else — a project's own `.claude/skills` is a real place to want it — and
+`$CLAUDE_CONFIG_DIR` is honoured when it is set.
+
 ## The command groups
 
 | Group | What it covers |
@@ -424,6 +504,7 @@ chartbooks are not cache and are left alone.
 | `chart` | the charts inside a chartbook |
 | `config` | stored preferences |
 | `cache` | the cached market data |
+| `skill` | the agent skill, installed only when asked |
 
 `omacharts <group> --help` and `omacharts <group> <command> --help` both work,
 as does `omacharts help <group> <command>`.

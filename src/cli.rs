@@ -30,6 +30,7 @@ pub mod charts;
 pub mod completions;
 pub mod exec;
 pub mod parser;
+pub mod skill;
 pub mod spec;
 
 /// What the shell is told. Documented in `doc/cli.md` and in the JSON
@@ -151,6 +152,16 @@ pub trait Live {
     fn reload_workspace(&self);
     /// Draw the rail again, after a command changed a watchlist.
     fn reload_watchlists(&self);
+    /// Queue a paced background fetch of these instruments' daily bars, and
+    /// return immediately.
+    ///
+    /// This is the whole reason the trait exists for anything but redrawing:
+    /// a command running inside the window runs *on its main loop*, so a
+    /// command that fetches freezes the app for as long as the provider's
+    /// pacing takes. The window already owns a loader thread that fetches
+    /// nearest-wanted-first and shares one throttle across every request it
+    /// has ever made, which is strictly the better place to do it.
+    fn warm(&self, instruments: &[Instrument]);
 }
 
 /// Is this argument list a command rather than a symbol to open?
@@ -236,26 +247,40 @@ pub fn cache_key(provider: &Yahoo, instrument: &Instrument) -> Option<String> {
     provider.symbol_for(instrument).map(|symbol| format!("{}:{symbol}", provider.id()))
 }
 
-/// Fetch daily bars for the stalest symbols that need them.
+/// The symbols whose daily bars are old enough to be worth fetching, stalest
+/// first.
 ///
-/// Speculative, so the provider paces it apart and refuses outright while it
-/// is being throttled: a bar widget must never cost the app its rate limit.
-fn refresh(store: &Store, provider: &Yahoo, instruments: &[Instrument]) {
+/// Who acts on it depends on where we are running, which is the distinction
+/// [`Live::warm`] exists to make.
+fn stale_daily(store: &Store, provider: &Yahoo, instruments: &[Instrument]) -> Vec<Instrument> {
     let now = chrono::Utc::now().timestamp();
     let daily = Timeframe::days(1);
 
-    let mut candidates: Vec<(i64, &Instrument, String)> = instruments
+    let mut candidates: Vec<(i64, &Instrument)> = instruments
         .iter()
         .filter_map(|instrument| {
             let key = cache_key(provider, instrument)?;
             let fetched_at = store.coverage(&key, daily).map(|c| c.fetched_at).unwrap_or(0);
-            (now - fetched_at > STALE_AFTER_SECONDS).then_some((fetched_at, instrument, key))
+            (now - fetched_at > STALE_AFTER_SECONDS).then_some((fetched_at, instrument))
         })
         .collect();
-    candidates.sort_by_key(|(fetched_at, _, _)| *fetched_at);
+    candidates.sort_by_key(|(fetched_at, _)| *fetched_at);
+    candidates.into_iter().map(|(_, instrument)| instrument.clone()).collect()
+}
 
-    for (_, instrument, key) in candidates.into_iter().take(MAX_REFRESH) {
+/// Fetch daily bars for the stalest symbols that need them, here and now.
+///
+/// Only correct with no window open, where "here" is a short-lived process
+/// that exists to answer one question and has nothing to block. Inside the
+/// window this would run on the GTK main loop — see [`Live::warm`].
+///
+/// Speculative, so the provider paces it apart and refuses outright while it
+/// is being throttled: a bar widget must never cost the app its rate limit.
+fn refresh(store: &Store, provider: &Yahoo, instruments: &[Instrument]) {
+    let daily = Timeframe::days(1);
+    for instrument in stale_daily(store, provider, instruments).iter().take(MAX_REFRESH) {
         let Some(symbol) = provider.symbol_for(instrument) else { continue };
+        let Some(key) = cache_key(provider, instrument) else { continue };
         let since = store.coverage(&key, daily).map(|c| c.last_ts - 5 * daily.seconds());
         if let Ok(bars) = provider.bars_speculative(&symbol, daily, since) {
             if !bars.is_empty() {
@@ -266,7 +291,7 @@ fn refresh(store: &Store, provider: &Yahoo, instruments: &[Instrument]) {
 }
 
 /// The watchlist as JSON, for the bar widget.
-pub fn watchlist_json(refresh_first: bool) -> String {
+pub fn watchlist_json(refresh_first: bool, live: Option<&dyn Live>) -> String {
     let Ok(store) = Store::open() else {
         return r#"{"sections":[],"error":"could not open the database"}"#.to_string();
     };
@@ -280,7 +305,15 @@ pub fn watchlist_json(refresh_first: bool) -> String {
             .flat_map(|section| section.entries.iter())
             .filter_map(|entry| index.find(&entry.symbol, entry.suffix.as_deref()).cloned())
             .collect();
-        refresh(&store, &provider, &instruments);
+        match live {
+            // Inside the window, on its main loop. Hand the work to the
+            // loader thread and answer from the cache, which is all the
+            // widget draws anyway: a quote that arrives on the next tick is
+            // not worth six seconds of frozen application.
+            Some(live) => live.warm(&stale_daily(&store, &provider, &instruments)),
+            // A process of its own, with no window and nothing to block.
+            None => refresh(&store, &provider, &instruments),
+        }
     }
 
     let mut out = String::from("{\"sections\":[");
@@ -409,6 +442,10 @@ impl Live for Rc<crate::ui::Window> {
     fn reload_watchlists(&self) {
         crate::ui::Window::reload_watchlists(self);
     }
+
+    fn warm(&self, instruments: &[Instrument]) {
+        crate::ui::Window::warm(self, instruments);
+    }
 }
 
 /// The window as something a command can refresh.
@@ -435,6 +472,7 @@ mod tests {
         }
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
+        fn warm(&self, _instruments: &[Instrument]) {}
     }
 
     /// Unwinding out of a command would cross the C frame GLib called it from,

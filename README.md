@@ -66,3 +66,29 @@ omacharts watchlist add Semis NVDA AMD AVGO TSM MU
 
 See [doc/cli.md](doc/cli.md), or `omacharts surface --json` for the whole
 command surface in a form a script can read.
+
+## From Claude
+
+Because the whole command surface is machine-readable, an agent can drive this
+app as well as a person can — it just has to know the app is there. Omacharts
+ships a skill that makes Claude reach for it when you say "what's semis doing"
+or "set me up for the open", from anywhere on the machine.
+
+Install it as a plugin, which keeps it updated with the app:
+
+```sh
+claude plugin marketplace add /usr/share/omacharts/claude-plugin
+claude plugin install omacharts@omacharts
+```
+
+Or, if you have just installed the package and are already in a terminal:
+
+```sh
+omacharts skill install
+```
+
+Both are opt-in and nothing installs either one for you: putting a charting
+app on your machine is not an agreement to have your agent's configuration
+written into. `omacharts skill uninstall` takes it back out, and
+`omacharts skill status` says where it is. See
+[doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).
