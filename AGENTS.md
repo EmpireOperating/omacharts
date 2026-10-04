@@ -20,7 +20,7 @@ stored as content or structure**:
 - chartbooks: creating, renaming, deleting, switching
 - chart layouts: splitting, closing, which chart holds what
 - a chart's symbol, resolution, indicators, bar style, session, link group
-- which watchlist a chartbook shows
+- which watchlist a chartbook shows, and which link group a watchlist drives
 - settings that are real preferences
 - cache management
 
@@ -98,6 +98,26 @@ Nothing else needs touching. `cargo test` fails if the table and the parser
 disagree, if a verb has no example, if an example names the wrong command, or
 if the enumerated values drift from what the engine actually accepts.
 
+## A command must not be able to kill the window
+
+A command runs inside the running instance, and that instance called it from
+GLib — a C frame. Unwinding through one aborts the process instead of
+unwinding it, so a panic in a command does not fail the command: it takes the
+window down and the arrangement on screen with it. Somebody loses their work
+because of a typo.
+
+Two rules, and both are in `src/cli`:
+
+- **No `expect`, `unwrap`, indexing or slicing on anything that came from a
+  command or from the stored arrangement.** `required` is how a required
+  argument is read, `Workspace::book_mut` and `charts::panes_mut` return a
+  `Result`, and the arrangement is read out of a settings row that
+  `config set workspace` can write anything into. Every one of these used to
+  be an `expect`.
+- **`cli::run` catches what is left.** A bug nobody foresaw comes back as
+  `EXIT_BUG` with a message naming the command, and the window carries on.
+  That is a net, not a licence: a command reaching it is still a bug to fix.
+
 ## How a command reaches a window that is already open
 
 GTK hands a second invocation's arguments to the instance already running, and
@@ -131,3 +151,42 @@ omacharts surface --json | jq -r '.commands[].command'
 
 Read that list against what the UI can do. If the feature you just added is
 not in it, and it is not presentational geometry, it is not finished.
+
+### What the tests enforce on their own
+
+A contract nobody can check rots at the first hurried feature, so four tests
+fail rather than leaving it to somebody remembering to read the list.
+
+- **`every_field_a_chart_is_stored_with_is_reachable_from_a_command`** reads
+  `StoredPane` and `Chartbook` out of `window.rs` and requires every field to
+  name the command that sets it, or to say why it needs none. A new piece of
+  chart state fails here until one of the two is true. It checks the command
+  and the flag against `spec`, so a name that no longer exists fails too.
+- **`every_example_in_the_table_is_a_command_that_runs`** runs every verb's
+  example against a seeded store with a window standing in. An example that
+  cannot be parsed, or an argument the table describes and the arm never
+  reads, fails here — which is exactly how `chart focus` shipped broken.
+- **The enumerated-value tests** — bar styles, sessions, indicators, anchors,
+  line styles, link groups — compare what the table offers against what the
+  engine defines. One caught the table offering four bar styles when there
+  were two.
+- **The key-pinning tests** — `the_group_a_command_sets_is_the_one_the_rail_reads`
+  and `the_scheme_this_remembers_is_the_one_the_dialog_remembers` — hold a
+  command and the window to the same settings key where the window's own
+  constant is private to it.
+
+Say plainly what they cannot reach, because a test that looks like it proves
+parity and does not is worse than none:
+
+- **A capability that changes nothing stored.** Scrolling, zooming, maximizing
+  and auto-scaling a chart are out of scope by design, and the field test
+  cannot tell them apart from something that should have been in.
+- **Settings reached only through `config set`.** `timeframes` and
+  `watchlist_columns` are real preferences with no command of their own, and
+  nothing fails because of it.
+- **A resolution.** `--resolution` takes anything parseable rather than a
+  fixed set, so there are no variants to compare; the test checks only that
+  every resolution the header strip offers is one a command accepts.
+- **Whether a window that is open actually catches up.** Nothing tests that,
+  and `config set theme` is the case that does not: it writes the row and the
+  running window keeps the theme it started with.

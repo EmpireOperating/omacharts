@@ -11,9 +11,11 @@
 
 use serde_json::{json, Value};
 
-use omacharts_engine::indicators::{LineStyle, Stroke};
-use omacharts_engine::theme::{ColorChoice, SWATCH_NAMES};
-use omacharts_engine::{BarStyle, Indicator, IndicatorKind, Reset, Session, Timeframe};
+use omacharts_engine::indicators::{LineStyle, Stroke, MAX_PANE_SHARE, MIN_PANE_SHARE};
+use omacharts_engine::theme::{ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID};
+use omacharts_engine::{
+    link, BarStyle, Indicator, IndicatorKind, LinkGroup, Reset, Session, Timeframe,
+};
 
 use super::charts::{self, Workspace};
 use super::{parser, Fault, Live, Outcome, EXIT_USAGE};
@@ -87,6 +89,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("watchlist", "delete") => watchlist_delete(store, m, json),
         ("watchlist", "add") => watchlist_add(store, m, json, true),
         ("watchlist", "remove") => watchlist_add(store, m, json, false),
+        ("watchlist", "link") => watchlist_link(store, m, json),
         ("watchlist", "feed") => Ok(super::watchlist_json(flag(m, "refresh"))),
 
         ("section", "list") => section_list(store, m, json),
@@ -114,6 +117,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "list") => config_list(store, json),
         ("config", "get") => config_get(store, m, json),
         ("config", "set") => config_set(store, m, json),
+        ("config", "bars") => config_bars(store, m, json),
 
         ("cache", "status") => cache_status(store, json),
         ("cache", "clear") => cache_clear(store, json),
@@ -184,7 +188,7 @@ fn surface(m: &clap::ArgMatches) -> Outcome {
 // -- symbols --------------------------------------------------------------
 
 fn symbol_search(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let query = arg(m, "QUERY").expect("required");
+    let query = required(m, "QUERY")?;
     let limit: usize = m
         .get_one::<String>("limit")
         .map(|l| l.parse().unwrap_or(10))
@@ -217,7 +221,7 @@ fn symbol_search(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
 }
 
 fn symbol_show(m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let symbol = arg(m, "SYMBOL").expect("required").to_uppercase();
+    let symbol = required(m, "SYMBOL")?.to_uppercase();
     let suffix = arg(m, "SUFFIX").map(|s| s.to_uppercase());
     let index = crate::inventory::everything();
     let found = index.find(&symbol, suffix.as_deref()).ok_or_else(|| {
@@ -291,19 +295,108 @@ fn list_or_default(store: &Store, m: &clap::ArgMatches) -> Result<(i64, String),
     }
 }
 
+/// A link group as a chart and a watchlist both spell one: `1`-`9`, or `none`.
+fn link_group(text: &str) -> Result<u8, Fault> {
+    if text.eq_ignore_ascii_case("none") {
+        return Ok(0);
+    }
+    text.parse::<u8>()
+        .ok()
+        .filter(|group| (1..=link::GROUP_COUNT).contains(group))
+        .ok_or_else(|| {
+            Fault::usage(format!(
+                "{text:?} is not a link group; use 1-{} or none",
+                link::GROUP_COUNT
+            ))
+        })
+}
+
+/// Where a watchlist's link group is written down.
+///
+/// Against the watchlist's id, because the group belongs to the list rather
+/// than to the rail: the same list driving group 3 under one chartbook drives
+/// group 3 under the next. The rail's own helper for this key is private to
+/// the window, so the spelling is here as well — and
+/// `the_group_a_command_sets_is_the_one_the_rail_reads` writes through this
+/// one and reads back through that one, so the two cannot drift apart
+/// unnoticed.
+fn link_setting(watchlist: i64) -> String {
+    format!("watchlist_link_{watchlist}")
+}
+
+/// The group a watchlist drives, as the rail would report it.
+///
+/// Asked of the rail's own scan rather than of the setting, so both of its
+/// rules are applied here too: the default watchlist drives group 1 until
+/// something says otherwise, and where two lists claim one group the earlier
+/// in display order keeps it. Zero is no group.
+fn link_group_of(store: &Store, watchlist: i64) -> u8 {
+    crate::ui::watchlist::group_owners(store)
+        .into_iter()
+        .find(|(_, id, _)| *id == watchlist)
+        .map(|(group, ..)| group)
+        .unwrap_or(0)
+}
+
+/// Read, set or clear the group a watchlist drives.
+///
+/// A group drives one list, so one already taken is refused rather than
+/// stolen — the rail greys that row out instead of offering it, and a command
+/// that quietly moved it would change which charts a list drives without
+/// saying so.
+fn watchlist_link(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let (id, name) = find_list(store, required(m, "LIST")?)?;
+    let Some(wanted) = arg(m, "GROUP") else {
+        let group = link_group_of(store, id);
+        return match as_json {
+            true => Ok(format!("{}\n", json!({"id": id, "name": name, "group": group}))),
+            false => Ok(format!("{}\n", spell_group(group))),
+        };
+    };
+    let group = link_group(wanted)?;
+    if let Some((_, holder)) =
+        crate::ui::watchlist::group_held_by(store, LinkGroup::numbered(group), id)
+    {
+        return Err(Fault::refused(format!(
+            "link group {group} already drives {holder:?}; take it off that list first"
+        )));
+    }
+    store.set_setting(&link_setting(id), &group.to_string());
+    let text = match group {
+        0 => format!("{name:?} drives no link group"),
+        group => format!("{name:?} now drives link group {group}"),
+    };
+    said(as_json, json!({"id": id, "name": name, "group": group}), text)
+}
+
+/// A group where somebody reads it. Zero is not a group.
+fn spell_group(group: u8) -> String {
+    match group {
+        0 => "none".to_string(),
+        group => group.to_string(),
+    }
+}
+
+/// Every watchlist, with the group it drives.
+///
+/// The group is in the listing rather than only in `watchlist link`, because
+/// "which list drives which group" is one question and answering it a list at
+/// a time invites nine commands and a wrong answer in the middle.
 fn watchlist_list(store: &Store, as_json: bool) -> Result<String, Fault> {
     let lists = store.watchlists();
+    let counted = |id: i64| -> usize {
+        store.watchlist_sections(id).iter().map(|s| s.entries.len()).sum()
+    };
     if as_json {
         let rows = lists
             .iter()
             .map(|(id, name)| {
-                let counted: usize =
-                    store.watchlist_sections(*id).iter().map(|s| s.entries.len()).sum();
                 json!({
                     "id": id,
                     "name": name,
-                    "symbols": counted,
+                    "symbols": counted(*id),
                     "isDefault": *id == DEFAULT_WATCHLIST,
+                    "link": link_group_of(store, *id),
                 })
                 .to_string()
             })
@@ -313,10 +406,14 @@ fn watchlist_list(store: &Store, as_json: bool) -> Result<String, Fault> {
     Ok(lists
         .iter()
         .map(|(id, name)| {
-            let counted: usize =
-                store.watchlist_sections(*id).iter().map(|s| s.entries.len()).sum();
-            let tag = if *id == DEFAULT_WATCHLIST { "  (default)" } else { "" };
-            format!("{id:<4} {name:<24} {counted:>4} symbols{tag}")
+            let tag = if *id == DEFAULT_WATCHLIST { "(default)" } else { "" };
+            let link = match link_group_of(store, *id) {
+                0 => String::new(),
+                group => format!("link {group}"),
+            };
+            format!("{id:<4} {name:<24} {:>4} symbols  {link:<8}{tag}", counted(*id))
+                .trim_end()
+                .to_string()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -365,7 +462,7 @@ fn sections_json(sections: &[Section]) -> Value {
 }
 
 fn watchlist_create(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let name = arg(m, "NAME").expect("required");
+    let name = required(m, "NAME")?;
     let id = store
         .add_watchlist(name)
         .ok_or_else(|| Fault::new(super::EXIT_ERROR, "could not create the watchlist".into()))?;
@@ -373,14 +470,14 @@ fn watchlist_create(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Resul
 }
 
 fn watchlist_rename(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (id, was) = find_list(store, arg(m, "LIST").expect("required"))?;
-    let name = arg(m, "NAME").expect("required");
+    let (id, was) = find_list(store, required(m, "LIST")?)?;
+    let name = required(m, "NAME")?;
     store.rename_watchlist(id, name);
     said(as_json, json!({"id": id, "name": name}), format!("renamed {was:?} to {name:?}"))
 }
 
 fn watchlist_delete(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (id, name) = find_list(store, arg(m, "LIST").expect("required"))?;
+    let (id, name) = find_list(store, required(m, "LIST")?)?;
     if id == DEFAULT_WATCHLIST {
         return Err(Fault::refused(format!(
             "{name:?} is the watchlist the bar widget shows and cannot be deleted; rename it instead"
@@ -398,13 +495,15 @@ fn watchlist_add(
     as_json: bool,
     adding: bool,
 ) -> Result<String, Fault> {
-    let (id, name) = find_list(store, arg(m, "LIST").expect("required"))?;
+    let (id, name) = find_list(store, required(m, "LIST")?)?;
     let suffix = arg(m, "suffix").map(|s| s.to_uppercase());
     let symbols: Vec<String> = m
         .get_many::<String>("SYMBOL")
-        .expect("required")
-        .map(|s| s.to_uppercase())
-        .collect();
+        .map(|given| given.map(|s| s.to_uppercase()).collect())
+        .unwrap_or_default();
+    if symbols.is_empty() {
+        return Err(Fault::usage("name at least one symbol".into()));
+    }
 
     let section = match arg(m, "section") {
         None => store.root_section(id),
@@ -489,8 +588,8 @@ fn section_list(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<St
 }
 
 fn section_create(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (list, list_name) = find_list(store, arg(m, "LIST").expect("required"))?;
-    let name = arg(m, "NAME").expect("required");
+    let (list, list_name) = find_list(store, required(m, "LIST")?)?;
+    let name = required(m, "NAME")?;
     let id = store
         .add_section(list, name)
         .ok_or_else(|| Fault::new(super::EXIT_ERROR, "could not create the section".into()))?;
@@ -502,9 +601,9 @@ fn section_create(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
 }
 
 fn section_rename(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (list, _) = find_list(store, arg(m, "LIST").expect("required"))?;
-    let section = find_section(store, list, arg(m, "SECTION").expect("required"))?;
-    let name = arg(m, "NAME").expect("required");
+    let (list, _) = find_list(store, required(m, "LIST")?)?;
+    let section = find_section(store, list, required(m, "SECTION")?)?;
+    let name = required(m, "NAME")?;
     store.rename_section(section.id, name);
     said(
         as_json,
@@ -514,8 +613,8 @@ fn section_rename(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
 }
 
 fn section_delete(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (list, _) = find_list(store, arg(m, "LIST").expect("required"))?;
-    let section = find_section(store, list, arg(m, "SECTION").expect("required"))?;
+    let (list, _) = find_list(store, required(m, "LIST")?)?;
+    let section = find_section(store, list, required(m, "SECTION")?)?;
     if section.root {
         return Err(Fault::refused(
             "that is where symbols outside a section live, and cannot be removed".into(),
@@ -534,8 +633,8 @@ fn section_delete(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
 /// The symbols are copied across before the section goes, so a run that dies
 /// in the middle leaves them in both places and never in neither.
 fn section_promote(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let (list, _) = find_list(store, arg(m, "LIST").expect("required"))?;
-    let section = find_section(store, list, arg(m, "SECTION").expect("required"))?;
+    let (list, _) = find_list(store, required(m, "LIST")?)?;
+    let section = find_section(store, list, required(m, "SECTION")?)?;
     if section.root {
         return Err(Fault::refused(
             "symbols outside a section have no name to give a watchlist".into(),
@@ -587,17 +686,23 @@ fn charts_verb(
                     .to_string()
                 })
                 .collect();
+            if !as_json && workspace.books().is_empty() {
+                return Ok("no chartbooks yet; open the app once, or create one\n".to_string());
+            }
             return Ok(match as_json {
                 true => wrap_list("chartbooks", rows),
                 false => (0..workspace.books().len())
                     .map(|i| {
                         format!(
-                            "{}{:<4} {:<24} {:>2} charts",
+                            "{}{:<4} {:<24} {:>2} charts  {}",
                             if i == workspace.active() { "* " } else { "  " },
                             format!("id:{i}"),
                             workspace.name_of(i),
-                            charts::panes(&workspace.books()[i]).len()
+                            charts::panes(&workspace.books()[i]).len(),
+                            rail_label(store, &workspace.books()[i]),
                         )
+                        .trim_end()
+                        .to_string()
                     })
                     .collect::<Vec<_>>()
                     .join("\n")
@@ -617,33 +722,59 @@ fn charts_verb(
                 ),
                 false => {
                     let focused = book["focused"].as_u64().unwrap_or(0);
-                    let mut out = format!("{}\n", workspace.name_of(at));
+                    // Which list a book shows and which group a chart is in
+                    // are half of what either one is for, so they belong in
+                    // the listing a person reads and not only in the JSON.
+                    let shows = rail_label(store, book);
+                    let mut out = match shows.is_empty() {
+                        true => workspace.name_of(at),
+                        false => format!("{} — {shows}", workspace.name_of(at)),
+                    };
+                    out.push('\n');
                     for pane in charts::panes(book) {
                         let id = pane["id"].as_u64().unwrap_or(0);
-                        out.push_str(&format!(
-                            "{} {:<4} {:<12} {:<6} {}\n",
-                            if id == focused { "*" } else { " " },
-                            id,
-                            spell(
-                                pane["symbol"].as_str().unwrap_or("?"),
-                                pane["suffix"].as_str()
-                            ),
-                            pane["timeframe"].as_str().unwrap_or(""),
-                            pane["bar_style"].as_str().unwrap_or(""),
-                        ));
+                        out.push_str(
+                            format!(
+                                "{} {:<4} {:<12} {:<6} {:<8} {}\n",
+                                if id == focused { "*" } else { " " },
+                                id,
+                                spell(
+                                    pane["symbol"].as_str().unwrap_or("?"),
+                                    pane["suffix"].as_str()
+                                ),
+                                pane["timeframe"].as_str().unwrap_or(""),
+                                pane["bar_style"].as_str().unwrap_or(""),
+                                match pane["linked"].as_u64().unwrap_or(0) {
+                                    0 => "unlinked".to_string(),
+                                    group => format!("link {group}"),
+                                },
+                            )
+                            .trim_end(),
+                        );
+                        out.push('\n');
                     }
                     out
                 }
             });
         }
         ("chartbook", "create") => {
-            let name = arg(m, "NAME").expect("required");
+            let name = required(m, "NAME")?;
             let symbol = m
                 .get_one::<String>("symbol")
                 .map(|s| s.to_uppercase())
                 .unwrap_or_else(|| "SPY".to_string());
             let watchlist = match arg(m, "watchlist") {
-                Some(selector) => Some(find_list(store, selector)?.0),
+                Some(selector) => {
+                    let (id, name) = find_list(store, selector)?;
+                    // The book being made is not in the list yet, so nothing
+                    // is excepted: any book holding this list is another one.
+                    if let Some(holder) = book_using(&workspace, usize::MAX, id) {
+                        return Err(Fault::refused(format!(
+                            "chartbook {holder:?} already shows {name:?}; a watchlist belongs to one"
+                        )));
+                    }
+                    Some(id)
+                }
                 None => None,
             };
             let id = workspace.next_pane();
@@ -661,14 +792,14 @@ fn charts_verb(
             format!("created chartbook {name:?} (id:{at}) showing {symbol}")
         }
         ("chartbook", "rename") => {
-            let at = workspace.find(arg(m, "BOOK").expect("required"))?;
+            let at = workspace.find(required(m, "BOOK")?)?;
             let was = workspace.name_of(at);
-            let name = arg(m, "NAME").expect("required");
-            workspace.book_mut(at)["name"] = json!(name);
+            let name = required(m, "NAME")?;
+            workspace.book_mut(at)?["name"] = json!(name);
             format!("renamed chartbook {was:?} to {name:?}")
         }
         ("chartbook", "delete") => {
-            let at = workspace.find(arg(m, "BOOK").expect("required"))?;
+            let at = workspace.find(required(m, "BOOK")?)?;
             if workspace.books().len() < 2 {
                 return Err(Fault::refused(
                     "this is the only chartbook; there has to be one".into(),
@@ -680,14 +811,19 @@ fn charts_verb(
             format!("deleted chartbook {name:?} and its {charts} charts")
         }
         ("chartbook", "switch") => {
-            let at = workspace.find(arg(m, "BOOK").expect("required"))?;
+            let at = workspace.find(required(m, "BOOK")?)?;
             workspace.set_active(at);
             format!("switched to chartbook {:?}", workspace.name_of(at))
         }
         ("chartbook", "watchlist") => {
-            let at = workspace.find(arg(m, "BOOK").expect("required"))?;
-            let (id, name) = find_list(store, arg(m, "LIST").expect("required"))?;
-            workspace.book_mut(at)["watchlist"] = json!(id);
+            let at = workspace.find(required(m, "BOOK")?)?;
+            let (id, name) = find_list(store, required(m, "LIST")?)?;
+            if let Some(holder) = book_using(&workspace, at, id) {
+                return Err(Fault::refused(format!(
+                    "chartbook {holder:?} already shows {name:?}; a watchlist belongs to one"
+                )));
+            }
+            workspace.book_mut(at)?["watchlist"] = json!(id);
             format!("chartbook {:?} now shows watchlist {name:?}", workspace.name_of(at))
         }
         ("chart", _) => return chart_verb(store, verb, m, as_json, &mut workspace),
@@ -720,12 +856,9 @@ fn chart_verb(
                 .find(|p| p["id"].as_u64() == Some(pane as u64))
                 .cloned()
                 .unwrap_or_else(|| charts::new_pane(added, "SPY", None));
-            let target = workspace.book_mut(at);
+            let target = workspace.book_mut(at)?;
             target["layout"] = charts::split_leaf(&target["layout"], pane, added, horizontal);
-            target["panes"]
-                .as_array_mut()
-                .expect("panes is an array")
-                .push(charts::copy_pane(&from, added));
+            charts::panes_mut(target)?.push(charts::copy_pane(&from, added));
             target["focused"] = json!(added);
             format!(
                 "split chart {pane} {}; the new chart is {added}",
@@ -739,24 +872,21 @@ fn chart_verb(
                 ));
             };
             let kept = charts::leaves(&pruned);
-            let target = workspace.book_mut(at);
+            let target = workspace.book_mut(at)?;
             target["layout"] = pruned;
-            target["panes"]
-                .as_array_mut()
-                .expect("panes is an array")
+            charts::panes_mut(target)?
                 .retain(|p| p["id"].as_u64().is_some_and(|id| kept.contains(&(id as u32))));
             target["focused"] = json!(kept.first().copied().unwrap_or(0));
             format!("closed chart {pane}")
         }
         "focus" => {
-            let id: u32 = m
-                .get_one::<String>("ID")
-                .expect("required")
-                .parse()
-                .map_err(|_| Fault::usage("a chart id is a number".into()))?;
-            charts::resolve_pane(&book, Some(&id.to_string()))?;
-            workspace.book_mut(at)["focused"] = json!(id);
-            format!("focused chart {id}")
+            // Through the same resolver as every other verb, so `pos:N` works
+            // here too. It is the form worth using, and a verb that took only
+            // a raw id would be the one place that is not true.
+            let wanted = required(m, "CHART")?;
+            let id = charts::resolve_pane(&book, Some(wanted))?;
+            workspace.book_mut(at)?["focused"] = json!(id);
+            format!("focused {}", chart_label(&book, id))
         }
         "set" => return chart_set(store, m, as_json, workspace, at, pane),
         "indicator" => return chart_indicator(store, m, as_json, workspace, at, pane),
@@ -816,21 +946,27 @@ fn chart_set(
     };
     let link = match arg(m, "link") {
         None => None,
-        Some(text) if text.eq_ignore_ascii_case("none") => Some(0u8),
-        Some(text) => {
-            let group: u8 = text
-                .parse()
-                .ok()
-                .filter(|g| (1..=9).contains(g))
-                .ok_or_else(|| Fault::usage(format!("{text:?} is not a link group; use 1-9 or none")))?;
-            Some(group)
-        }
+        Some(text) => Some(link_group(text)?),
     };
 
-    let target = workspace.book_mut(at);
+    // Joining a group adopts what the group is already showing, which is what
+    // joining one means — a chart whose chain says group 3 while it shows
+    // something else is the state the window goes out of its way to avoid.
+    // Not where the same command named a symbol: that was asked for.
+    let adopted = match (link, symbol.is_some()) {
+        (Some(group), false) if group > 0 => group_instrument(workspace.book(at)?, group, pane),
+        _ => None,
+    };
+
+    let target = workspace.book_mut(at)?;
     let Some(chart) = charts::pane_mut(target, pane) else {
         return Err(Fault::not_found(format!("no chart {pane}")));
     };
+    if let Some((symbol, suffix)) = adopted {
+        chart["symbol"] = json!(symbol);
+        chart["suffix"] = json!(suffix);
+        changed.push(format!("symbol {}", spell(&symbol, suffix.as_deref())));
+    }
     if let Some(symbol) = symbol {
         chart["symbol"] = json!(symbol);
         chart["suffix"] = json!(suffix);
@@ -879,7 +1015,7 @@ fn chart_indicator(
     at: usize,
     pane: u32,
 ) -> Result<String, Fault> {
-    let action = arg(m, "ACTION").expect("required").as_str();
+    let action = required(m, "ACTION")?.as_str();
     let book = workspace.book(at)?.clone();
     let chart = charts::panes(&book)
         .iter()
@@ -931,7 +1067,7 @@ fn chart_indicator(
     // carrying one bad value leaves the chart exactly as it was.
     let edits = Edits::read(m)?;
 
-    let target = workspace.book_mut(at);
+    let target = workspace.book_mut(at)?;
     let Some(chart) = charts::pane_mut(target, pane) else {
         return Err(Fault::not_found(format!("no chart {pane}")));
     };
@@ -1049,6 +1185,58 @@ fn chart_label(book: &Value, pane: u32) -> String {
     )
 }
 
+/// What the other charts in a group are showing, if they agree on anything.
+///
+/// The first one found, which is how the window picks it too: a group whose
+/// members disagree is a group mid-change, and either answer leaves it
+/// consistent a moment later.
+fn group_instrument(book: &Value, group: u8, except: u32) -> Option<(String, Option<String>)> {
+    charts::panes(book)
+        .iter()
+        .filter(|pane| pane["id"].as_u64() != Some(u64::from(except)))
+        .filter(|pane| pane["linked"].as_u64() == Some(u64::from(group)))
+        .find_map(|pane| {
+            Some((
+                pane["symbol"].as_str()?.to_string(),
+                pane["suffix"].as_str().map(str::to_string),
+            ))
+        })
+}
+
+/// The chartbook already showing `watchlist`, if it is not the one at `besides`.
+///
+/// A list belongs to one book. Which list the rail shows is written down
+/// against whichever book was saved last, so two books claiming one would
+/// fight over it — the window heals that by falling the shown book back to the
+/// default, and a command that could cause it in the first place is worth
+/// refusing instead.
+///
+/// The default watchlist is nobody's: it is the one that cannot be deleted and
+/// where every fallback lands, so a rule that let one book keep it would leave
+/// a second book with nowhere to be.
+fn book_using(workspace: &Workspace, besides: usize, watchlist: i64) -> Option<String> {
+    if watchlist == DEFAULT_WATCHLIST {
+        return None;
+    }
+    (0..workspace.books().len())
+        .filter(|at| *at != besides)
+        .find(|at| workspace.books()[*at]["watchlist"].as_i64() == Some(watchlist))
+        .map(|at| workspace.name_of(at))
+}
+
+/// Which watchlist a chartbook shows, where a person reads it.
+///
+/// Empty for a book written before the rail belonged to one: those fall back
+/// to whatever the window was last showing, and naming a list they do not
+/// actually hold would be a worse answer than naming none.
+fn rail_label(store: &Store, book: &Value) -> String {
+    let Some(id) = book["watchlist"].as_i64() else { return String::new() };
+    match store.watchlists().into_iter().find(|(found, _)| *found == id) {
+        Some((_, name)) => format!("watchlist {name:?}"),
+        None => String::new(),
+    }
+}
+
 fn describe_indicator(stored: &Value) -> String {
     let kind = stored["kind"].as_str().unwrap_or("?");
     let mut text = IndicatorKind::ALL
@@ -1113,7 +1301,10 @@ impl Edits {
                         .ok_or_else(|| Fault::usage(format!("{text:?} is not a line style")))?,
                 ),
             },
-            height: fraction(m, "height", 0.0, 1.0)?,
+            // The range the engine clamps to rather than a wider one of our own:
+            // a height it quietly brings back reads as the command having
+            // worked, and the number it was given is not the one on screen.
+            height: fraction(m, "height", MIN_PANE_SHARE, MAX_PANE_SHARE)?,
             overbought: number(m, "overbought")?,
             oversold: number(m, "oversold")?,
             bands: match arg(m, "bands") {
@@ -1365,6 +1556,12 @@ fn status(store: &Store, window_open: bool, as_json: bool) -> Result<String, Fau
         false => "nothing is open; this is what was stored when the window last closed\n\n"
             .to_string(),
     };
+    // Nothing arranged at all is not a chartbook with nothing in it, and
+    // naming one that does not exist would be an answer a caller acts on.
+    if workspace.books().is_empty() {
+        out.push_str("no chartbooks yet; open the app once, or create one\n");
+        return Ok(out);
+    }
     out.push_str(&format!("chartbook  {} (id:{at})\n", workspace.name_of(at)));
     for (i, id) in order.iter().enumerate() {
         let Some(pane) = charts::panes(&book).iter().find(|p| p["id"].as_u64() == Some(*id as u64))
@@ -1427,7 +1624,7 @@ fn config_list(store: &Store, as_json: bool) -> Result<String, Fault> {
 }
 
 fn config_get(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let key = arg(m, "KEY").expect("required");
+    let key = required(m, "KEY")?;
     let value = store
         .setting(key)
         .ok_or_else(|| Fault::not_found(format!("{key:?} has never been set")))?;
@@ -1438,10 +1635,65 @@ fn config_get(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<Stri
 }
 
 fn config_set(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
-    let key = arg(m, "KEY").expect("required");
-    let value = arg(m, "VALUE").expect("required");
+    let key = required(m, "KEY")?;
+    let value = required(m, "VALUE")?;
     store.set_setting(key, value);
     said(as_json, json!({"key": key, "value": value}), format!("set {key} to {value}"))
+}
+
+/// Where the scheme to go back to when the colour is put back is remembered.
+///
+/// The same key the preferences dialog writes, whose own constant is private
+/// to it — `the_scheme_this_remembers_is_the_one_the_dialog_remembers` pins
+/// the spelling. Monochrome is a scheme like any other, so choosing it without
+/// writing this down would throw away a palette somebody had picked and leave
+/// them on the default when they changed their mind.
+const COLOURED_BARS: &str = "coloured_bar_scheme";
+
+/// Colour or no colour, asked the way people arrive at it.
+///
+/// `config set bar_scheme theme-mono` reaches the same scheme, and is not the
+/// same command: it does not remember what to go back to, so putting the
+/// colour back lands on the default rather than on the scheme that was in use.
+/// This is the question the preferences dialog asks, so the terminal asks it
+/// too.
+fn config_bars(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let current =
+        store.setting(crate::theming::SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
+    let mono = current == THEME_MONO_ID;
+    let Some(state) = arg(m, "STATE") else {
+        return match as_json {
+            true => Ok(format!("{}\n", json!({"bars": spell_bars(mono), "scheme": current}))),
+            false => Ok(format!("{}\n", spell_bars(mono))),
+        };
+    };
+
+    let wants_mono = state == "monochrome";
+    let scheme = match (wants_mono, mono) {
+        (true, false) => {
+            store.set_setting(COLOURED_BARS, &current);
+            THEME_MONO_ID.to_string()
+        }
+        (false, true) => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
+        // Already there. Said rather than silently done, because "it was
+        // already monochrome" and "it is monochrome now" are different
+        // answers to somebody checking their own work.
+        _ => current.clone(),
+    };
+    store.set_setting(crate::theming::SETTING_BARS, &scheme);
+    let text = match (wants_mono, mono) {
+        (true, false) => "bars are monochrome; the colours are remembered".to_string(),
+        (false, true) => format!("bars carry their direction again, in the {scheme:?} scheme"),
+        _ => format!("bars were already {}", spell_bars(mono)),
+    };
+    said(as_json, json!({"bars": spell_bars(wants_mono), "scheme": scheme}), text)
+}
+
+fn spell_bars(mono: bool) -> &'static str {
+    match mono {
+        true => "monochrome",
+        false => "coloured",
+    }
 }
 
 fn cache_status(store: &Store, as_json: bool) -> Result<String, Fault> {
@@ -1512,6 +1764,24 @@ fn wrap_list(name: &str, rows: Vec<String>) -> String {
 /// crash.
 fn arg<'a>(m: &'a clap::ArgMatches, id: &str) -> Option<&'a String> {
     m.try_get_one::<String>(id).ok().flatten()
+}
+
+/// An argument the table marks required, as a failure rather than a crash.
+///
+/// Clap has already refused a command that left one out, so nothing here
+/// means this arm and the table disagree about the argument's name — which is
+/// how `chart focus` shipped looking for an `ID` the table calls `CHART`. That
+/// was an `expect`, and a panic in a command runs inside the window, where it
+/// crosses GLib's C trampoline and aborts the process rather than unwinding:
+/// the arrangement on screen is gone, from a bug in a command that could have
+/// just failed.
+fn required<'a>(m: &'a clap::ArgMatches, id: &str) -> Result<&'a String, Fault> {
+    arg(m, id).ok_or_else(|| {
+        Fault::new(
+            super::EXIT_ERROR,
+            format!("this build cannot read its own {id} argument, which is a bug in it"),
+        )
+    })
 }
 
 fn flag(m: &clap::ArgMatches, id: &str) -> bool {
@@ -1845,5 +2115,251 @@ mod tests {
         assert_eq!(parse_bytes("512 MB"), Some(512 * 1024 * 1024));
         assert_eq!(parse_bytes("nonsense"), None);
         assert_eq!(parse_bytes("0"), None, "a cache of nothing is not a limit");
+    }
+
+    #[test]
+    fn a_watchlists_group_can_be_read_set_and_cleared() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        assert_eq!(run("watchlist link Semis", &store).out.trim(), "none");
+
+        let set = run("watchlist link Semis 3", &store);
+        assert_eq!(set.code, 0, "{}", set.err);
+        assert_eq!(run("watchlist link Semis", &store).out.trim(), "3");
+        assert!(run("watchlist list", &store).out.contains("link 3"));
+
+        assert_eq!(run("watchlist link Semis none", &store).code, 0);
+        assert_eq!(run("watchlist link Semis", &store).out.trim(), "none");
+    }
+
+    /// A group drives one list. Taking one off another list is a thing to do
+    /// deliberately, so a command that wanted it has to be told no first.
+    #[test]
+    fn a_group_another_watchlist_drives_is_refused_rather_than_taken() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        run("watchlist create Energy", &store);
+        run("watchlist link Semis 5", &store);
+
+        let refused = run("watchlist link Energy 5", &store);
+        assert_eq!(refused.code, super::super::EXIT_REFUSED);
+        assert!(refused.err.contains("Semis"), "it has to name the holder: {}", refused.err);
+        assert_eq!(run("watchlist link Semis", &store).out.trim(), "5", "and leave it where it was");
+    }
+
+    /// The rail and this command have to be writing down the same thing. The
+    /// window's own helper for the key is private to it, so this writes through
+    /// the command and reads back through the window's own reader: spell the
+    /// key differently in either place and this fails.
+    #[test]
+    fn the_group_a_command_sets_is_the_one_the_rail_reads() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        run("watchlist link Semis 4", &store);
+        let owners = crate::ui::watchlist::group_owners(&store);
+        assert!(
+            owners.iter().any(|(group, _, name)| *group == 4 && name == "Semis"),
+            "the rail reads {owners:?}"
+        );
+    }
+
+    /// The default watchlist drives group 1 out of the box, and the listing has
+    /// to say so — it is the one group whose holder nobody chose.
+    #[test]
+    fn the_default_watchlist_is_reported_driving_the_group_it_starts_in() {
+        let store = Store::memory().unwrap();
+        assert_eq!(run("watchlist link id:1", &store).out.trim(), "1");
+    }
+
+    #[test]
+    fn bars_can_lose_their_colour_and_get_the_same_scheme_back() {
+        let store = Store::memory().unwrap();
+        run("config set bar_scheme hollow", &store);
+        assert_eq!(run("config bars", &store).out.trim(), "coloured");
+
+        assert_eq!(run("config bars monochrome", &store).code, 0);
+        assert_eq!(run("config bars", &store).out.trim(), "monochrome");
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "theme-mono");
+
+        assert_eq!(run("config bars coloured", &store).code, 0);
+        assert_eq!(
+            run("config get bar_scheme", &store).out.trim(),
+            "hollow",
+            "the scheme that was in use has to come back, not the default"
+        );
+    }
+
+    /// The preferences dialog remembers the coloured scheme under this key and
+    /// its own constant is private to it, so a rename there would leave the two
+    /// quietly disagreeing: the dialog would put back a scheme the terminal
+    /// never wrote.
+    #[test]
+    fn the_scheme_this_remembers_is_the_one_the_dialog_remembers() {
+        let dialog = include_str!("../ui/preferences.rs");
+        assert!(
+            dialog.contains(&format!("\"{COLOURED_BARS}\"")),
+            "the preferences dialog does not mention {COLOURED_BARS}"
+        );
+    }
+
+    #[test]
+    fn a_chart_is_focused_by_its_position_as_well_as_by_its_id() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:1 --symbol NVDA", &store);
+
+        let out = run("chart focus pos:0 --book Macro", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+        assert!(out.out.contains("pos:0"), "it has to name what it focused: {}", out.out);
+        assert!(out.out.contains("AAPL"), "{}", out.out);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][0]["id"], 1);
+    }
+
+    /// Joining a group means showing what the group shows. A chart whose chain
+    /// says group 2 and whose canvas says something else is the state the
+    /// window goes out of its way to avoid, and the command has to agree.
+    #[test]
+    fn a_chart_joining_a_group_takes_what_the_group_is_showing() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+
+        let joined = run("chart set --book Macro --chart pos:1 --link 2", &store);
+        assert_eq!(joined.code, 0, "{}", joined.err);
+        assert!(joined.out.contains("NVDA"), "it has to say so: {}", joined.out);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][1]["symbol"], "NVDA");
+    }
+
+    /// A symbol named in the same command was asked for, so joining a group
+    /// does not overrule it.
+    #[test]
+    fn a_symbol_named_alongside_a_group_is_the_one_that_is_shown() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chart set --book Macro --chart pos:0 --symbol NVDA --link 2", &store);
+        run("chart set --book Macro --chart pos:1 --symbol AMD --link 2", &store);
+
+        let listed = run("chart list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["charts"][1]["symbol"], "AMD");
+    }
+
+    /// Which list the rail shows is written down against whichever book was
+    /// saved last, so two books claiming one would fight over it. The window
+    /// heals that on display; refusing it is better than relying on the heal.
+    #[test]
+    fn a_watchlist_one_chartbook_shows_is_not_handed_to_a_second() {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        run("chartbook create Chips --watchlist Semis --switch", &store);
+        run("chartbook create Macro --symbol AAPL", &store);
+
+        let refused = run("chartbook watchlist Macro Semis", &store);
+        assert_eq!(refused.code, super::super::EXIT_REFUSED);
+        assert!(refused.err.contains("Chips"), "it has to name the holder: {}", refused.err);
+
+        let creating = run("chartbook create Again --watchlist Semis", &store);
+        assert_eq!(creating.code, super::super::EXIT_REFUSED, "{}", creating.out);
+
+        assert_eq!(
+            run("chartbook watchlist Chips Semis", &store).code,
+            0,
+            "the book that already shows it is not another book"
+        );
+    }
+
+    /// The default watchlist is where every fallback lands, so it is nobody's
+    /// and every book may show it.
+    #[test]
+    fn the_default_watchlist_is_not_spoken_for_by_the_book_that_shows_it() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Chips --watchlist Default --switch", &store);
+        run("chartbook create Macro --symbol AAPL", &store);
+        assert_eq!(run("chartbook watchlist Macro Default", &store).code, 0);
+    }
+
+    /// `config set workspace` can put anything at all in the row the
+    /// arrangement is read back out of, and a command that found something
+    /// unexpected there used to abort the window rather than fail.
+    #[test]
+    fn an_arrangement_that_is_not_one_fails_the_command_and_nothing_else() {
+        let store = Store::memory().unwrap();
+        store.set_setting(
+            "workspace",
+            r#"{"books":[{"name":"Odd","layout":{"leaf":1},"focused":1}],"active":0}"#,
+        );
+        for line in ["chart split horizontal --book Odd", "chart close --book Odd", "chart list --book Odd"] {
+            let outcome = run(line, &store);
+            assert_ne!(outcome.code, super::super::EXIT_BUG, "{line}: {}", outcome.err);
+        }
+    }
+
+    /// Where a window would be, so the verbs that default to the focused chart
+    /// run rather than refusing. Nothing to flush or redraw: the store is the
+    /// only thing a test has.
+    struct NoWindow;
+
+    impl Live for NoWindow {
+        fn flush_workspace(&self) {}
+        fn reload_workspace(&self) {}
+        fn reload_watchlists(&self) {}
+    }
+
+    /// Every example in the table is a command that runs.
+    ///
+    /// Examples are what an agent copies, so one that cannot be parsed is
+    /// worse than no example at all — it is an instruction to try something
+    /// that can only fail. A sibling test checks each example names its own
+    /// command; this one runs it, which is the only way to catch an argument
+    /// the table describes and the arm never reads.
+    ///
+    /// Against a seeded store with a window standing in, so the implicit
+    /// "the chart I am looking at" resolves instead of refusing. A usage error
+    /// is the failure: anything else is this store not happening to hold what
+    /// the example names, which is not what is being tested.
+    #[test]
+    fn every_example_in_the_table_is_a_command_that_runs() {
+        for noun in super::super::spec::SURFACE {
+            for verb in noun.verbs {
+                // The one example that would go to the network. Its shape is
+                // covered by `the_bar_widgets_own_command_still_means_what_it_did`.
+                if (noun.name, verb.name) == ("watchlist", "feed") {
+                    continue;
+                }
+                let store = seeded();
+                let args: Vec<String> =
+                    verb.example.split_whitespace().map(String::from).collect();
+                let outcome = dispatch(&args, &store, Some(&NoWindow));
+                assert_ne!(
+                    outcome.code,
+                    super::super::EXIT_USAGE,
+                    "{:?} is not a command this parser accepts: {}",
+                    verb.example,
+                    outcome.err
+                );
+            }
+        }
+    }
+
+    /// A store holding what the examples name.
+    fn seeded() -> Store {
+        let store = Store::memory().unwrap();
+        run("watchlist create Semis", &store);
+        run("watchlist add Semis NVDA AMD AVGO TSM MU", &store);
+        run("section create Default Energy", &store);
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        run("chart split horizontal --book Macro", &store);
+        run("chartbook create Semis --watchlist Semis --symbol NVDA", &store);
+        run("chart indicator add rsi --book Macro", &store);
+        store
     }
 }

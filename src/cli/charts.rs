@@ -15,7 +15,7 @@ use serde_json::{json, Map, Value};
 
 use crate::store::Store;
 
-use super::{Fault, EXIT_NOT_FOUND};
+use super::{Fault, EXIT_ERROR, EXIT_NOT_FOUND};
 
 /// Where the arrangement is kept. The same key the window writes.
 const SETTING: &str = "workspace";
@@ -43,8 +43,17 @@ impl Workspace {
         self.value["books"].as_array().map(|b| b.as_slice()).unwrap_or(&[])
     }
 
+    /// The books, to change.
+    ///
+    /// [`load`](Self::load) only accepts a value whose `books` is an array, and
+    /// this puts an empty one back rather than trusting that — a panic here
+    /// runs inside the window, where it aborts the process instead of
+    /// unwinding, and a command is not worth somebody's arrangement.
     fn books_mut(&mut self) -> &mut Vec<Value> {
-        self.value["books"].as_array_mut().expect("books is an array")
+        if !self.value["books"].is_array() {
+            self.value["books"] = json!([]);
+        }
+        self.value["books"].as_array_mut().expect("just made it an array")
     }
 
     pub fn active(&self) -> usize {
@@ -132,8 +141,20 @@ impl Workspace {
         })
     }
 
-    pub fn book_mut(&mut self, index: usize) -> &mut Value {
-        &mut self.books_mut()[index]
+    /// A book to change, by position.
+    ///
+    /// A failure rather than an index, because every position here came from
+    /// somebody's command and reaching past the end would take the window with
+    /// it.
+    pub fn book_mut(&mut self, index: usize) -> Result<&mut Value, Fault> {
+        let books = self.books_mut();
+        match index < books.len() {
+            true => Ok(&mut books[index]),
+            false => Err(Fault::new(
+                EXIT_NOT_FOUND,
+                format!("no chartbook at position {index}"),
+            )),
+        }
     }
 
     pub fn push(&mut self, book: Value) -> usize {
@@ -200,6 +221,17 @@ pub fn resolve_pane(book: &Value, wanted: Option<&str>) -> Result<u32, Fault> {
 /// Where a chart sits in the arrangement, which is how it is named back.
 pub fn position_of(book: &Value, id: u32) -> Option<usize> {
     leaves(&book["layout"]).iter().position(|leaf| *leaf == id)
+}
+
+/// The charts of a book, to change.
+///
+/// A failure rather than an `expect`: the arrangement is read back out of a
+/// settings row that `config set workspace` can write anything into, and a
+/// panic in a command aborts the window it is running inside.
+pub fn panes_mut(book: &mut Value) -> Result<&mut Vec<Value>, Fault> {
+    book["panes"].as_array_mut().ok_or_else(|| {
+        Fault::new(EXIT_ERROR, "this chartbook has no list of charts in it".to_string())
+    })
 }
 
 pub fn pane_mut(book: &mut Value, id: u32) -> Option<&mut Value> {
@@ -418,7 +450,7 @@ mod tests {
         );
 
         let mut workspace = Workspace::load(&store);
-        workspace.book_mut(0)["name"] = json!("Rates");
+        workspace.book_mut(0).unwrap()["name"] = json!("Rates");
         workspace.save(&store);
 
         let back = Workspace::load(&store);

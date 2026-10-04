@@ -39,8 +39,14 @@ An exit code is the only thing a script can rely on without parsing text.
 | 4 | the name fits more than one thing; say which with `id:N` |
 | 5 | understood, and refused |
 | 6 | the command meant the chart you are looking at, and no window is open |
+| 7 | the command hit a bug in Omacharts and did not finish |
 
 Data goes to stdout, errors to stderr, always.
+
+Code 7 is the one that is not about the command. A command runs inside the
+window when one is open, so a bug in it is caught and reported rather than
+allowed to take the window down with it — nothing else was affected, and
+running the same command again will do the same thing. It is worth reporting.
 
 ## Naming things
 
@@ -129,6 +135,59 @@ A parameter an indicator has no use for is refused rather than ignored —
 `--period` on a volume profile is an error, not a no-op, because silence would
 read as the command having worked.
 
+## Link groups
+
+A chart belongs to one of nine groups, or to none. Charts in a group show the
+same instrument: moving one moves the others, and a pointer on one draws a
+crosshair on the rest.
+
+```
+omacharts chart set --link 3        # join group 3
+omacharts chart set --link none     # leave it
+omacharts chart list                # the last column is the group
+```
+
+A watchlist drives a group too, and that is the other half of what groups are
+for: picking a symbol in a list changes the charts in the group it drives
+rather than the one chart you happen to be on.
+
+```
+$ omacharts watchlist link Semis 3
+"Semis" now drives link group 3
+  [exit 0]
+
+$ omacharts watchlist link Semis
+3
+  [exit 0]
+
+$ omacharts watchlist link Semis none
+"Semis" drives no link group
+  [exit 0]
+```
+
+**A group drives at most one watchlist.** One already taken is refused, and
+the refusal names the list holding it, rather than quietly moving it:
+
+```
+$ omacharts watchlist link Energy 3
+omacharts: link group 3 already drives "Semis"; take it off that list first
+  [exit 5]
+```
+
+`watchlist list` shows who holds what in one read, which is the question worth
+asking before changing any of it. Out of the box the default watchlist drives
+group 1, and charts start in group 1, so a fresh install has the list driving
+the charts.
+
+Joining a group takes what the group is showing, because that is what joining
+one means — unless the same command named a symbol, which was asked for:
+
+```
+$ omacharts chart set --chart pos:1 --link 2
+chart 3: symbol NVDA, link group 2
+  [exit 0]
+```
+
 Whether a pointer on one chart draws a line on the ones linked to it:
 
 ```
@@ -170,6 +229,14 @@ TSM        Taiwan Semiconductor ADR           Stock    NYSE
   [exit 0]
 ```
 
+A section can become a watchlist of its own, carrying its symbols with it:
+
+```
+$ omacharts section promote Default Energy
+turned section "Energy" into a watchlist with its 2 symbols
+  [exit 0]
+```
+
 Every command takes `--json` when you would rather parse it:
 
 ```
@@ -207,7 +274,26 @@ is reported as not found rather than passing quietly.
 omacharts chartbook create Semis --watchlist Semis --symbol NVDA --switch
 omacharts chart split horizontal
 omacharts chart set --symbol AMD --resolution 1h
+omacharts chart focus pos:0
 omacharts chart list
+```
+
+Each chartbook shows one watchlist beside its charts, and which one is part of
+the book rather than of the window — an arrangement of energy charts keeps the
+energy list when you come back to it. **A watchlist belongs to one chartbook**,
+so handing it to a second is refused and the refusal names the book that has
+it. The default watchlist is the exception: it is where every fallback lands,
+so any number of books may show it.
+
+```
+$ omacharts chartbook watchlist Semis Semis
+chartbook "Semis" now shows watchlist "Semis"
+  [exit 0]
+
+$ omacharts chartbook list
+* id:0 Macro                     2 charts  watchlist "Energy"
+  id:1 Semis                     1 charts  watchlist "Semis"
+  [exit 0]
 ```
 
 `chart list` prints the id of each chart, which is what `--chart` takes.
@@ -216,6 +302,45 @@ otherwise.
 
 A `chart set` with one bad value changes nothing at all — everything is
 checked before anything is written, so you never get a half-applied chart.
+
+## Preferences
+
+Settings are read and written by name — `config list` shows every one that has
+been written, and `config set` writes any of them.
+
+Two of them have a command of their own, because what the app does with them is
+more than storing a value. Bar colours is one:
+
+```
+$ omacharts config bars monochrome
+bars are monochrome; the colours are remembered
+  [exit 0]
+
+$ omacharts config bars coloured
+bars carry their direction again, in the "hollow" scheme
+  [exit 0]
+```
+
+`config set bar_scheme theme-mono` reaches the same scheme and is not the same
+command: it does not remember the scheme that was in use, so putting the colour
+back lands on the default rather than on the palette you had picked.
+
+## The cached market data
+
+Bars are cached on disk and pruned in the background back under a limit:
+
+```
+$ omacharts cache status
+1041 series · 212 MB of 1.0 GB · 21%
+  [exit 0]
+
+$ omacharts cache limit 2GB
+the cache will be pruned back under 2.0 GB
+  [exit 0]
+```
+
+`cache clear` throws every cached series away. Settings, watchlists and
+chartbooks are not cache and are left alone.
 
 ## The command groups
 

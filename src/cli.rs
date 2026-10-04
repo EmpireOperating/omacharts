@@ -50,6 +50,12 @@ pub const EXIT_REFUSED: u8 = 5;
 /// looking at. Its own code because the fix is different from every other
 /// failure: start the app, or name a chart.
 pub const EXIT_NO_WINDOW: u8 = 6;
+/// The command hit a bug in Omacharts and was abandoned part-way.
+///
+/// Its own code because it means something no other code does: nothing is
+/// wrong with the command, and running it again will do the same thing. Worth
+/// reporting, and worth a caller treating differently from a refusal.
+pub const EXIT_BUG: u8 = 7;
 
 pub const EXIT_CODES: &[(u8, &str)] = &[
     (EXIT_OK, "the command did what it says"),
@@ -59,6 +65,7 @@ pub const EXIT_CODES: &[(u8, &str)] = &[
     (EXIT_AMBIGUOUS, "the name fits more than one thing; say which with id:N"),
     (EXIT_REFUSED, "understood, and refused"),
     (EXIT_NO_WINDOW, "the command meant the chart you are looking at, and no window is open"),
+    (EXIT_BUG, "the command hit a bug in Omacharts and did not finish"),
 ];
 
 /// A command that could not be carried out, and why.
@@ -162,7 +169,30 @@ pub fn is_command(args: &[String]) -> bool {
 /// same commands work with nothing running, which is what makes this usable
 /// over ssh and out of a script.
 pub fn run(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outcome {
-    exec::dispatch(args, store, live)
+    // A command runs inside the window when there is one, and a panic there
+    // does not merely fail: GLib calls us from C, so unwinding through that
+    // frame aborts the process. The window goes, and the arrangement somebody
+    // had on screen goes with it — because of a bug reached by typing a
+    // command. Nothing a command can do is worth that, so whatever happens in
+    // here comes back as a failed command and the window survives it.
+    //
+    // `AssertUnwindSafe` because neither a `Store` nor the window is unwind
+    // safe by the type system's reckoning, and the question the marker really
+    // asks is whether a half-finished command can leave either in a state the
+    // next one reads as valid. It cannot: a watchlist change is one SQL
+    // statement, and the arrangement is written as one value at the end of the
+    // verb that changed it, so an abandoned command leaves the last complete
+    // version of both.
+    let attempt = std::panic::AssertUnwindSafe(|| exec::dispatch(args, store, live));
+    std::panic::catch_unwind(attempt).unwrap_or_else(|_| {
+        Outcome::failed(Fault::new(
+            EXIT_BUG,
+            format!(
+                "{:?} hit a bug in Omacharts and did not finish; nothing else was affected",
+                args.iter().skip(1).cloned().collect::<Vec<_>>().join(" ")
+            ),
+        ))
+    })
 }
 
 /// How many closes the row's sparkline gets.
@@ -393,6 +423,33 @@ pub fn live(window: &Rc<crate::ui::Window>) -> Option<Box<dyn Live>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window that goes wrong. `flush_workspace` is the first thing a command
+    /// touching the arrangement calls, so panicking there stands in for a bug
+    /// anywhere inside one.
+    struct Breaks;
+
+    impl Live for Breaks {
+        fn flush_workspace(&self) {
+            panic!("a bug somewhere inside the window")
+        }
+        fn reload_workspace(&self) {}
+        fn reload_watchlists(&self) {}
+    }
+
+    /// Unwinding out of a command would cross the C frame GLib called it from,
+    /// which aborts rather than unwinds — so a bug reached by typing a command
+    /// would cost somebody the arrangement they had on screen. The command
+    /// fails; the window does not.
+    #[test]
+    fn a_command_that_hits_a_bug_fails_rather_than_taking_the_window_with_it() {
+        let store = Store::memory().unwrap();
+        let args: Vec<String> =
+            ["omacharts", "status", "show"].iter().map(|a| a.to_string()).collect();
+        let outcome = run(&args, &store, Some(&Breaks));
+        assert_eq!(outcome.code, EXIT_BUG);
+        assert!(outcome.err.contains("status show"), "it has to say which: {}", outcome.err);
+    }
 
     #[test]
     fn the_payload_carries_the_themes_direction_colours() {

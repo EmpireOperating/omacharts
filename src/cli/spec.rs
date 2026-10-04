@@ -104,6 +104,9 @@ const KINDS: &[&str] = &["volume", "sma", "ema", "vwap", "volume_profile", "rsi"
 const ANCHORS: &[&str] = &["session", "week", "month", "quarter", "year"];
 const LINE_STYLES: &[&str] = &["solid", "dashed", "dotted"];
 const SWITCHES: &[&str] = &["on", "off"];
+const LINKS: &[&str] =
+    &["none", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+const COLOURING: &[&str] = &["coloured", "monochrome"];
 
 /// How a colour is written on the command line.
 ///
@@ -235,6 +238,19 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("suffix", "S", "venue suffix, applied to every symbol given"),
                 ],
                 example: "omacharts watchlist remove Semis MU",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
+            Verb {
+                name: "link",
+                about: "Which link group a watchlist drives, if any",
+                args: &[
+                    Arg::req("LIST", SELECTOR),
+                    Arg::opt("GROUP", "the group it drives, or `none`; omit to read it").of(LINKS),
+                ],
+                flags: &[],
+                example: "omacharts watchlist link Semis 3",
                 json: true,
                 writes: true,
                 workspace: false,
@@ -453,7 +469,8 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("resolution", "TF", "such as 5m, 1h, 1D, 1W"),
                     Flag::valued("style", "STYLE", "how bars are drawn").of(STYLES),
                     Flag::valued("session", "SESSION", "which hours to include").of(SESSIONS),
-                    Flag::valued("link", "GROUP", "link group 1-9, or `none` to unlink"),
+                    Flag::valued("link", "GROUP", "which link group it joins, or `none` to leave one")
+                        .of(LINKS),
                     Flag::valued("grid", "BOOL", "draw the grid").of(&["on", "off"]),
                 ],
                 example: "omacharts chart set --symbol NVDA --resolution 1h --style candles",
@@ -481,7 +498,7 @@ pub const SURFACE: &[Noun] = &[
                     Flag::valued("color", "COLOUR", "the line, or the volume profile's background"),
                     Flag::valued("width", "F", "line thickness; 0 draws no line at all"),
                     Flag::valued("style", "STYLE", "how the line is drawn").of(LINE_STYLES),
-                    Flag::valued("height", "F", "share of the chart a pane takes: volume, RSI, ATR"),
+                    Flag::valued("height", "F", "share of the chart a pane takes, 0.05-0.95: volume, RSI, ATR"),
                     Flag::valued("overbought", "F", "the RSI level drawn across the top"),
                     Flag::valued("oversold", "F", "the RSI level drawn across the bottom"),
                     Flag::valued("bands", "LIST", "which VWAP bands are drawn: 1,2,3 or none"),
@@ -535,6 +552,16 @@ pub const SURFACE: &[Noun] = &[
                 args: &[Arg::req("KEY", "the setting's name"), Arg::req("VALUE", "what to set it to")],
                 flags: &[],
                 example: "omacharts config set theme omarchy",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
+            Verb {
+                name: "bars",
+                about: "Whether bars carry their direction in colour, or none at all",
+                args: &[Arg::opt("STATE", "omit to read it").of(COLOURING)],
+                flags: &[],
+                example: "omacharts config bars monochrome",
                 json: true,
                 writes: true,
                 workspace: false,
@@ -595,11 +622,38 @@ pub fn verb(noun: &str, verb: &str) -> Option<&'static Verb> {
         .find(|v| v.name == verb)
 }
 
+/// What a chart and a chartbook are stored with, and what reaches each one.
+///
+/// A field, the command that sets it, and the flag that carries it — or, where
+/// the second is empty, why the field needs no command. The window's own
+/// structs are private to it, so this is the one place the two lists are put
+/// beside each other; see
+/// `every_field_a_chart_is_stored_with_is_reachable_from_a_command`.
+#[cfg(test)]
+const STORED_FIELDS: &[(&str, &str, &str)] = &[
+    ("id", "", "identity rather than state: a chart is named back as pos:N"),
+    ("symbol", "chart set", "--symbol"),
+    ("suffix", "chart set", "--suffix"),
+    ("timeframe", "chart set", "--resolution"),
+    ("indicators", "chart indicator", ""),
+    ("bar_style", "chart set", "--style"),
+    ("session", "chart set", "--session"),
+    ("show_grid", "chart set", "--grid"),
+    ("linked", "chart set", "--link"),
+    ("name", "chartbook rename", ""),
+    ("layout", "chart split", ""),
+    ("focused", "chart focus", ""),
+    ("panes", "chart list", ""),
+    ("watchlist", "chartbook watchlist", ""),
+    ("sidebar_shown", "", "presentational: the rail is shown with a mouse or a key"),
+    ("sidebar_width", "", "presentational: a width is dragged, never scripted"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omacharts_engine::indicators::LineStyle;
-    use omacharts_engine::{BarStyle, IndicatorKind, Reset, Session};
+    use omacharts_engine::indicators::{LineStyle, MAX_PANE_SHARE, MIN_PANE_SHARE};
+    use omacharts_engine::{link, BarStyle, IndicatorKind, Reset, Session, Timeframe};
 
     #[test]
     fn the_bar_styles_on_offer_are_the_ones_that_exist() {
@@ -654,6 +708,113 @@ mod tests {
         for name in omacharts_engine::theme::SWATCH_NAMES {
             assert!(COLOUR.contains(name), "the help does not mention {name}");
         }
+    }
+
+    #[test]
+    fn the_link_groups_on_offer_are_the_ones_that_exist() {
+        let engine: Vec<String> = link::ALL
+            .iter()
+            .map(|group| match group.number() {
+                None => "none".to_string(),
+                Some(n) => n.to_string(),
+            })
+            .collect();
+        assert_eq!(LINKS.to_vec(), engine);
+    }
+
+    /// A resolution is typed rather than chosen from a list — "3m" is a
+    /// reasonable thing to want — so there is no set of variants to compare
+    /// against here, and this checks the narrower thing that is actually true:
+    /// every resolution the header strip offers is one a command accepts.
+    /// Saying that plainly matters more than the test looking as strong as
+    /// the ones above it.
+    #[test]
+    fn every_resolution_the_header_strip_offers_is_one_a_command_accepts() {
+        for preset in Timeframe::PRESETS {
+            assert_eq!(Timeframe::parse(&preset.key()), Some(preset), "{}", preset.key());
+        }
+    }
+
+    /// Everything a chart is stored with has a command that sets it.
+    ///
+    /// This is the test that makes "every feature ships with its command" a
+    /// thing that can fail rather than a thing people mean to do. A new piece
+    /// of chart or chartbook state is a new field on one of the window's two
+    /// stored structs, and a field nobody can set from a terminal fails here
+    /// until either a command or a written reason exists for it.
+    ///
+    /// Read out of the source because both structs are private to the window.
+    /// That is the limit of what this can prove: it catches a field arriving
+    /// with no command, and it cannot catch a capability that changes nothing
+    /// stored — an action on screen that only moves what is already there.
+    #[test]
+    fn every_field_a_chart_is_stored_with_is_reachable_from_a_command() {
+        const WINDOW: &str = include_str!("../ui/window.rs");
+        for shape in ["StoredPane", "Chartbook"] {
+            let fields = fields_of(WINDOW, shape);
+            assert!(!fields.is_empty(), "no {shape} to read in window.rs");
+            for field in fields {
+                let found = STORED_FIELDS.iter().find(|(name, ..)| *name == field);
+                let Some((_, command, note)) = found else {
+                    panic!(
+                        "{shape}.{field} is stored with nothing in STORED_FIELDS for it: \
+                         name the command that sets it, or why it needs none"
+                    );
+                };
+                if command.is_empty() {
+                    assert!(!note.is_empty(), "{shape}.{field} has no command and no reason");
+                    continue;
+                }
+                let (noun, name) = command.split_once(' ').expect("a noun and a verb");
+                let found = verb(noun, name)
+                    .unwrap_or_else(|| panic!("{shape}.{field} names {command}, which is not a command"));
+                if let Some(flag) = note.strip_prefix("--") {
+                    assert!(
+                        found.flags.iter().any(|f| f.long == flag),
+                        "{shape}.{field} names `{command} {note}`, and that verb has no {note}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The field names of one struct, read out of Rust source.
+    ///
+    /// Enough of a parser for two plain structs of named fields and no more:
+    /// anything cleverer would be a second thing to maintain, and these two
+    /// are the only ones read this way.
+    #[cfg(test)]
+    fn fields_of(source: &str, shape: &str) -> Vec<String> {
+        let start = source
+            .find(&format!("struct {shape} {{"))
+            .unwrap_or_else(|| panic!("no struct {shape}"));
+        let body = &source[start..];
+        let end = body.find("\n}").unwrap_or(body.len());
+        body[..end]
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#') && !line.starts_with("//"))
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, _)| name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
+
+    /// The help names a range, and a number outside it is refused rather than
+    /// quietly brought back — so the range named has to be the one the engine
+    /// clamps to. It moved from 0.6 to 0.95 the day a pane became draggable,
+    /// which is exactly the drift this notices.
+    #[test]
+    fn the_pane_height_the_help_names_is_the_range_the_engine_clamps_to() {
+        let named = verb("chart", "indicator")
+            .expect("a chart indicator verb")
+            .flags
+            .iter()
+            .find(|flag| flag.long == "height")
+            .expect("a height flag");
+        let range = format!("{MIN_PANE_SHARE}-{MAX_PANE_SHARE}");
+        assert!(named.help.contains(&range), "the help says {:?}, not {range}", named.help);
     }
 
     #[test]
