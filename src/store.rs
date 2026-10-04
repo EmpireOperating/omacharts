@@ -13,6 +13,8 @@
 use std::path::{Path, PathBuf};
 
 use omacharts_engine::{Bar, BarScheme, Indicator, Theme, Timeframe};
+
+use crate::migrations;
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub struct Store {
@@ -69,113 +71,44 @@ pub struct Coverage {
 }
 
 impl Store {
-    pub fn open() -> rusqlite::Result<Store> {
+    pub fn open() -> Result<Store, migrations::Error> {
         let dir = data_dir();
         let _ = std::fs::create_dir_all(&dir);
         Store::open_at(&dir.join("omacharts.db"))
     }
 
-    pub fn open_at(path: &Path) -> rusqlite::Result<Store> {
+    pub fn open_at(path: &Path) -> Result<Store, migrations::Error> {
         let conn = Connection::open(path)?;
         // WAL so a background fetch writing never blocks the window reading.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         let store = Store { conn };
-        store.migrate()?;
+        // Where a migration that could lose something leaves a copy first.
+        // Beside the database rather than in a temp directory, because the
+        // person who needs it has to be able to find it.
+        store.migrate(Some(&path.with_extension("db.bak")))?;
         Ok(store)
     }
 
-    pub fn memory() -> rusqlite::Result<Store> {
+    /// A database with no file behind it: the tests, and the fallback when
+    /// the real one cannot be opened. Nothing to snapshot.
+    pub fn memory() -> Result<Store, migrations::Error> {
         let store = Store { conn: Connection::open_in_memory()? };
-        store.migrate()?;
+        store.migrate(None)?;
         Ok(store)
     }
 
-    fn migrate(&self) -> rusqlite::Result<()> {
-        self.conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             CREATE TABLE IF NOT EXISTS bar_series (
-                 key        TEXT NOT NULL,
-                 interval   TEXT NOT NULL,
-                 first_ts   INTEGER NOT NULL,
-                 last_ts    INTEGER NOT NULL,
-                 count      INTEGER NOT NULL,
-                 fetched_at INTEGER NOT NULL,
-                 ts         BLOB NOT NULL,
-                 open       BLOB NOT NULL,
-                 high       BLOB NOT NULL,
-                 low        BLOB NOT NULL,
-                 close      BLOB NOT NULL,
-                 volume     BLOB NOT NULL,
-                 PRIMARY KEY (key, interval)
-             );
-             CREATE TABLE IF NOT EXISTS custom_themes (
-                 id TEXT PRIMARY KEY, json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS custom_bar_schemes (
-                 id TEXT PRIMARY KEY, json TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS watchlists (
-                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                 name     TEXT NOT NULL,
-                 position INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS watchlist_sections (
-                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                 name     TEXT NOT NULL,
-                 position INTEGER NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS watchlist_entries (
-                 section_id INTEGER NOT NULL
-                     REFERENCES watchlist_sections(id) ON DELETE CASCADE,
-                 symbol     TEXT NOT NULL,
-                 suffix     TEXT NOT NULL DEFAULT '',
-                 position   INTEGER NOT NULL,
-                 PRIMARY KEY (section_id, symbol, suffix)
-             );",
-        )?;
-        // This SQLite enforces foreign keys, so the root needs a real row to
-        // hang entries off. It is filtered out of the named sections; callers
-        // only ever see it as the nameless first section.
-        self.conn.execute(
-            "INSERT OR IGNORE INTO watchlist_sections (id, name, position) VALUES (?1, '', -1)",
-            params![ROOT_SECTION],
-        )?;
-        // Added after the first release; ignored when it already exists.
-        let _ = self
-            .conn
-            .execute("ALTER TABLE watchlist_sections ADD COLUMN collapsed INTEGER NOT NULL DEFAULT 0", []);
-        self.add_default_watchlist()?;
-        self.conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1')",
-            [],
-        )?;
-        self.invalidate_stale_cache()?;
-        self.adopt_volume_indicator();
-        Ok(())
-    }
-
-    /// Make the watchlist that is always there, and leave everything written
-    /// before watchlists were plural inside it.
+    /// Bring the database up to date, then decide whether what is cached in
+    /// it is still worth believing.
     ///
-    /// The column default is what does the migration: sections written when
-    /// there was only one watchlist name no watchlist at all, and SQLite
-    /// fills the column in as it adds it. Nothing is moved and nothing is
-    /// rewritten, so running this again on a database that already has the
-    /// column simply fails the ALTER and carries on.
-    fn add_default_watchlist(&self) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "INSERT OR IGNORE INTO watchlists (id, name, position) VALUES (?1, 'Default', 0)",
-            params![DEFAULT_WATCHLIST],
-        )?;
-        // The literal is DEFAULT_WATCHLIST, which SQLite wants spelled out.
-        // `every_section_written_before_watchlists_were_plural_lands_in_the
-        // _default_one` is what keeps the two honest.
-        let _ = self.conn.execute(
-            "ALTER TABLE watchlist_sections ADD COLUMN watchlist_id INTEGER NOT NULL DEFAULT 1",
-            [],
-        );
+    /// Two different questions, kept apart deliberately: one is the *shape* of
+    /// the database, which only ever moves forward and is recorded in
+    /// `user_version`; the other is whether the bars already in it were
+    /// fetched correctly, which has its own counter because it moves on its
+    /// own schedule. A release can change either without touching the other.
+    fn migrate(&self, snapshot_to: Option<&Path>) -> Result<(), migrations::Error> {
+        migrations::run(&self.conn, snapshot_to)?;
+        self.invalidate_stale_cache()?;
         Ok(())
     }
 
@@ -205,30 +138,6 @@ impl Store {
             params![CACHE_VERSION.to_string()],
         )?;
         Ok(())
-    }
-
-    /// Give charts configured before volume became an indicator one.
-    ///
-    /// Volume used to be drawn unconditionally. Turning it into something you
-    /// can remove would otherwise remove it from every chart that had ever
-    /// been touched. Done once and remembered, so taking it off afterwards
-    /// sticks.
-    fn adopt_volume_indicator(&self) {
-        const FLAG: &str = "volume_indicator_adopted";
-        if self.setting(FLAG).is_some() {
-            return;
-        }
-        self.set_setting(FLAG, "1");
-
-        // Never configured at all: the default already includes volume.
-        let Some(json) = self.setting("indicators") else { return };
-        let Ok(mut indicators) = serde_json::from_str::<Vec<Indicator>>(&json) else { return };
-        if indicators.iter().any(|i| i.kind == omacharts_engine::IndicatorKind::Volume) {
-            return;
-        }
-        let id = indicators.iter().map(|i| i.id).max().unwrap_or(0) + 1;
-        indicators.insert(0, Indicator::new(id, omacharts_engine::IndicatorKind::Volume));
-        self.set_indicators(&indicators);
     }
 
     // -- settings ----------------------------------------------------------
@@ -991,56 +900,30 @@ mod tests {
     }
 
     /// The database on a machine that has been running this app has sections
-    /// written before there was more than one watchlist to put them in. They
-    /// have to come back exactly, under the watchlist that has always been
-    /// there — losing somebody's symbols to a schema change is not a thing
-    /// that gets a second chance.
+    /// A build older than the one that last wrote the file has to stop here,
+    /// where the caller can still tell this apart from a database it simply
+    /// could not read. Falling back to an empty one would put a pristine
+    /// watchlist on screen over the top of somebody's real one.
     #[test]
-    fn a_database_written_before_watchlists_were_plural_keeps_everything() {
-        let path = std::env::temp_dir()
-            .join(format!("omacharts-premigration-{}.db", std::process::id()));
+    fn a_database_from_a_newer_omacharts_is_refused_rather_than_opened() {
+        let path =
+            std::env::temp_dir().join(format!("omacharts-future-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let old = Connection::open(&path).unwrap();
-        old.execute_batch(
-            "CREATE TABLE watchlist_sections (
-                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
-                 name     TEXT NOT NULL,
-                 position INTEGER NOT NULL,
-                 collapsed INTEGER NOT NULL DEFAULT 0
-             );
-             CREATE TABLE watchlist_entries (
-                 section_id INTEGER NOT NULL
-                     REFERENCES watchlist_sections(id) ON DELETE CASCADE,
-                 symbol     TEXT NOT NULL,
-                 suffix     TEXT NOT NULL DEFAULT '',
-                 position   INTEGER NOT NULL,
-                 PRIMARY KEY (section_id, symbol, suffix)
-             );
-             INSERT INTO watchlist_sections (id, name, position) VALUES (0, '', -1);
-             INSERT INTO watchlist_sections (id, name, position) VALUES (7, 'Futures', 0);
-             INSERT INTO watchlist_entries (section_id, symbol, suffix, position)
-                 VALUES (0, 'SPY', '', 0), (7, 'ES', '', 0), (7, 'NQ', '', 1);",
-        )
-        .unwrap();
-        drop(old);
-
         let store = Store::open_at(&path).unwrap();
-        let sections = store.watchlist();
-        assert_eq!(sections.len(), 2, "root and Futures: {sections:?}");
-        assert!(sections[0].root);
-        assert_eq!(sections[0].entries, vec![Entry { symbol: "SPY".into(), suffix: None }]);
-        assert_eq!(sections[1].name, "Futures");
-        assert_eq!(sections[1].entries.len(), 2);
-        assert_eq!(store.watchlists(), vec![(DEFAULT_WATCHLIST, "Default".to_string())]);
-
-        // And again, because migrate() runs on every open.
+        store.add_section(DEFAULT_WATCHLIST, "Mine").unwrap();
         drop(store);
-        let store = Store::open_at(&path).unwrap();
-        assert_eq!(store.watchlist().len(), 2);
-        assert_eq!(store.watchlists().len(), 1);
 
-        drop(store);
+        let ahead = Connection::open(&path).unwrap();
+        ahead.pragma_update(None, "user_version", migrations::LATEST + 1).unwrap();
+        drop(ahead);
+
+        match Store::open_at(&path) {
+            Err(migrations::Error::FromTheFuture { found, known }) => {
+                assert_eq!((found, known), (migrations::LATEST + 1, migrations::LATEST));
+            }
+            other => panic!("expected a refusal, got {:?}", other.map(|_| "a store")),
+        }
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1314,6 +1197,11 @@ mod tests {
         assert!(store.indicators().is_empty());
     }
 
+    /// A list configured before volume was something you could remove gets
+    /// one added back, exactly once. Starting from a database that has never
+    /// run the step is the only honest way to ask: the step is keyed to the
+    /// schema version now, so a database that has already passed it stays
+    /// passed however the settings around it are poked.
     #[test]
     fn a_chart_configured_before_volume_was_an_indicator_keeps_its_volume() {
         use omacharts_engine::IndicatorKind;
@@ -1322,13 +1210,16 @@ mod tests {
         let _ = std::fs::remove_file(&file);
 
         {
-            // A list from before volume existed as an indicator.
-            let store = Store::open_at(&file).unwrap();
-            store.set_indicators(&[Indicator::new(7, IndicatorKind::Sma)]);
-            store
-                .conn
-                .execute("DELETE FROM settings WHERE key = 'volume_indicator_adopted'", [])
-                .unwrap();
+            let old = Connection::open(&file).unwrap();
+            old.execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            )
+            .unwrap();
+            let sma = serde_json::to_string(&[Indicator::new(7, IndicatorKind::Sma)]).unwrap();
+            old.execute("INSERT INTO settings (key, value) VALUES ('indicators', ?1)", params![
+                sma
+            ])
+            .unwrap();
         }
 
         let store = Store::open_at(&file).unwrap();
@@ -1343,7 +1234,7 @@ mod tests {
         drop(store);
         let store = Store::open_at(&file).unwrap();
         assert_eq!(store.indicators().len(), 1);
-
+        drop(store);
         let _ = std::fs::remove_file(&file);
     }
 

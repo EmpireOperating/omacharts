@@ -70,11 +70,27 @@ fn main() -> glib::ExitCode {
     let window: RefCell<Option<Rc<Window>>> = RefCell::new(None);
     app.connect_command_line(move |app, command_line| {
         if window.borrow().is_none() {
-            // A database we cannot open is fatal, but an in-memory one at
-            // least puts a usable window on screen rather than nothing at all.
-            let store =
-                Rc::new(Store::open().or_else(|_| Store::memory()).expect("open database"));
-            *window.borrow_mut() = Some(Window::build(app, store));
+            let store = match Store::open() {
+                Ok(store) => store,
+                // Written by a newer Omacharts than this one. The file is
+                // intact and it is theirs, so this is the one failure that
+                // must not be worked around: carrying on with an empty
+                // database would put a pristine watchlist on screen over the
+                // top of years of their own, and look exactly like having
+                // lost it.
+                Err(error @ omacharts::migrations::Error::FromTheFuture { .. }) => {
+                    eprintln!("omacharts: {error}");
+                    return glib::ExitCode::FAILURE;
+                }
+                // Anything else — unreadable, unwritable, corrupt — and an
+                // in-memory database at least puts a usable window on screen
+                // rather than nothing at all.
+                Err(error) => {
+                    eprintln!("omacharts: {error}; carrying on without saving anything");
+                    Store::memory().expect("open database")
+                }
+            };
+            *window.borrow_mut() = Some(Window::build(app, Rc::new(store)));
         }
 
         let Some(window) = window.borrow().clone() else {

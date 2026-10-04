@@ -7,6 +7,7 @@ pub mod bar_plugin;
 pub mod cli;
 pub mod inventory;
 pub mod loader;
+pub mod migrations;
 pub mod store;
 pub mod theming;
 pub mod ui;
