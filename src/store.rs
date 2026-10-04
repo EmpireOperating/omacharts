@@ -1007,6 +1007,47 @@ mod tests {
         assert_eq!(order, vec!["C", "A", "B"]);
     }
 
+    /// A watchlist somebody has just made and dropped a symbol or two into
+    /// has exactly one section, and it is the root — the one `section_order`
+    /// leaves out. So the order is empty while the table is not, which is the
+    /// state the first named section arrives into, and the one nobody sets up
+    /// on purpose. It has to come out as a second section after the loose
+    /// symbols, and it has to be the only thing in the order.
+    #[test]
+    fn the_first_named_section_lands_after_the_loose_symbols_it_was_added_beside() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").expect("made");
+        let root = store.root_section(scratch);
+        store.add_to_section(root, "ES", None);
+        store.add_to_section(root, "GC", None);
+        assert!(store.section_order(scratch).is_empty(), "a root is not in the order");
+
+        let energy = store.add_section(scratch, "Energy").expect("made");
+
+        assert_eq!(store.section_order(scratch), vec![energy]);
+        let list = store.watchlist_sections(scratch);
+        assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), vec![root, energy]);
+        assert!(list[0].root, "the loose symbols stay first");
+        assert_eq!(symbols(&list), vec!["ES", "GC"]);
+
+        // And the operations that read that order cope with one named section
+        // beside the root: moving a symbol down into it, ordering the one
+        // section there is, and taking it away again.
+        let entry = Entry { symbol: "GC".into(), suffix: None };
+        store.move_entry_to_section(root, energy, &entry, None);
+        store.reorder_sections(scratch, &[energy]);
+        let list = store.watchlist_sections(scratch);
+        assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), vec![root, energy]);
+        assert_eq!(symbols(&list), vec!["ES", "GC"]);
+
+        store.remove_section(energy);
+        let list = store.watchlist_sections(scratch);
+        assert_eq!(list.len(), 1, "back to loose symbols and nothing else");
+        assert!(list[0].root);
+        assert_eq!(symbols(&list), vec!["ES"], "GC went with the section it was in");
+        assert!(store.section_order(scratch).is_empty());
+    }
+
     /// Dragging a section header reorders the sections and nothing else: the
     /// symbols are positioned inside their own section, so they come along
     /// without a single entry being rewritten.

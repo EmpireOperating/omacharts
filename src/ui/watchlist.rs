@@ -946,12 +946,8 @@ impl Watchlist {
         let selected = self.list.selected_row().map(|r| r.index());
 
         self.quiet.set(true);
-        while let Some(child) = self.list.first_child() {
-            self.list.remove(&child);
-        }
-        while let Some(child) = self.header.first_child() {
-            self.header.remove(&child);
-        }
+        clear_rows(&self.list);
+        clear_children(&self.header);
 
         for column in self.columns.borrow().iter() {
             let label = gtk::Label::new(Some(column.label()));
@@ -993,8 +989,7 @@ impl Watchlist {
         let empty = kinds.is_empty();
         *self.rows.borrow_mut() = kinds;
 
-        // A placeholder is a child of the list like any other, so clearing the
-        // rows above took the last one with it. Built here rather than kept
+        // The placeholder went with the rows above. Built here rather than kept
         // around because an empty rail is the only time anybody sees it.
         if empty {
             self.list.set_placeholder(Some(&self.empty_state()));
@@ -1735,16 +1730,26 @@ impl Watchlist {
         popover.set_child(Some(&entry));
         popover.set_parent(anchor);
 
+        // Unparented once it closes, so a box opened on the list itself does
+        // not sit among the rows as a child the list cannot take off. From an
+        // idle rather than here, because closing happens inside the popover.
+        popover.connect_closed(|popover| {
+            let popover = popover.clone();
+            glib::idle_add_local_once(move || popover.unparent());
+        });
+
         let this = self.clone();
         let popover_weak = popover.downgrade();
         entry.connect_activate(move |entry| {
             let name = entry.text().trim().to_string();
+            // Down before the rail is rebuilt under it: the anchor may be one
+            // of the rows about to go.
+            if let Some(popover) = popover_weak.upgrade() {
+                popover.popdown();
+            }
             if !name.is_empty() {
                 this.store.add_section(this.active.get(), &name);
                 this.changed();
-            }
-            if let Some(popover) = popover_weak.upgrade() {
-                popover.popdown();
             }
         });
 
@@ -1937,6 +1942,38 @@ fn row_drop_target(order: &[i64], under: &Section, at: usize) -> Option<(i64, Be
     Some((under.id, side))
 }
 
+/// Empty the rail, ready to be filled again.
+///
+/// Walks the siblings rather than asking for the first child over and over,
+/// and takes off only what it put on. A list holds more than its rows: the
+/// placeholder is a child, and so is any popover anchored on the list itself —
+/// the box for naming a new section is, when a key rather than the button at
+/// the foot of the rail opened it. `gtk_list_box_remove` refuses a child that
+/// is not a row with a warning and takes nothing off, so a loop that re-reads
+/// the first child spins on that popover for ever, which is a frozen app for
+/// anyone who names a section from the keyboard.
+fn clear_rows(list: &gtk::ListBox) {
+    list.set_placeholder(gtk::Widget::NONE);
+    let mut child = list.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        if let Some(row) = widget.downcast_ref::<gtk::ListBoxRow>() {
+            list.remove(row);
+        }
+    }
+}
+
+/// The same for the column headings. A box takes any child off, popovers
+/// included, so this cannot stick the way a list can — it walks the siblings
+/// to say so once rather than leave two shapes of the same loop side by side.
+fn clear_children(box_: &gtk::Box) {
+    let mut child = box_.first_child();
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+        box_.remove(&widget);
+    }
+}
+
 /// Put a quote into one value label, direction colouring included.
 fn write_cell(
     label: &gtk::Label,
@@ -2005,6 +2042,44 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Naming a section from the keyboard anchors the box on the list itself,
+    /// which makes it a child of the list — and then writing the name rebuilds
+    /// the rail with it still there. GTK will not take a child that is not a
+    /// row off a list, so a loop that empties the list by re-reading its first
+    /// child never gets past that popover: one core, for ever, with the whole
+    /// app frozen around it. Rebuilding has to finish whatever else is
+    /// anchored on the rail.
+    ///
+    /// Written as the clearing alone because a rail needs a window; a
+    /// regression here hangs this test rather than failing it, which is the
+    /// one way this can go wrong.
+    #[test]
+    fn clearing_the_rail_finishes_with_a_popover_anchored_on_the_list() {
+        // Widgets need a display, and where there is none there is nothing to
+        // check — the same bargain the shortcut tests make.
+        if gtk::init().is_err() {
+            return;
+        }
+
+        let list = gtk::ListBox::new();
+        for symbol in ["ES", "GC", "CL"] {
+            list.append(&gtk::Label::new(Some(symbol)));
+        }
+        list.set_placeholder(Some(&gtk::Label::new(Some("Nothing here yet"))));
+        let popover = gtk::Popover::new();
+        popover.set_parent(&list);
+
+        clear_rows(&list);
+
+        assert!(list.row_at_index(0).is_none(), "a row was left on the rail");
+        assert_eq!(
+            popover.parent().as_ref(),
+            Some(list.upcast_ref::<gtk::Widget>()),
+            "the box being typed into is not the rail's to take away"
+        );
+        popover.unparent();
+    }
 
     /// Out of the box the watchlist drives the charts, which is what linking
     /// did before there were groups to pick between. Charts start in group 1,
