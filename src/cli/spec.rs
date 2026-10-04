@@ -243,6 +243,36 @@ pub const SURFACE: &[Noun] = &[
                 workspace: false,
             },
             Verb {
+                name: "move",
+                about: "Move a symbol into another section, or to another place in its own",
+                args: &[
+                    Arg::req("LIST", SELECTOR),
+                    Arg::req("SYMBOL", "the ticker to move"),
+                ],
+                flags: &[
+                    Flag::valued(
+                        "section",
+                        "SECTION",
+                        "the section to move it into (default: leave it in the one it is in)",
+                    ),
+                    Flag::valued(
+                        "before",
+                        "SYMBOL",
+                        "land in front of this symbol rather than at the end",
+                    ),
+                    Flag::valued(
+                        "from",
+                        "SECTION",
+                        "which section to take it out of, when it is in more than one",
+                    ),
+                    Flag::valued("suffix", "S", "venue suffix of the symbol being moved"),
+                ],
+                example: "omacharts watchlist move Semis MU --section Energy",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
+            Verb {
                 name: "link",
                 about: "Which link group a watchlist drives, if any",
                 args: &[
@@ -321,6 +351,22 @@ pub const SURFACE: &[Noun] = &[
                 args: &[Arg::req("LIST", SELECTOR), Arg::req("SECTION", SELECTOR)],
                 flags: &[],
                 example: "omacharts section promote Default Energy",
+                json: true,
+                writes: true,
+                workspace: false,
+            },
+            Verb {
+                name: "order",
+                about: "Put a watchlist's sections in this order",
+                args: &[
+                    Arg::req("LIST", SELECTOR),
+                    Arg::many(
+                        "SECTION",
+                        "the sections, first to last; any left out keep their order behind them",
+                    ),
+                ],
+                flags: &[],
+                example: "omacharts section order Default Metals Energy",
                 json: true,
                 writes: true,
                 workspace: false,

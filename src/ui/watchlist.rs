@@ -17,7 +17,7 @@ use gtk::gio;
 use gtk::glib;
 use omacharts_engine::{Instrument, LinkGroup};
 
-use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
+use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
 
 /// What a new install starts with, so the rail is never an empty column.
@@ -1040,18 +1040,23 @@ impl Watchlist {
         row.set_selectable(false);
         row.set_activatable(false);
 
-        // Dropping on a header puts the symbol in that section, at the end.
+        // Dropping a symbol on a header puts it in that section, at the end.
         // Without this there is no way to move something into a collapsed or
-        // empty section.
+        // empty section. Dropping a section on one puts it beside that section.
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
         let this = self.clone();
-        target.connect_drop(move |_, value, _, _| {
-            let Some((from, moving)) = parse_drag(value) else { return false };
-            this.store.move_entry_to_section(from, id, &moving, None);
-            this.changed();
-            true
+        target.connect_drop(move |_, value, _, _| match parse_drag(value) {
+            Some(Dragged::Entry { from, entry }) => {
+                this.store.move_entry_to_section(from, id, &entry, None);
+                this.changed();
+                true
+            }
+            Some(Dragged::Section(moving)) => this.drop_section_on_header(moving, id),
+            None => false,
         });
         row.add_controller(target);
+
+        self.wire_section_reorder(&row, id);
 
         // Everything you can do to a section lives behind a right-click. A
         // delete button sitting on every header all the time is both noise and
@@ -1224,16 +1229,78 @@ impl Watchlist {
         let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
         let this = self.clone();
         let onto = entry.clone();
-        target.connect_drop(move |_, value, _, _| {
-            let Some((from, moving)) = parse_drag(value) else { return false };
-            if from == section_id && moving == onto {
-                return false;
+        target.connect_drop(move |_, value, _, _| match parse_drag(value) {
+            Some(Dragged::Entry { from, entry }) => {
+                if from == section_id && entry == onto {
+                    return false;
+                }
+                this.store.move_entry_to_section(from, section_id, &entry, Some(&onto));
+                this.changed();
+                true
             }
-            this.store.move_entry_to_section(from, section_id, &moving, Some(&onto));
-            this.changed();
-            true
+            Some(Dragged::Section(moving)) => this.drop_section_on_row(moving, section_id, &onto),
+            None => false,
         });
         row.add_controller(target);
+    }
+
+    /// Drag a section's header to move the section, and its symbols with it.
+    ///
+    /// On the header rather than on a grip, because a collapsed section is a
+    /// header and nothing else and has to drag like the rest of them. A symbol
+    /// is picked up from its own row, so neither gesture can be mistaken for
+    /// the other.
+    fn wire_section_reorder(self: &Rc<Self>, row: &gtk::ListBoxRow, id: i64) {
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::MOVE);
+        let payload = format!("{SECTION_DRAG}\t{id}");
+        source.connect_prepare(move |_, _, _| {
+            Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+        });
+        row.add_controller(source);
+    }
+
+    /// A section dropped on another section's header.
+    fn drop_section_on_header(self: &Rc<Self>, moving: i64, onto: i64) -> bool {
+        let order = self.store.section_order(self.active.get());
+        let side = header_drop_side(&order, moving, onto);
+        self.reorder_sections(&order, moving, onto, side)
+    }
+
+    /// A section dropped on a symbol row, which in one list is a drop target
+    /// like any other.
+    ///
+    /// Where the row is in its section is read back from the store rather than
+    /// captured when this was wired up: the rows the rail is showing are torn
+    /// down and rebuilt by every change, and a handler holding one is holding a
+    /// widget that no longer exists.
+    fn drop_section_on_row(self: &Rc<Self>, moving: i64, onto: i64, under: &Entry) -> bool {
+        let sections = self.store.watchlist_sections(self.active.get());
+        let order: Vec<i64> = sections.iter().filter(|s| !s.root).map(|s| s.id).collect();
+        let Some(section) = sections.iter().find(|s| s.id == onto) else { return false };
+        let Some(at) = section.entries.iter().position(|entry| entry == under) else {
+            return false;
+        };
+        let Some((beside, side)) = row_drop_target(&order, section, at) else { return false };
+        self.reorder_sections(&order, moving, beside, side)
+    }
+
+    /// Write a section order down and redraw the rail.
+    ///
+    /// A drop that works out to the order already stored is refused rather
+    /// than applied, so dropping a section back where it came from does not
+    /// rebuild the rail to put it in the same place.
+    fn reorder_sections(
+        self: &Rc<Self>,
+        order: &[i64],
+        moving: i64,
+        onto: i64,
+        side: Beside,
+    ) -> bool {
+        let Some(ordered) = sections_beside(order, moving, onto, side) else { return false };
+        self.store.reorder_sections(self.active.get(), &ordered);
+        self.changed();
+        true
     }
 
     /// The switcher names the watchlist on screen, in the strip the corner
@@ -1699,20 +1766,94 @@ fn link_setting(id: i64) -> String {
     format!("watchlist_link_{id}")
 }
 
-/// Unpack a dragged row: which section it came from, and which entry it is.
-fn parse_drag(value: &glib::Value) -> Option<(i64, Entry)> {
+/// What a drag in the rail is carrying.
+///
+/// Headers and symbols sit in one list, so every drop target can be handed
+/// either kind. One parse of the payload decides which it got, rather than
+/// each target inferring it from the shape of the text and the one that
+/// forgets silently doing nothing.
+enum Dragged {
+    /// A symbol, and the section it is being taken out of.
+    Entry { from: i64, entry: Entry },
+    /// A section, by id — not by its place in the order, which means a
+    /// different section once the rail has been rebuilt mid-drag.
+    Section(i64),
+}
+
+/// Marks a section's payload. A symbol's first field is a section id, so a
+/// word there cannot be mistaken for one.
+const SECTION_DRAG: &str = "section";
+
+/// Unpack a dragged row.
+fn parse_drag(value: &glib::Value) -> Option<Dragged> {
     let text = value.get::<String>().ok()?;
     let parts: Vec<&str> = text.split('\t').collect();
-    if parts.len() != 3 {
-        return None;
+    match parts.as_slice() {
+        [kind, id] if *kind == SECTION_DRAG => Some(Dragged::Section(id.parse().ok()?)),
+        [from, symbol, suffix] => Some(Dragged::Entry {
+            from: from.parse().ok()?,
+            entry: Entry {
+                symbol: symbol.to_string(),
+                suffix: (!suffix.is_empty()).then(|| suffix.to_string()),
+            },
+        }),
+        _ => None,
     }
-    Some((
-        parts[0].parse().ok()?,
-        Entry {
-            symbol: parts[1].to_string(),
-            suffix: (!parts[2].is_empty()).then(|| parts[2].to_string()),
-        },
-    ))
+}
+
+/// Which side of a section another one lands on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Beside {
+    Before,
+    After,
+}
+
+/// The section order after `moving` is dropped beside `onto`, or `None` when
+/// that works out to the order already stored.
+///
+/// `order` is the named sections, which is every section a drop can land
+/// beside: the nameless root is not in it and never moves.
+fn sections_beside(order: &[i64], moving: i64, onto: i64, side: Beside) -> Option<Vec<i64>> {
+    let mut out = order.to_vec();
+    let from = out.iter().position(|id| *id == moving)?;
+    out.remove(from);
+    let at = out.iter().position(|id| *id == onto)?;
+    out.insert(at + usize::from(side == Beside::After), moving);
+    (out != order).then_some(out)
+}
+
+/// Which side of the section a header was dropped on the dragged one takes.
+///
+/// Dropping downwards lands after the header the pointer was over and
+/// upwards lands in its place, which is where the pointer was either way.
+/// The same rule the indicator list reorders by, so the two gestures do not
+/// have to be learned separately.
+fn header_drop_side(order: &[i64], moving: i64, onto: i64) -> Beside {
+    let at = |wanted: i64| order.iter().position(|id| *id == wanted);
+    match (at(moving), at(onto)) {
+        (Some(from), Some(to)) if from < to => Beside::After,
+        _ => Beside::Before,
+    }
+}
+
+/// Which section a header dropped on a symbol row lands beside, and on which
+/// side.
+///
+/// A section cannot sit between another's symbols, so a drop in the middle of
+/// one goes to whichever of its ends the pointer was nearer — `at` is the
+/// dropped-on symbol's place among that section's own rows. Dropping into the
+/// loose symbols at the top means first of the named sections: the root has no
+/// legal place above it, so both of its ends say the same thing. `None` when
+/// there is no named section to land beside at all.
+fn row_drop_target(order: &[i64], under: &Section, at: usize) -> Option<(i64, Beside)> {
+    if under.root {
+        return Some((*order.first()?, Beside::Before));
+    }
+    let side = match at * 2 < under.entries.len() {
+        true => Beside::Before,
+        false => Beside::After,
+    };
+    Some((under.id, side))
 }
 
 /// Put a quote into one value label, direction colouring included.
@@ -1999,6 +2140,97 @@ mod tests {
             seen.push(at);
         }
         assert_eq!(seen, ids.to_vec(), "display order, not sorted order");
+    }
+
+    /// A section as the store hands one over, for the drop rules that only
+    /// care about which section it is and how many rows it has.
+    fn section(id: i64, root: bool, symbols: &[&str]) -> Section {
+        Section {
+            id,
+            name: format!("Section {id}"),
+            collapsed: false,
+            root,
+            entries: symbols
+                .iter()
+                .map(|symbol| Entry { symbol: (*symbol).to_string(), suffix: None })
+                .collect(),
+        }
+    }
+
+    /// The two drags share every drop target in the rail, so a payload one of
+    /// them produced must never read as the other's — a header picked up and
+    /// read as its first symbol would move the wrong thing.
+    #[test]
+    fn a_dragged_section_and_a_dragged_symbol_are_told_apart() {
+        let header = format!("{SECTION_DRAG}\t7").to_value();
+        assert!(matches!(parse_drag(&header), Some(Dragged::Section(7))));
+
+        let Some(Dragged::Entry { from, entry }) = parse_drag(&"3\tNVDA\t".to_value()) else {
+            panic!("a symbol's payload should come back as a symbol");
+        };
+        assert_eq!((from, entry.symbol.as_str(), entry.suffix), (3, "NVDA", None));
+
+        assert!(parse_drag(&"nonsense".to_value()).is_none());
+    }
+
+    /// Dropping downwards lands after the header the pointer was over and
+    /// upwards lands in its place, which is where the pointer was either way.
+    #[test]
+    fn a_section_dropped_on_a_header_lands_where_the_pointer_was() {
+        let order = [10, 20, 30];
+
+        let side = header_drop_side(&order, 10, 30);
+        assert_eq!(side, Beside::After, "dragged down the rail");
+        assert_eq!(sections_beside(&order, 10, 30, side), Some(vec![20, 30, 10]));
+
+        let side = header_drop_side(&order, 30, 10);
+        assert_eq!(side, Beside::Before, "dragged up the rail");
+        assert_eq!(sections_beside(&order, 30, 10, side), Some(vec![30, 10, 20]));
+    }
+
+    /// A section cannot sit between another's symbols, so a drop in the middle
+    /// of one goes to whichever of its ends the pointer was nearer. Anything
+    /// else would be a section's symbols interleaved with another's.
+    #[test]
+    fn a_section_dropped_among_another_sections_symbols_goes_to_the_nearer_end() {
+        let order = [10, 20, 30];
+        let onto = section(20, false, &["A", "B", "C", "D"]);
+
+        assert_eq!(row_drop_target(&order, &onto, 0), Some((20, Beside::Before)));
+        assert_eq!(row_drop_target(&order, &onto, 1), Some((20, Beside::Before)));
+        assert_eq!(row_drop_target(&order, &onto, 2), Some((20, Beside::After)));
+        assert_eq!(row_drop_target(&order, &onto, 3), Some((20, Beside::After)));
+
+        assert_eq!(sections_beside(&order, 30, 20, Beside::Before), Some(vec![10, 30, 20]));
+        assert_eq!(sections_beside(&order, 10, 20, Beside::After), Some(vec![20, 10, 30]));
+    }
+
+    /// The loose symbols at the top are the nameless root: nothing may be
+    /// ordered above it, so both of its ends mean first of the named sections.
+    #[test]
+    fn a_section_dropped_in_the_loose_symbols_at_the_top_becomes_the_first() {
+        let order = [10, 20, 30];
+        let root = section(1, true, &["SPY", "QQQ", "DIA"]);
+
+        for at in 0..root.entries.len() {
+            assert_eq!(row_drop_target(&order, &root, at), Some((10, Beside::Before)));
+        }
+        assert_eq!(sections_beside(&order, 30, 10, Beside::Before), Some(vec![30, 10, 20]));
+
+        // And a watchlist with no named section has nowhere to put one.
+        assert_eq!(row_drop_target(&[], &root, 0), None);
+    }
+
+    /// Dropping a section back where it came from — on its own header, or
+    /// among its own symbols — is not a move, and rebuilding the rail to put
+    /// the rows back exactly as they were would only lose the selection.
+    #[test]
+    fn a_section_dropped_on_itself_changes_nothing() {
+        let order = [10, 20, 30];
+        assert_eq!(sections_beside(&order, 20, 20, Beside::Before), None, "its own header");
+        assert_eq!(sections_beside(&order, 20, 20, Beside::After), None, "its own symbols");
+        assert_eq!(sections_beside(&order, 10, 20, Beside::Before), None, "already in that place");
+        assert_eq!(sections_beside(&order, 99, 10, Beside::Before), None, "a section that is gone");
     }
 
     #[test]

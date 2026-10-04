@@ -245,6 +245,76 @@ $ omacharts watchlist show Semis --json
 "symbols":[{"symbol":"NVDA","suffix":null,"display":"NVDA"}, ...]}]}
 ```
 
+## Putting a watchlist in order
+
+The rail is dragged with a mouse: a section header moves the section, a symbol
+row moves the symbol. Both gestures have a command, and the commands are what
+a script or an agent has instead of a pointer.
+
+`section order` names the sections first to last. Any you leave out keep the
+order they had, behind the ones you named — so "put Energy at the top" is one
+section long rather than the whole list spelled out:
+
+```
+$ omacharts section order Macro Energy
+sections of "Macro": Energy, Indexes
+  [exit 0]
+
+$ omacharts watchlist show Macro
+Macro
+
+  Energy
+    CL
+    NG
+
+  Indexes
+    SPY
+    QQQ
+  [exit 0]
+```
+
+A section's symbols are positioned inside it, so moving the section moves them
+with it and two sections' symbols can never end up interleaved.
+
+The symbols that are in no section have no header to drag and are always the
+first thing in the rail. They cannot be ordered: name that section and the
+command refuses rather than quietly leaving them somewhere no gesture can put
+them. `section list` prints it as `(no section)`, with the id the commands
+below need to move symbols in and out of it.
+
+`watchlist move` moves one symbol — into another section, to another place in
+the one it is in, or both at once:
+
+```
+$ omacharts watchlist move Macro QQQ --section Energy --before CL
+moved QQQ from Indexes to Energy in "Macro", in front of CL
+  [exit 0]
+
+$ omacharts watchlist move Macro NG --before CL
+moved NG in Energy of "Macro", in front of CL
+  [exit 0]
+```
+
+Without `--before` it lands at the end of the section it is moving into, and
+without `--section` it stays in the section it is already in. One of the two is
+required: with neither, there is nowhere to move it to, and that is a usage
+error rather than a success that changed nothing.
+
+The symbol does not have to say where it is now — that is worked out — with one
+exception. A watchlist may hold the same symbol in two sections, and nothing on
+the command line says which copy you meant, so that is refused with exit 4
+until you name the section it is coming out of:
+
+```
+$ omacharts watchlist move Default CL --section Majors
+omacharts: CL is in 2 sections of "Default"; say which with --from id:1 or --from id:2
+  [exit 4]
+
+$ omacharts watchlist move Default CL --from Energy --section Majors
+moved CL from Energy to Majors in "Default", at the end
+  [exit 0]
+```
+
 ## Failure is unambiguous
 
 A name that does not exist and a command that was misspelled fail differently,

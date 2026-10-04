@@ -19,7 +19,7 @@ use omacharts_engine::{
 
 use super::charts::{self, Workspace};
 use super::{parser, Fault, Live, Outcome, EXIT_USAGE};
-use crate::store::{Section, Store, DEFAULT_WATCHLIST};
+use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 
 /// Parse and run.
 pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outcome {
@@ -89,6 +89,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("watchlist", "delete") => watchlist_delete(store, m, json),
         ("watchlist", "add") => watchlist_add(store, m, json, true),
         ("watchlist", "remove") => watchlist_add(store, m, json, false),
+        ("watchlist", "move") => watchlist_move(store, m, json),
         ("watchlist", "link") => watchlist_link(store, m, json),
         ("watchlist", "feed") => Ok(super::watchlist_json(flag(m, "refresh"))),
 
@@ -97,6 +98,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("section", "rename") => section_rename(store, m, json),
         ("section", "delete") => section_delete(store, m, json),
         ("section", "promote") => section_promote(store, m, json),
+        ("section", "order") => section_order(store, m, json),
 
         ("status", "show") => status(store, live.is_some(), json),
         ("chart", "crosshair") => crosshair(store, m, json),
@@ -431,8 +433,7 @@ fn watchlist_show(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
     }
     let mut out = format!("{name}\n");
     for section in &sections {
-        let title = if section.root { "(no section)" } else { &section.name };
-        out.push_str(&format!("\n  {title}\n"));
+        out.push_str(&format!("\n  {}\n", section_title(section)));
         for entry in &section.entries {
             out.push_str(&format!("    {}\n", spell(&entry.symbol, entry.suffix.as_deref())));
         }
@@ -544,10 +545,161 @@ fn watchlist_add(
     )
 }
 
+/// Move one symbol: into another section, to another place in the one it is
+/// in, or both at once.
+///
+/// What dragging a row in the rail does. The drag knows which copy of the
+/// symbol was picked up because the pointer was on it; a command has no
+/// pointer, which is the only thing `--from` is for — the same symbol sitting
+/// in two sections of one watchlist.
+fn watchlist_move(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let (list, name) = find_list(store, required(m, "LIST")?)?;
+    let moving = Entry {
+        symbol: required(m, "SYMBOL")?.to_uppercase(),
+        suffix: arg(m, "suffix").map(|s| s.to_uppercase()),
+    };
+    let shown = spell(&moving.symbol, moving.suffix.as_deref());
+
+    let from = match arg(m, "from") {
+        Some(wanted) => find_section(store, list, wanted)?,
+        None => holder_of(store, list, &moving, &name, &shown)?,
+    };
+    if !from.entries.contains(&moving) {
+        return Err(Fault::not_found(format!(
+            "{shown} is not in {}",
+            section_title(&from)
+        )));
+    }
+
+    let to = match arg(m, "section") {
+        Some(wanted) => find_section(store, list, wanted)?,
+        None => from.clone(),
+    };
+    let before = match arg(m, "before") {
+        None => None,
+        Some(wanted) => Some(landing_before(&to, &wanted.to_uppercase(), &moving)?),
+    };
+    if to.id == from.id && before.is_none() {
+        return Err(Fault::usage(
+            "nowhere to move it to: name a --section, a --before, or both".into(),
+        ));
+    }
+
+    store.move_entry_to_section(from.id, to.id, &moving, before.as_ref());
+
+    let landed = match &before {
+        Some(before) => {
+            format!("in front of {}", spell(&before.symbol, before.suffix.as_deref()))
+        }
+        None => "at the end".to_string(),
+    };
+    let text = match from.id == to.id {
+        true => format!("moved {shown} in {} of {name:?}, {landed}", section_title(&to)),
+        false => format!(
+            "moved {shown} from {} to {} in {name:?}, {landed}",
+            section_title(&from),
+            section_title(&to)
+        ),
+    };
+    said(
+        as_json,
+        json!({
+            "watchlist": name,
+            "symbol": shown,
+            "from": {"id": from.id, "name": from.name},
+            "to": {"id": to.id, "name": to.name},
+            "before": before.map(|b| spell(&b.symbol, b.suffix.as_deref())),
+        }),
+        text,
+    )
+}
+
+/// The section a symbol is in, when the command did not say.
+///
+/// One watchlist can hold the same symbol in two sections, and there is no
+/// pointer here to say which one was meant — so that is refused rather than
+/// resolved by taking the first and moving a symbol the caller was not
+/// looking at.
+fn holder_of(
+    store: &Store,
+    list: i64,
+    moving: &Entry,
+    name: &str,
+    shown: &str,
+) -> Result<Section, Fault> {
+    let holding: Vec<Section> = all_sections(store, list)
+        .into_iter()
+        .filter(|section| section.entries.contains(moving))
+        .collect();
+    match holding.as_slice() {
+        [_] => Ok(holding.into_iter().next().expect("one")),
+        [] => Err(Fault::not_found(format!("{shown} is not in {name:?}"))),
+        // Each alternative repeats the flag, so one of them can be pasted
+        // straight back onto the line that failed.
+        many => Err(Fault::ambiguous(format!(
+            "{shown} is in {} sections of {name:?}; say which with --from {}",
+            many.len(),
+            many.iter().map(|s| format!("id:{}", s.id)).collect::<Vec<_>>().join(" or --from ")
+        ))),
+    }
+}
+
+/// The entry a move lands in front of.
+///
+/// Named by symbol alone, without its venue suffix, because the symbol being
+/// moved already carries `--suffix` and asking for a second one to point at a
+/// neighbour is a flag nobody would guess.
+fn landing_before(to: &Section, wanted: &str, moving: &Entry) -> Result<Entry, Fault> {
+    if wanted == moving.symbol {
+        return Err(Fault::usage(format!(
+            "{} cannot land in front of itself",
+            spell(&moving.symbol, moving.suffix.as_deref())
+        )));
+    }
+    to.entries
+        .iter()
+        .find(|entry| entry.symbol == wanted)
+        .cloned()
+        .ok_or_else(|| Fault::not_found(format!("{wanted} is not in {}", section_title(to))))
+}
+
 // -- sections -------------------------------------------------------------
 
+/// Every section of a watchlist, the nameless root included even when it is
+/// empty.
+///
+/// `watchlist_sections` leaves an empty root out because the rail has nothing
+/// to draw for it. A command does have something to do with it: `id:N` is the
+/// only way to name the root, and a symbol has to be able to move back out of
+/// a section into one that is currently empty.
+fn all_sections(store: &Store, list: i64) -> Vec<Section> {
+    let mut sections = store.watchlist_sections(list);
+    if !sections.iter().any(|section| section.root) {
+        sections.insert(
+            0,
+            Section {
+                id: store.root_section(list),
+                name: String::new(),
+                collapsed: false,
+                root: true,
+                entries: Vec::new(),
+            },
+        );
+    }
+    sections
+}
+
+/// What a section is called where somebody reads it. The root has no name to
+/// print, and an empty string in the middle of a sentence reads as a bug.
+fn section_title(section: &Section) -> &str {
+    match section.root {
+        true => "(no section)",
+        false => &section.name,
+    }
+}
+
 fn find_section(store: &Store, list: i64, selector: &str) -> Result<Section, Fault> {
-    let sections = store.watchlist_sections(list);
+    let sections = all_sections(store, list);
     if let Some(rest) = selector.strip_prefix("id:") {
         let id: i64 = rest
             .parse()
@@ -579,8 +731,7 @@ fn section_list(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<St
     Ok(sections
         .iter()
         .map(|s| {
-            let title = if s.root { "(no section)".to_string() } else { s.name.clone() };
-            format!("{:<5} {:<24} {:>3} symbols", s.id, title, s.entries.len())
+            format!("{:<5} {:<24} {:>3} symbols", s.id, section_title(s), s.entries.len())
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -655,6 +806,62 @@ fn section_promote(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result
             "turned section {:?} into a watchlist with its {} symbols",
             section.name,
             section.entries.len()
+        ),
+    )
+}
+
+/// Put a watchlist's sections in the order given.
+///
+/// Sections left out keep the order they had, behind the ones named, so "put
+/// Energy first" is one section long rather than the whole list spelled out.
+///
+/// The symbols come with their section rather than being moved: they are
+/// positioned inside it, which is what makes it impossible for two sections'
+/// symbols to end up interleaved however the sections are shuffled.
+fn section_order(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    let (list, name) = find_list(store, required(m, "LIST")?)?;
+    let wanted: Vec<String> =
+        m.get_many::<String>("SECTION").map(|given| given.cloned().collect()).unwrap_or_default();
+    if wanted.is_empty() {
+        return Err(Fault::usage("name at least one section".into()));
+    }
+
+    let mut ordered: Vec<i64> = Vec::new();
+    for selector in &wanted {
+        let section = find_section(store, list, selector)?;
+        if section.root {
+            return Err(Fault::refused(
+                "symbols outside a section are always first and cannot be ordered".into(),
+            ));
+        }
+        if ordered.contains(&section.id) {
+            return Err(Fault::usage(format!("{selector:?} is named twice")));
+        }
+        ordered.push(section.id);
+    }
+    // Positions are written straight from this list, so it has to be the whole
+    // order: a section left out would keep a position one of these has taken.
+    for id in store.section_order(list) {
+        if !ordered.contains(&id) {
+            ordered.push(id);
+        }
+    }
+    store.reorder_sections(list, &ordered);
+
+    let sections = store.watchlist_sections(list);
+    let named: Vec<&Section> = sections.iter().filter(|section| !section.root).collect();
+    said(
+        as_json,
+        json!({
+            "watchlist": name,
+            "sections": named
+                .iter()
+                .map(|s| json!({"id": s.id, "name": s.name}))
+                .collect::<Vec<_>>(),
+        }),
+        format!(
+            "sections of {name:?}: {}",
+            named.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
         ),
     )
 }
@@ -1861,6 +2068,174 @@ mod tests {
         assert_eq!(symbols.len(), 3);
     }
 
+    /// The order the sections come back in, as the rail would draw them.
+    fn order_of(store: &Store, list: &str) -> Vec<String> {
+        let shown = run(&format!("watchlist show {list} --json"), store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        parsed["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|section| match section["root"].as_bool() {
+                Some(true) => "(no section)".to_string(),
+                _ => section["name"].as_str().unwrap().to_string(),
+            })
+            .collect()
+    }
+
+    /// Dragging a section header in the rail, from a terminal. The symbols are
+    /// positioned inside their section, so they go where it goes.
+    #[test]
+    fn sections_can_be_reordered_and_take_their_symbols_with_them() {
+        let store = Store::memory().unwrap();
+        run("section create Default Energy", &store);
+        run("section create Default Metals", &store);
+        run("watchlist add Default CL --section Energy", &store);
+        run("watchlist add Default GC --section Metals", &store);
+        assert_eq!(order_of(&store, "Default"), vec!["Energy", "Metals"]);
+
+        let moved = run("section order Default Metals Energy", &store);
+        assert_eq!(moved.code, 0, "{}", moved.err);
+        assert!(moved.out.contains("Metals, Energy"), "{}", moved.out);
+        assert_eq!(order_of(&store, "Default"), vec!["Metals", "Energy"]);
+
+        let shown = run("watchlist show Default --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        assert_eq!(parsed["sections"][0]["symbols"][0]["symbol"], "GC");
+        assert_eq!(parsed["sections"][1]["symbols"][0]["symbol"], "CL");
+    }
+
+    /// Naming one section is the whole gesture of "put this one first", so the
+    /// rest have to keep the order they were in rather than fall into whatever
+    /// order the ids happen to be.
+    #[test]
+    fn sections_left_out_of_an_order_keep_theirs_behind_the_ones_named() {
+        let store = Store::memory().unwrap();
+        for name in ["Energy", "Metals", "Crypto"] {
+            run(&format!("section create Default {name}"), &store);
+        }
+
+        assert_eq!(run("section order Default Crypto", &store).code, 0);
+        assert_eq!(order_of(&store, "Default"), vec!["Crypto", "Energy", "Metals"]);
+    }
+
+    /// The nameless bucket is always the first row in the rail, and there is
+    /// no header to drag it by. A command that quietly gave it a position
+    /// would put the loose symbols somewhere no gesture can.
+    #[test]
+    fn the_section_holding_loose_symbols_cannot_be_ordered() {
+        let store = Store::memory().unwrap();
+        run("watchlist add Default SPY", &store);
+        run("section create Default Energy", &store);
+        let root = run("section list Default --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&root.out).unwrap();
+        let root_id = parsed["sections"][0]["id"].as_i64().unwrap();
+
+        let refused = run(&format!("section order Default id:{root_id}"), &store);
+        assert_eq!(refused.code, super::super::EXIT_REFUSED, "{}", refused.out);
+        assert_eq!(order_of(&store, "Default"), vec!["(no section)", "Energy"]);
+    }
+
+    /// Naming a section twice is a line that cannot mean one thing, and
+    /// guessing which of the two places was meant is worse than refusing.
+    #[test]
+    fn an_order_that_names_a_section_twice_is_refused() {
+        let store = Store::memory().unwrap();
+        run("section create Default Energy", &store);
+        run("section create Default Metals", &store);
+        assert_eq!(
+            run("section order Default Energy Energy", &store).code,
+            super::super::EXIT_USAGE
+        );
+        assert_eq!(run("section order Default Nope", &store).code, super::super::EXIT_NOT_FOUND);
+    }
+
+    /// Dragging a symbol between sections, from a terminal.
+    #[test]
+    fn a_symbol_moves_between_sections_and_says_where_it_went() {
+        let store = Store::memory().unwrap();
+        run("section create Default Energy", &store);
+        run("watchlist add Default CL NG --section Energy", &store);
+        run("watchlist add Default SPY", &store);
+
+        let moved = run("watchlist move Default SPY --section Energy", &store);
+        assert_eq!(moved.code, 0, "{}", moved.err);
+        assert!(moved.out.contains("(no section)"), "{}", moved.out);
+        assert!(moved.out.contains("Energy"), "{}", moved.out);
+
+        let shown = run("watchlist show Default --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        let energy = &parsed["sections"][0];
+        assert_eq!(energy["name"], "Energy", "the root is empty now and is not shown");
+        let symbols: Vec<&str> = energy["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["symbol"].as_str().unwrap())
+            .collect();
+        assert_eq!(symbols, vec!["CL", "NG", "SPY"], "landed at the end");
+    }
+
+    /// Reordering inside one section, which is the other half of what dragging
+    /// a row does and needs no destination section at all.
+    #[test]
+    fn a_symbol_moves_in_front_of_another_in_its_own_section() {
+        let store = Store::memory().unwrap();
+        run("section create Default Energy", &store);
+        run("watchlist add Default CL NG BZ --section Energy", &store);
+
+        let moved = run("watchlist move Default BZ --before CL", &store);
+        assert_eq!(moved.code, 0, "{}", moved.err);
+
+        let shown = run("watchlist show Default --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        let symbols: Vec<&str> = parsed["sections"][0]["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["symbol"].as_str().unwrap())
+            .collect();
+        assert_eq!(symbols, vec!["BZ", "CL", "NG"]);
+    }
+
+    /// A move needs somewhere to go. Without a section or a neighbour the
+    /// command would be a no-op reported as a success, which is the one answer
+    /// a caller cannot act on.
+    #[test]
+    fn moving_a_symbol_nowhere_is_a_usage_error() {
+        let store = Store::memory().unwrap();
+        run("watchlist add Default SPY", &store);
+        assert_eq!(run("watchlist move Default SPY", &store).code, super::super::EXIT_USAGE);
+        assert_eq!(
+            run("watchlist move Default NVDA --before SPY", &store).code,
+            super::super::EXIT_NOT_FOUND
+        );
+    }
+
+    /// One watchlist can hold the same symbol in two sections, and nothing on
+    /// the command line says which one the caller was looking at. The rail has
+    /// a pointer; this has to ask.
+    #[test]
+    fn a_symbol_in_two_sections_has_to_be_taken_out_of_the_one_named() {
+        let store = Store::memory().unwrap();
+        run("section create Default Energy", &store);
+        run("section create Default Majors", &store);
+        run("watchlist add Default CL --section Energy", &store);
+        run("watchlist add Default CL --section Majors", &store);
+
+        let refused = run("watchlist move Default CL --section Majors", &store);
+        assert_eq!(refused.code, super::super::EXIT_AMBIGUOUS, "{}", refused.err);
+        assert!(refused.err.contains("--from"), "{}", refused.err);
+
+        let moved = run("watchlist move Default CL --from Energy --section Majors", &store);
+        assert_eq!(moved.code, 0, "{}", moved.err);
+        let shown = run("watchlist show Default --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&shown.out).unwrap();
+        assert_eq!(parsed["sections"][0]["name"], "Energy");
+        assert!(parsed["sections"][0]["symbols"].as_array().unwrap().is_empty(), "taken out of it");
+        assert_eq!(parsed["sections"][1]["symbols"][0]["symbol"], "CL", "and still in the other");
+    }
+
     /// An agent reads the code, not the sentence. A name that does not exist
     /// has to be distinguishable from a command that was spelled wrongly.
     #[test]
@@ -2356,6 +2731,8 @@ mod tests {
         run("watchlist create Semis", &store);
         run("watchlist add Semis NVDA AMD AVGO TSM MU", &store);
         run("section create Default Energy", &store);
+        run("section create Default Metals", &store);
+        run("section create Semis Energy", &store);
         run("chartbook create Macro --symbol AAPL --switch", &store);
         run("chart split horizontal --book Macro", &store);
         run("chartbook create Semis --watchlist Semis --symbol NVDA", &store);

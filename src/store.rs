@@ -597,6 +597,47 @@ impl Store {
         );
     }
 
+    /// The named sections of a watchlist, in display order.
+    ///
+    /// The ids alone, because reordering has no use for the symbols and
+    /// reading them costs a query per section.
+    pub fn section_order(&self, watchlist: i64) -> Vec<i64> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id FROM watchlist_sections
+             WHERE watchlist_id = ?1 AND position <> ?2 ORDER BY position, id",
+        ) else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map(params![watchlist, ROOT_POSITION], |r| r.get(0)) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
+    /// Persist a new order for a watchlist's named sections.
+    ///
+    /// A section's symbols are positioned within the section, so moving the
+    /// section moves its symbols with it and no entry has to be touched. That
+    /// is also what stops one section's symbols ever landing among another's.
+    ///
+    /// The root is not in `ordered` and cannot be put there: it is held at
+    /// [`ROOT_POSITION`], below every position a named section can take, which
+    /// is what keeps the nameless bucket first however the rest are dragged
+    /// about.
+    ///
+    /// `ordered` is the whole order rather than a change to part of it.
+    /// Positions are written straight from it, so a named section left out
+    /// keeps an old position that one of these may now collide with.
+    pub fn reorder_sections(&self, watchlist: i64, ordered: &[i64]) {
+        for (position, id) in ordered.iter().enumerate() {
+            let _ = self.conn.execute(
+                "UPDATE watchlist_sections SET position = ?3
+                 WHERE id = ?1 AND watchlist_id = ?2 AND position <> ?4",
+                params![id, watchlist, position as i64, ROOT_POSITION],
+            );
+        }
+    }
+
     /// Remove a section and everything in it. A root cannot be removed —
     /// there is no header to remove it from, and its watchlist would have
     /// nowhere to put a symbol that is not in a section.
@@ -964,6 +1005,60 @@ mod tests {
         let order: Vec<String> =
             store.watchlist()[0].entries.iter().map(|e| e.symbol.clone()).collect();
         assert_eq!(order, vec!["C", "A", "B"]);
+    }
+
+    /// Dragging a section header reorders the sections and nothing else: the
+    /// symbols are positioned inside their own section, so they come along
+    /// without a single entry being rewritten.
+    #[test]
+    fn reordering_sections_carries_their_symbols_and_leaves_the_order_inside_them() {
+        let store = Store::memory().unwrap();
+        let energy = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        let metals = store.add_section(DEFAULT_WATCHLIST, "Metals").unwrap();
+        store.add_to_section(energy, "CL", None);
+        store.add_to_section(energy, "NG", None);
+        store.add_to_section(metals, "GC", None);
+        assert_eq!(store.section_order(DEFAULT_WATCHLIST), vec![energy, metals]);
+
+        store.reorder_sections(DEFAULT_WATCHLIST, &[metals, energy]);
+
+        let list = store.watchlist();
+        assert_eq!(list.iter().map(|s| s.id).collect::<Vec<_>>(), vec![metals, energy]);
+        assert_eq!(symbols(&list), vec!["GC", "CL", "NG"], "Energy's two stay together, in order");
+    }
+
+    /// The nameless bucket is the one section that cannot move. It is held
+    /// below everything the named ones are ordered against, so asking for it
+    /// anywhere in the order changes nothing.
+    #[test]
+    fn the_root_stays_first_however_the_named_sections_are_ordered() {
+        let store = Store::memory().unwrap();
+        let root = store.root_section(DEFAULT_WATCHLIST);
+        store.add_to_root("SPY", None);
+        let energy = store.add_section(DEFAULT_WATCHLIST, "Energy").unwrap();
+        store.add_to_section(energy, "CL", None);
+
+        assert!(!store.section_order(DEFAULT_WATCHLIST).contains(&root), "it is not orderable");
+        store.reorder_sections(DEFAULT_WATCHLIST, &[energy, root]);
+
+        let list = store.watchlist();
+        assert_eq!(list[0].id, root, "still the first row in the rail");
+        assert_eq!(list[1].id, energy);
+    }
+
+    /// Sections of other watchlists are ordered against their own, so an id
+    /// from somewhere else is ignored rather than given a position in this one.
+    #[test]
+    fn reordering_only_touches_the_watchlist_asked_about() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").unwrap();
+        let mine = store.add_section(DEFAULT_WATCHLIST, "Mine").unwrap();
+        let theirs = store.add_section(scratch, "Theirs").unwrap();
+
+        store.reorder_sections(DEFAULT_WATCHLIST, &[theirs, mine]);
+
+        assert_eq!(store.section_order(DEFAULT_WATCHLIST), vec![mine]);
+        assert_eq!(store.section_order(scratch), vec![theirs]);
     }
 
     /// The database on a machine that has been running this app has sections
