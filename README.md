@@ -48,9 +48,7 @@ cargo build --release
 ## Data
 
 Omacharts is prepared to work with multiple data providers, but at launch only
-Yahoo Finance is supported. Its public endpoint needs no account and no key,
-and is cached locally in SQLite. Prices are delayed about 15 minutes, which is
-invisible on the timeframes this is built for. Not affiliated with Yahoo.
+Yahoo Finance is supported.
 
 Help adding more feeds would be very welcome, paid or free. The provider
 interface is small and everything above it is already written against it.
