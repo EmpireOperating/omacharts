@@ -678,13 +678,17 @@ impl Window {
         });
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
 
-        watchlist.link_button().set_popover(Some(&this.link_popover(|window, group| {
-            let colour = window.link_colour(group);
-            if let Some(rail) = window.watchlist.borrow().as_ref() {
-                rail.set_link_group(group, colour);
-            }
-            window.save_workspace();
-        })));
+        let holder = watchlist.clone();
+        watchlist.link_button().set_popover(Some(&this.link_popover(
+            move |group| holder.group_held_by(group).map(|(_, name)| name),
+            |window, group| {
+                let colour = window.link_colour(group);
+                if let Some(rail) = window.watchlist.borrow().as_ref() {
+                    rail.set_link_group(group, colour);
+                }
+                window.save_workspace();
+            },
+        )));
         let colours = this.clone();
         watchlist.adopt_link_group(move |group| colours.link_colour(group));
 
@@ -823,10 +827,14 @@ impl Window {
 
         // The chain opens the list of groups rather than toggling one, now
         // that there are nine of them and "off" is a tenth answer.
-        pane.link.set_popover(Some(&self.link_popover(move |window, group| {
-            window.focus(id);
-            window.set_pane_link_group(id, group);
-        })));
+        pane.link.set_popover(Some(&self.link_popover(
+            // Charts share a group freely; only a watchlist is exclusive.
+            |_| None,
+            move |window, group| {
+                window.focus(id);
+                window.set_pane_link_group(id, group);
+            },
+        )));
         pane.set_link_group(linked, self.link_colour(linked));
 
         // Right-clicking a strip offers to edit the list, rather than throwing
@@ -1315,6 +1323,7 @@ impl Window {
     /// stands for; which chart or rail it applies to is the caller's business.
     fn link_popover(
         self: &Rc<Self>,
+        held: impl Fn(LinkGroup) -> Option<String> + 'static,
         choose: impl Fn(&Rc<Self>, LinkGroup) + 'static,
     ) -> gtk::Popover {
         let popover = gtk::Popover::new();
@@ -1331,6 +1340,17 @@ impl Window {
             label.set_xalign(0.0);
             label.set_hexpand(true);
             line.append(&label);
+            // A group drives one watchlist, so one another list already holds
+            // is not on offer — and the row names whose it is rather than
+            // merely refusing, which would leave nothing to understand.
+            if let Some(owner) = held(group) {
+                let owner = gtk::Label::new(Some(&owner));
+                owner.add_css_class("dim-label");
+                owner.add_css_class("caption");
+                owner.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                line.append(&owner);
+                row.set_sensitive(false);
+            }
             row.set_child(Some(&line));
 
             let this = self.clone();
@@ -2309,7 +2329,17 @@ impl Window {
 
         let new_book = gio::SimpleAction::new("new-chartbook", None);
         let this = self.clone();
-        new_book.connect_activate(move |_, _| this.new_chartbook());
+        new_book.connect_activate(move |_, _| {
+            // Ctrl+N in the rail means a new symbol. The key is one
+            // accelerator and an accelerator is offered above whatever has the
+            // keyboard, so the rail cannot take it first — the action asks it
+            // instead, and only makes a chartbook when the answer is no.
+            let rail = this.watchlist.borrow().as_ref().cloned();
+            if rail.is_some_and(|rail| rail.add_symbol_if_focused()) {
+                return;
+            }
+            this.new_chartbook();
+        });
         self.window.add_action(&new_book);
 
         let rename_book = gio::SimpleAction::new("rename-chartbook", None);
@@ -2789,6 +2819,8 @@ impl Window {
                     // row says where it works: pressed over a chart it does
                     // nothing, and nothing is hard to ask a question about.
                     ("Ctrl+Alt+Shift+↑ ↓", "Previous or next watchlist, in the sidebar"),
+                    ("Ctrl+N", "Add a symbol, in the sidebar"),
+                    ("Ctrl+Shift+N", "Add a section, in the sidebar"),
                     ("Delete", "Remove the symbol"),
                 ],
             ),
