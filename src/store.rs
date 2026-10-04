@@ -765,11 +765,11 @@ impl Store {
     /// shape.
     pub fn indicators(&self) -> Vec<Indicator> {
         match self.setting("indicators") {
-            // Volume used to be drawn unconditionally. Now that it is an
-            // indicator, a chart that has never been configured still gets
-            // one — otherwise making it removable would remove it from
-            // everybody at once.
-            None => vec![Indicator::new(1, omacharts_engine::IndicatorKind::Volume)],
+            // A chart nobody has configured carries nothing, the same as a
+            // chart in a new chartbook. Volume used to be drawn here
+            // unconditionally, and keeping it as the default meant a fresh
+            // install opened with an indicator the user never asked for.
+            None => Vec::new(),
             Some(json) => serde_json::from_str(&json).unwrap_or_default(),
         }
     }
@@ -1469,17 +1469,19 @@ mod tests {
         let _ = std::fs::remove_file(&file);
     }
 
+
+    /// A fresh install opens on an empty chart. Volume was the default here
+    /// when it was drawn unconditionally, which made the very first chart
+    /// arrive carrying an indicator nobody had added.
     #[test]
-    fn a_chart_that_was_never_configured_still_has_volume() {
+    fn a_chart_nobody_has_configured_carries_nothing() {
         use omacharts_engine::IndicatorKind;
         let store = Store::memory().unwrap();
-        let indicators = store.indicators();
-        assert_eq!(indicators.len(), 1);
-        assert_eq!(indicators[0].kind, IndicatorKind::Volume);
+        assert!(store.indicators().is_empty(), "a fresh chart came with indicators on it");
 
-        // But removing it is allowed to stick: an empty list is a choice.
-        store.set_indicators(&[]);
-        assert!(store.indicators().is_empty());
+        // And what somebody did add comes back.
+        store.set_indicators(&[Indicator::new(1, IndicatorKind::Volume)]);
+        assert_eq!(store.indicators().len(), 1);
     }
 
     #[test]

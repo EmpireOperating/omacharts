@@ -3708,6 +3708,14 @@ impl Window {
             if !state.contains(gtk::gdk::ModifierType::CONTROL_MASK) || this.is_typing() {
                 return glib::Propagation::Proceed;
             }
+            // Only the bare Ctrl combos. Ctrl+Shift+X removes the chartbook
+            // and Ctrl+Shift+V is nothing of ours, and catching a key here
+            // means the accelerator for it never runs — which is how
+            // Ctrl+Shift+X came to close the chart instead of the book
+            // holding it.
+            if state.contains(gtk::gdk::ModifierType::SHIFT_MASK) {
+                return glib::Propagation::Proceed;
+            }
             match key {
                 Key::v | Key::V => this.split_focused(false),
                 Key::x | Key::X => this.close_focused(),
