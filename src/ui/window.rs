@@ -16,7 +16,7 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{
-    resample, BarStyle, Indicator, Instrument, Provider, Session, Timeframe,
+    resample, BarStyle, FetchFailure, Indicator, Instrument, Provider, Session, Timeframe,
 };
 
 use crate::loader::{Loader, Request, Response, BACKFILL, BACKGROUND, FOREGROUND};
@@ -2557,13 +2557,14 @@ impl Window {
             .unwrap_or_else(|| store.setting_bool(SETTING_SHOW_GRID, true));
         self.panes.borrow_mut().clear();
         self.maximized.set(None);
-        // A new book opens on the indicators you have chosen as your default,
-        // not on whatever the last chart happened to be carrying: a fresh
-        // arrangement is a fresh start, which is the reason to open one.
-        let pane =
-            self.new_pane(
+        // A new chart carries nothing. Splitting copies the chart you split,
+        // because two of what you were looking at is the point of splitting —
+        // but a new chartbook is a fresh start, and inheriting whatever the
+        // last chart happened to be carrying is how a VWAP you set up once
+        // follows you around for the rest of the session.
+        let pane = self.new_pane(
             timeframe,
-            self.store.indicators(),
+            Vec::new(),
             bar_style,
             session,
             show_grid,
@@ -3716,20 +3717,20 @@ impl Window {
             while let Ok(response) = receiver.recv().await {
                 match response {
                     Response::Bars { key, timeframe, bars } => {
-                        this.present(&key, timeframe, bars, false);
+                        this.present(&key, timeframe, bars, None);
                     }
-                    Response::Failed { key, timeframe, bars, error, rate_limited } => {
-                        // A failure shows the same chart, marked stale. Never
-                        // an empty pane.
-                        this.present(&key, timeframe, bars, true);
+                    Response::Failed { key, timeframe, bars, failure } => {
+                        // A failure shows the same chart and says what went
+                        // wrong. Never an empty pane, and never a pane that
+                        // blames the symbol for a request that never arrived.
+                        this.present(&key, timeframe, bars, Some(failure));
                         // Being throttled is the one failure worth acting on
                         // rather than just showing: carrying on would spend a
                         // queue of speculative requests on certain refusals
                         // and keep the cooldown climbing.
-                        if rate_limited {
+                        if failure == FetchFailure::RateLimited {
                             this.pause_backfill();
                         }
-                        let _ = error;
                     }
                 }
             }
@@ -4233,7 +4234,7 @@ impl Window {
                 empty
             }
         };
-        pane.view.set_stale(false);
+        pane.view.set_trouble(None);
         pane.view.set_loading(cached_was_empty);
 
         // Only the focused chart drives the rail and the prefetch window: the
@@ -4412,7 +4413,13 @@ impl Window {
 
     /// Apply bars that arrived for `key`, ignoring a reply for a chart the user
     /// has already navigated away from.
-    fn present(self: &Rc<Self>, key: &str, native: Timeframe, bars: Vec<omacharts_engine::Bar>, stale: bool) {
+    fn present(
+        self: &Rc<Self>,
+        key: &str,
+        native: Timeframe,
+        bars: Vec<omacharts_engine::Bar>,
+        trouble: Option<FetchFailure>,
+    ) {
         // One reply can belong to several charts: the same symbol at the same
         // resolution in two panes is one fetch and two repaints.
         let waiting: Vec<Rc<ChartPane>> = self
@@ -4437,6 +4444,7 @@ impl Window {
             // column may now have numbers it did not have a moment ago.
             if let Some(watchlist) = self.watchlist.borrow().as_ref() {
                 watchlist.refresh_quotes();
+                watchlist.set_trouble(trouble);
             }
             return;
         }
@@ -4445,11 +4453,12 @@ impl Window {
             let instrument = pane.instrument.borrow().clone();
             let Some(instrument) = instrument else { continue };
             self.paint(&pane, key, &instrument, pane.timeframe.get(), bars.clone());
-            pane.view.set_stale(stale);
+            pane.view.set_trouble(trouble);
             pane.view.set_loading(false);
         }
         if let Some(watchlist) = self.watchlist.borrow().as_ref() {
             watchlist.refresh_quotes();
+            watchlist.set_trouble(trouble);
         }
     }
 
