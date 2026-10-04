@@ -555,41 +555,138 @@ fn stroke_rows(
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
 
-    let width = adw::SpinRow::with_range(0.0, 5.0, 0.5);
-    width.set_title(&format!("{prefix}Width"));
-    width.set_subtitle("Zero draws no line");
-    width.set_digits(1);
-    width.set_value(stroke.width);
-    let window_for_width = window.clone();
-    let refresh_for_width = refresh.clone();
     let apply_width = apply.clone();
-    width.connect_value_notify(move |row| {
-        let value = row.value();
-        let apply = apply_width.clone();
-        update(&window_for_width, id, move |indicator| {
-            apply(indicator, Stroke { width: value, style: stroke.style });
-        });
-        refresh_for_width.run();
-    });
-    group.add(&width);
+    group.add(&picker_row(
+        window,
+        refresh,
+        id,
+        &format!("{prefix}Thickness"),
+        &WIDTHS.map(|width| (width, Stroke { width, style: stroke.style })),
+        stroke,
+        move |indicator, picked| apply_width(indicator, picked),
+    ));
 
-    let names: Vec<&str> = LineStyle::ALL.iter().map(|s| s.label()).collect();
-    let style = adw::ComboRow::new();
-    style.set_title(&format!("{prefix}Style"));
-    style.set_model(Some(&gtk::StringList::new(&names)));
-    style.set_selected(LineStyle::ALL.iter().position(|s| *s == stroke.style).unwrap_or(0) as u32);
-    let window_for_style = window.clone();
-    let refresh_for_style = refresh.clone();
-    style.connect_selected_notify(move |row| {
-        let Some(chosen) = LineStyle::ALL.get(row.selected() as usize).copied() else { return };
-        let apply = apply.clone();
-        update(&window_for_style, id, move |indicator| {
-            apply(indicator, Stroke { width: stroke.width, style: chosen });
-        });
-        refresh_for_style.run();
-    });
-    group.add(&style);
+    group.add(&picker_row(
+        window,
+        refresh,
+        id,
+        &format!("{prefix}Line style"),
+        &LineStyle::ALL.map(|style| {
+            (LINE_SAMPLE_WIDTH, Stroke { width: stroke.width.max(LINE_SAMPLE_WIDTH), style })
+        }),
+        stroke,
+        move |indicator, picked| {
+            // Only the pattern: picking a style must not quietly change the
+            // weight the row above it is showing.
+            apply(indicator, Stroke { width: stroke.width, style: picked.style });
+        },
+    ));
+
     group
+}
+
+/// The weights on offer. Four, plus none.
+///
+/// A spin button asking for a number between zero and five in halves is a
+/// question nobody has an opinion about; what people want is a thicker line or
+/// a thinner one, and they want to see which. Zero stays because a VWAP band
+/// uses it to draw its fill with no outline.
+const WIDTHS: [f64; 5] = [0.0, 1.0, 1.5, 2.5, 4.0];
+
+/// What a style sample is drawn at, so dashes and dots are legible whatever
+/// weight the line itself is set to.
+const LINE_SAMPLE_WIDTH: f64 = 1.5;
+
+/// A row of drawn samples, one of them pressed.
+///
+/// Grouped toggles rather than a dropdown: the whole point is seeing the
+/// options beside each other.
+fn picker_row(
+    window: &Rc<Window>,
+    refresh: &Refresh,
+    id: u32,
+    title: &str,
+    options: &[(f64, Stroke)],
+    current: Stroke,
+    apply: impl Fn(&mut Indicator, Stroke) + Clone + 'static,
+) -> adw::ActionRow {
+    let row = adw::ActionRow::new();
+    row.set_title(title);
+
+    let strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    strip.add_css_class("linked");
+    strip.add_css_class("stroke-picker");
+    strip.set_valign(gtk::Align::Center);
+
+    let colour = {
+        let indicators = window.indicators();
+        drawn_colour(window, &indicators, id)
+    };
+
+    let mut first: Option<gtk::ToggleButton> = None;
+    for (sample, stroke) in options {
+        let button = gtk::ToggleButton::new();
+        button.add_css_class("flat");
+        button.set_child(Some(&stroke_sample(*sample, stroke.style, &colour)));
+        button.set_tooltip_text(Some(&describe_stroke(*sample, stroke.style)));
+        match &first {
+            Some(anchor) => button.set_group(Some(anchor)),
+            None => first = Some(button.clone()),
+        }
+        // Whichever sample describes what is set now.
+        button.set_active(if options.len() == WIDTHS.len() {
+            (sample - current.width).abs() < 0.01
+        } else {
+            stroke.style == current.style
+        });
+
+        let window_for_pick = window.clone();
+        let refresh_for_pick = refresh.clone();
+        let apply_for_pick = apply.clone();
+        let picked = *stroke;
+        button.connect_toggled(move |button| {
+            if !button.is_active() {
+                return;
+            }
+            let apply = apply_for_pick.clone();
+            update(&window_for_pick, id, move |indicator| apply(indicator, picked));
+            refresh_for_pick.run();
+        });
+        strip.append(&button);
+    }
+
+    row.add_suffix(&strip);
+    row
+}
+
+fn describe_stroke(width: f64, style: LineStyle) -> String {
+    if width <= 0.0 {
+        return "No line".to_string();
+    }
+    format!("{} · {width}px", style.label())
+}
+
+/// One option, drawn as the line it would produce.
+fn stroke_sample(width: f64, style: LineStyle, colour: &str) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(34);
+    area.set_content_height(18);
+    let colour = colour.to_string();
+    area.set_draw_func(move |_, cr, w, h| {
+        if width <= 0.0 {
+            return;
+        }
+        let (w, h) = (w as f64, h as f64);
+        colors::set_source(cr, &colour);
+        cr.set_line_width(width);
+        cr.set_dash(&style.dashes(width), 0.0);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        let y = (h / 2.0).round() + if width % 2.0 == 1.0 { 0.5 } else { 0.0 };
+        cr.move_to(5.0, y);
+        cr.line_to(w - 5.0, y);
+        let _ = cr.stroke();
+    });
+    area
 }
 
 /// A colour row: a quiet way back to the default, then the swatch.

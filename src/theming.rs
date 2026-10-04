@@ -268,6 +268,15 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .symbol-row-unlisted .symbol-row-name { opacity: 0.55; font-style: italic; }
 .symbol-row-unlisted .symbol-kind { opacity: 0.4; }
 
+/* Thickness and line style, picked by looking rather than by naming a number.
+   A segmented strip, so the options sit beside each other and the one in use
+   is the one pressed. */
+.stroke-picker button {
+  padding: 2px 4px;
+  min-width: 0;
+  min-height: 0;
+}
+
 .swatch-button { min-width: 26px; min-height: 26px; padding: 0; border-radius: 6px; }
 
 /* The link toggle is a glyph, not a button: no frame, no fill, not even when
