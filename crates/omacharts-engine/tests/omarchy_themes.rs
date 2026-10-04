@@ -18,6 +18,7 @@ use omacharts_engine::omarchy::{AXIS_CONTRAST, CROSSHAIR_CONTRAST, GRID_CONTRAST
 use omacharts_engine::theme::{
     contrast_ratio, delta_e, hue_gap, theme_bars, Direction, Oklch, SWATCH_SEQUENCE,
 };
+use omacharts_engine::link::{self, LinkGroup};
 use omacharts_engine::{omarchy, palette, Theme};
 
 fn fixtures() -> Vec<(String, Theme)> {
@@ -497,6 +498,35 @@ fn the_frame_is_visible_and_unmistakable_in_every_theme() {
         for (what, colour) in [("up", bars.outline(Direction::Up)), ("down", bars.outline(Direction::Down))] {
             let d = delta_e(&frame.focus, colour);
             assert!(d >= MIN_FROM_CANDLE, "{name}: ring {} reads as an {what} candle {colour} ({d:.3})", frame.focus);
+        }
+    }
+}
+
+/// Link groups are told apart by colour and nothing else — the badge is a few
+/// pixels of tint with no label on it — so two groups the eye reads as one
+/// colour is the whole affordance gone. The derivation has to hold that for
+/// themes nobody has written yet, including the neutral first group, which is
+/// the one at risk: a theme whose muted text is a lavender grey hands it a hue
+/// close enough to be mistaken for a coloured group.
+#[test]
+fn every_link_group_is_a_different_colour_in_every_theme() {
+    for (name, theme) in fixtures() {
+        let colours: Vec<(LinkGroup, String)> = link::ALL
+            .iter()
+            .filter_map(|group| group.colour(&theme).map(|hex| (*group, hex)))
+            .collect();
+        assert_eq!(colours.len(), usize::from(link::GROUP_COUNT), "{name}: a group has no colour");
+
+        for (i, (a, a_hex)) in colours.iter().enumerate() {
+            for (b, b_hex) in &colours[i + 1..] {
+                let d = delta_e(a_hex, b_hex);
+                assert!(
+                    d > 0.06,
+                    "{name}: {} {a_hex} and {} {b_hex} read as one colour ({d:.3})",
+                    a.label(),
+                    b.label(),
+                );
+            }
         }
     }
 }
