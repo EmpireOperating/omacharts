@@ -372,7 +372,8 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 
 /* The watchlist's name, in the band the corner controls already reserved.
    Text with a chevron rather than a button: it names what you are looking at,
-   and only looks clickable once the pointer is on it. The zero min-height is
+   and brightens rather than lighting up a background under the pointer, so the
+   band stays a label and never grows a button in it. The zero min-height is
    what keeps it inside the band — Adwaita's default would overflow it. */
 .rail-switcher {
   padding: 1px 4px;
@@ -385,7 +386,7 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   box-shadow: none;
   transition: opacity 120ms ease-out;
 }
-.rail-switcher:hover { opacity: 1; background: alpha(currentColor, 0.08); }
+.rail-switcher:hover { opacity: 1; }
 .rail-switcher label { font-size: 0.85em; }
 
 /* A way back to a default, without shouting about it. */
