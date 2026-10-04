@@ -52,10 +52,16 @@ pub const BINDINGS: &[Binding] = &[
     global("chart.reset-view", &["<Alt>r"]),
     global("chart.split-h", &["<Ctrl>h"]),
     global("chart.maximize", &["<Ctrl>m"]),
+    global("win.new-chartbook", &["<Ctrl>t"]),
     // Paste and cut. The keys are the keys; what changes is whether
     // the keyboard is in something you can type into.
     careful("chart.split-v", &["<Ctrl>v"]),
     careful("chart.close", &["<Ctrl>x"]),
+    // Ctrl+W closed the window long before there were chartbooks to
+    // close, and still does when there is only one. Owning it outright
+    // would take it away from whatever has the keyboard, so it stays
+    // here only to be written down.
+    careful("win.close-chartbook", &["<Ctrl>w"]),
     // A bare key, which an entry has to see first.
     careful("win.shortcuts", &["question"]),
 ];

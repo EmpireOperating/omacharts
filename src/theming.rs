@@ -370,6 +370,24 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    pixels of padding either side of a 24px button. */
 .rail-header { margin-top: 30px; }
 
+/* The watchlist's name, in the band the corner controls already reserved.
+   Text with a chevron rather than a button: it names what you are looking at,
+   and only looks clickable once the pointer is on it. The zero min-height is
+   what keeps it inside the band — Adwaita's default would overflow it. */
+.rail-switcher {
+  padding: 1px 4px;
+  min-height: 0;
+  min-width: 0;
+  opacity: 0.6;
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  transition: opacity 120ms ease-out;
+}
+.rail-switcher:hover { opacity: 1; background: alpha(currentColor, 0.08); }
+.rail-switcher label { font-size: 0.85em; }
+
 /* A way back to a default, without shouting about it. */
 .subtle-link {
   font-size: 0.85em;
@@ -388,6 +406,37 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   border-radius: 6px;
   background: alpha(@card_fg_color, 0.08);
   border: 1px solid alpha(@card_fg_color, 0.10);
+}
+
+/* The chartbook strip, along the bottom, and only once there is a second
+   book to switch to. A status line rather than a tab bar: the window manager
+   puts its workspaces on a thin band at an edge and so does this, which is
+   the idiom an Omarchy user reads without thinking. The bottom rather than
+   the top because the top was given back to the charts when the header bar
+   went, and because the time axis is already down here — the eye is not
+   pulled off the prices to find it. One hairline above it, and nothing else:
+   at this height a border on every side is a box, and a box is furniture. */
+.chartbook-strip {
+  padding: 1px 4px;
+  border-top: 1px solid alpha(currentColor, 0.08);
+}
+.chartbook-tab {
+  padding: 2px 10px;
+  margin: 1px;
+  border-radius: 5px;
+  font-size: 0.82em;
+  opacity: 0.45;
+  transition: opacity 120ms ease-out, background-color 120ms ease-out;
+}
+.chartbook-tab:hover { opacity: 0.8; background: alpha(currentColor, 0.06); }
+/* The one you are in is the only one at full strength, which is the whole
+   job of the strip — the rest are there to say they exist. */
+.chartbook-tab.active { opacity: 1; background: alpha(currentColor, 0.10); }
+.chartbook-rename {
+  font-size: 0.82em;
+  min-height: 0;
+  padding: 0 4px;
+  margin: 0;
 }
 
 .legend-row { padding: 0 0 1px 1px; }

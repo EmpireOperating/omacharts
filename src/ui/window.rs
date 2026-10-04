@@ -147,6 +147,98 @@ mod tests {
         );
         assert!(open && focused, "back where we started");
     }
+
+    /// What the setting held before there were chartbooks: one arrangement,
+    /// with no name and nothing around it.
+    const ONE_ARRANGEMENT: &str = r#"{
+        "layout": {"split": {"horizontal": true, "ratio": 0.4,
+                             "first": {"leaf": 1}, "second": {"leaf": 2}}},
+        "focused": 2,
+        "panes": [
+            {"id": 1, "symbol": "SPY", "suffix": null, "timeframe": "1D",
+             "indicators": [], "bar_style": "candle", "session": "extended",
+             "show_grid": true, "linked": true},
+            {"id": 2, "symbol": "QQQ", "suffix": null, "timeframe": "5m",
+             "indicators": [], "bar_style": "candle", "session": "extended",
+             "show_grid": true, "linked": false}
+        ]
+    }"#;
+
+    /// Anybody upgrading has one of these in their database. Reading it as
+    /// the single book it describes is the difference between keeping the
+    /// layout they left and being handed an empty window.
+    #[test]
+    fn a_workspace_written_before_chartbooks_comes_back_as_one() {
+        let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
+        assert_eq!(workspace.books.len(), 1);
+        assert_eq!(workspace.active, 0);
+
+        let book = &workspace.books[0];
+        assert_eq!(book.focused, 2, "which chart had the keyboard survives");
+        assert_eq!(book.panes.len(), 2);
+        assert_eq!(book.name, "", "nothing named it, so it is still unnamed");
+        assert_eq!(book.watchlist, None);
+        // The shape, dividers and all: a layout that comes back centred is
+        // not the layout anybody left.
+        assert_eq!(book.layout.leaves(), vec![1, 2]);
+        assert!(matches!(book.layout, Node::Split { ratio, .. } if (ratio - 0.4).abs() < 1e-9));
+    }
+
+    #[test]
+    fn several_books_round_trip_through_the_setting() {
+        let one = parse_workspace(ONE_ARRANGEMENT).unwrap().books.remove(0);
+        let two = Chartbook {
+            name: "Energy".to_string(),
+            layout: Node::leaf(7),
+            focused: 7,
+            panes: vec![StoredPane {
+                id: 7,
+                symbol: "CL".to_string(),
+                suffix: None,
+                timeframe: "1h".to_string(),
+                indicators: Vec::new(),
+                bar_style: "candle".to_string(),
+                session: "extended".to_string(),
+                show_grid: true,
+                linked: false,
+            }],
+            watchlist: Some("commodities".to_string()),
+        };
+        let json =
+            serde_json::to_string(&Workspace { books: vec![one, two], active: 1 }).unwrap();
+
+        let back = parse_workspace(&json).expect("the new shape should parse");
+        assert_eq!(back.active, 1);
+        assert_eq!(back.books.len(), 2);
+        assert_eq!(back.books[0].panes.len(), 2, "the first book kept its split");
+        assert_eq!(back.books[1].name, "Energy");
+        assert_eq!(back.books[1].layout.leaves(), vec![7]);
+        // Stored now so that a book saved before there are several watchlists
+        // still remembers the choice once there is one to make.
+        assert_eq!(back.books[1].watchlist.as_deref(), Some("commodities"));
+    }
+
+    /// The two shapes have to be told apart by what is in them, because both
+    /// arrive as the same string from the same setting.
+    #[test]
+    fn neither_stored_shape_can_be_read_as_the_other() {
+        let new = serde_json::to_string(&Workspace {
+            books: vec![parse_workspace(ONE_ARRANGEMENT).unwrap().books.remove(0)],
+            active: 0,
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<Chartbook>(&new).is_err(), "no layout at the top");
+        assert!(serde_json::from_str::<Workspace>(ONE_ARRANGEMENT).is_err(), "no books");
+    }
+
+    /// A window with nothing written down, and one with something unreadable,
+    /// both have to end up with a chart rather than with half of one.
+    #[test]
+    fn nonsense_in_the_setting_restores_nothing() {
+        assert!(parse_workspace("").is_none());
+        assert!(parse_workspace("{}").is_none());
+        assert!(parse_workspace(r#"{"books": [], "active": 0}"#).is_none());
+    }
 }
 
 /// Pop a real menu up where the pointer is.
@@ -215,7 +307,7 @@ pub const SETTING_SYNC_CROSSHAIR: &str = "sync_crosshair";
 /// Stored together with the layout rather than as separate settings, because
 /// they only mean anything together: a tree of pane ids and a list of panes
 /// that disagree is a window that cannot be rebuilt.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct StoredPane {
     id: u32,
     symbol: String,
@@ -243,11 +335,62 @@ fn rename_leaf(node: &Node, from: u32, to: u32) -> Node {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Workspace {
+/// One arrangement of charts, saved under a name.
+///
+/// A chartbook is the unit you switch between: a tree, the charts in it, and
+/// which of them had the keyboard. Everything about a chart that is worth
+/// keeping is already in `StoredPane`, so a book is that list plus the shape
+/// they were in.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Chartbook {
+    #[serde(default)]
+    name: String,
     layout: Node,
     focused: u32,
     panes: Vec<StoredPane>,
+    /// Which watchlist this book shows. Wired up separately — multiple
+    /// watchlists are being built elsewhere, and this is here so that a book
+    /// saved now still remembers the choice once there is one to make.
+    #[serde(default)]
+    watchlist: Option<String>,
+}
+
+/// Everything the window had open, as one stored value.
+///
+/// `Workspace` used to be a single arrangement, which is what `Chartbook` is
+/// now. A window holds several and shows one.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Workspace {
+    books: Vec<Chartbook>,
+    active: usize,
+}
+
+/// What a chartbook nobody has renamed is called.
+///
+/// By where it sits rather than when it was made, so the names in the strip
+/// always read 1, 2, 3 and the arrow keys walk them in the order they are
+/// written. A book keeps an empty name until somebody types one.
+fn default_book_name(ordinal: usize) -> String {
+    format!("Chartbook {ordinal}")
+}
+
+/// Read what was written down, in whichever shape it was written.
+///
+/// The setting held a single arrangement before there were chartbooks to hold
+/// several, and anybody upgrading has one of those in their database. Reading
+/// it as the one book it describes is the difference between keeping the
+/// layout they left and being handed an empty window.
+///
+/// The two shapes cannot be confused for each other: the old one has no
+/// `books`, and the new one has no `layout`.
+fn parse_workspace(json: &str) -> Option<Workspace> {
+    serde_json::from_str::<Workspace>(json)
+        .ok()
+        .filter(|workspace| !workspace.books.is_empty())
+        .or_else(|| {
+            let book = serde_json::from_str::<Chartbook>(json).ok()?;
+            Some(Workspace { books: vec![book], active: 0 })
+        })
 }
 
 /// How wide the window's corner controls are, for the one time a chart's own
@@ -271,6 +414,15 @@ pub struct Window {
     /// written down — a window that came back maximized would look like a
     /// window that had lost its other charts.
     maximized: Cell<Option<u32>>,
+    /// Every chartbook, as it is written down, including the one on screen.
+    ///
+    /// Only one book is ever built into widgets: `panes` and `layout` above
+    /// are the live form of whichever is active, and the rest sit here as
+    /// data. Switching writes the live one back into this list and builds the
+    /// next, which is the same work `restore_workspace` does on launch and so
+    /// has only one way to be wrong.
+    books: RefCell<Vec<Chartbook>>,
+    active: Cell<usize>,
     next_pane: Cell<u32>,
     /// A save is already queued, so a drag does not queue one per pixel.
     save_pending: Cell<bool>,
@@ -282,6 +434,9 @@ pub struct Window {
     auto_scale_action: RefCell<Option<gio::SimpleAction>>,
     /// Where the tree of charts is mounted, rebuilt whenever it changes.
     chart_host: gtk::Box,
+    /// The row of chartbook tabs under the charts, empty and hidden until
+    /// there is a second book to switch to.
+    book_strip: gtk::Box,
     /// The window's own controls, floating over the top-right corner. Held on
     /// to because a chart's maximize button is in that corner too, and has to
     /// step aside when the rail is closed and the two would be in one place.
@@ -333,12 +488,23 @@ impl Window {
         chart_host.set_hexpand(true);
         chart_host.set_vexpand(true);
 
+        // Beside the charts rather than inside `chart_host`, which is emptied
+        // and refilled every time the tree changes.
+        let book_strip = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        book_strip.add_css_class("chartbook-strip");
+        book_strip.set_visible(false);
+        let chart_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        chart_area.append(&chart_host);
+        chart_area.append(&book_strip);
+
         let this = Rc::new(Window {
             window: window.clone(),
             panes: RefCell::new(Vec::new()),
             layout: RefCell::new(Node::leaf(1)),
             focused: Cell::new(1),
             maximized: Cell::new(None),
+            books: RefCell::new(Vec::new()),
+            active: Cell::new(0),
             next_pane: Cell::new(1),
             save_pending: Cell::new(false),
             linked_action: RefCell::new(None),
@@ -346,6 +512,7 @@ impl Window {
             session_action: RefCell::new(None),
             auto_scale_action: RefCell::new(None),
             chart_host: chart_host.clone(),
+            book_strip: book_strip.clone(),
             corner: RefCell::new(None),
             store: store.clone(),
             index: index.clone(),
@@ -373,7 +540,7 @@ impl Window {
         split.set_shrink_end_child(false);
         watchlist.widget.set_visible(store.setting_bool(SHOW_WATCHLIST, true));
 
-        split.set_start_child(Some(&chart_host));
+        split.set_start_child(Some(&chart_area));
 
         // No header bar: the window's controls float over its top-right
         // corner, and the chart gets the row the bar used to take.
@@ -426,6 +593,14 @@ impl Window {
         if !this.restore_workspace() {
             this.restore_last_symbol();
         }
+        // A window that restored nothing still has a chartbook: the one it
+        // just built. Everything below here can assume there is always one.
+        if this.books.borrow().is_empty() {
+            let book = this.capture_book(String::new(), None);
+            this.books.borrow_mut().push(book);
+            this.active.set(0);
+        }
+        this.rebuild_book_strip();
         // Either way. The legend was only built on the path that did not
         // restore anything, so a window that came back with its charts came
         // back without the names of what was drawn on them.
@@ -971,8 +1146,11 @@ impl Window {
         });
     }
 
-    /// Write the arrangement down, so a window comes back as it was left.
-    fn save_workspace(self: &Rc<Self>) {
+    /// The charts on screen, written down as a chartbook.
+    ///
+    /// The name and the watchlist are not live state — nothing on screen
+    /// carries them — so they are handed in by whoever already knows them.
+    fn capture_book(&self, name: String, watchlist: Option<String>) -> Chartbook {
         let panes: Vec<StoredPane> = self
             .panes
             .borrow()
@@ -992,35 +1170,78 @@ impl Window {
                 }
             })
             .collect();
-        let workspace = Workspace {
+        Chartbook {
+            name,
             layout: self.layout.borrow().clone(),
             focused: self.focused.get(),
             panes,
-        };
+            watchlist,
+        }
+    }
+
+    /// Write every chartbook down, so a window comes back as it was left.
+    ///
+    /// The book on screen is the only one that can have changed, so it is
+    /// folded back into the list first. Everything else is already data.
+    fn save_workspace(self: &Rc<Self>) {
+        {
+            let mut books = self.books.borrow_mut();
+            let active = self.active.get().min(books.len().saturating_sub(1));
+            let (name, watchlist) = books
+                .get(active)
+                .map(|book| (book.name.clone(), book.watchlist.clone()))
+                .unwrap_or_default();
+            let live = self.capture_book(name, watchlist);
+            match books.get_mut(active) {
+                Some(book) => *book = live,
+                None => books.push(live),
+            }
+            self.active.set(active);
+        }
+        let workspace =
+            Workspace { books: self.books.borrow().clone(), active: self.active.get() };
         if let Ok(json) = serde_json::to_string(&workspace) {
             self.store.set_setting(SETTING_WORKSPACE, &json);
         }
     }
 
-    /// Put the charts back. `false` when there was nothing written down, or
-    /// when what was written cannot be rebuilt — a layout naming panes that
-    /// are not there is worse than starting over with one chart.
+    /// Put the chartbooks back. `false` when there was nothing written down,
+    /// or when what was written cannot be rebuilt.
     fn restore_workspace(self: &Rc<Self>) -> bool {
         let Some(json) = self.store.setting(SETTING_WORKSPACE) else { return false };
-        let Ok(workspace) = serde_json::from_str::<Workspace>(&json) else { return false };
-        if workspace.panes.is_empty() {
+        let Some(workspace) = parse_workspace(&json) else { return false };
+        let active = workspace.active.min(workspace.books.len() - 1);
+        *self.books.borrow_mut() = workspace.books;
+        self.active.set(active);
+        if !self.materialise_book(active) {
+            // Nothing partial: a window that could not rebuild what it was
+            // given starts over with one chart rather than some of one.
+            self.books.borrow_mut().clear();
             return false;
         }
-        let wanted = workspace.layout.leaves();
-        if wanted.is_empty() || wanted.iter().any(|id| !workspace.panes.iter().any(|p| p.id == *id))
-        {
+        true
+    }
+
+    /// Build a chartbook into widgets, replacing whatever is on screen.
+    ///
+    /// `false` when it cannot be rebuilt — a layout naming panes that are not
+    /// there is worse than starting over with one chart.
+    fn materialise_book(self: &Rc<Self>, index: usize) -> bool {
+        let Some(book) = self.books.borrow().get(index).cloned() else { return false };
+        if book.panes.is_empty() {
+            return false;
+        }
+        let wanted = book.layout.leaves();
+        if wanted.is_empty() || wanted.iter().any(|id| !book.panes.iter().any(|p| p.id == *id)) {
             return false;
         }
 
         self.panes.borrow_mut().clear();
-        self.next_pane.set(1);
+        // Filling the window is a way of looking at one arrangement, so it
+        // does not survive being shown a different one.
+        self.maximized.set(None);
         let mut restored: Vec<(Rc<ChartPane>, StoredPane)> = Vec::new();
-        for stored in workspace.panes {
+        for stored in book.panes {
             if !wanted.contains(&stored.id) {
                 continue;
             }
@@ -1037,11 +1258,13 @@ impl Window {
 
         // Ids are handed out afresh in layout order, so the tree is rewritten
         // to match rather than trusting ids from another run to still be free.
-        let mut layout = workspace.layout.clone();
+        // The counter is never wound back, because the books that are not on
+        // screen still name panes by the ids they were built with.
+        let mut layout = book.layout.clone();
         let mut focused = restored.first().map(|(pane, _)| pane.id).unwrap_or(1);
         for (pane, stored) in &restored {
             layout = rename_leaf(&layout, stored.id, pane.id);
-            if stored.id == workspace.focused {
+            if stored.id == book.focused {
                 focused = pane.id;
             }
         }
@@ -1055,7 +1278,275 @@ impl Window {
             }
         }
         self.sync_header();
+        self.rebuild_indicator_legend();
         true
+    }
+
+    // -- chartbooks --------------------------------------------------------
+
+    /// What a book is called in the strip. Unnamed books are called by where
+    /// they sit, so the row always reads in order.
+    fn book_label(&self, index: usize) -> String {
+        match self.books.borrow().get(index) {
+            Some(book) if !book.name.is_empty() => book.name.clone(),
+            _ => default_book_name(index + 1),
+        }
+    }
+
+    /// Throw away the charts on screen and start again with one.
+    ///
+    /// For a brand new chartbook, and for the one case a stored book cannot
+    /// be rebuilt: either way the window has to end up with a chart in it.
+    fn mount_single_chart(self: &Rc<Self>, instrument: Option<Instrument>) {
+        // Built like the chart you were looking at, and like the first chart
+        // of a fresh install when there was not one — the window can reach
+        // here with nothing on screen to copy.
+        let from = self.panes.borrow().iter().find(|p| p.id == self.focused.get()).cloned();
+        let store = &self.store;
+        let timeframe = from.as_ref().map(|p| p.timeframe.get()).unwrap_or_else(|| {
+            store
+                .setting(LAST_TIMEFRAME)
+                .and_then(|key| Timeframe::parse(&key))
+                .unwrap_or(Timeframe::days(1))
+        });
+        let bar_style = from.as_ref().map(|p| p.bar_style.get()).unwrap_or_else(|| {
+            store
+                .setting(SETTING_BAR_STYLE)
+                .and_then(|key| BarStyle::from_key(&key))
+                .unwrap_or_default()
+        });
+        let session = from.as_ref().map(|p| p.session.get()).unwrap_or_else(|| {
+            store
+                .setting(crate::ui::chart_settings::SETTING_SESSION)
+                .and_then(|key| Session::from_key(&key))
+                .unwrap_or_default()
+        });
+        let show_grid = from
+            .as_ref()
+            .map(|p| p.show_grid.get())
+            .unwrap_or_else(|| store.setting_bool(SETTING_SHOW_GRID, true));
+        self.panes.borrow_mut().clear();
+        self.maximized.set(None);
+        // A new book opens on the indicators you have chosen as your default,
+        // not on whatever the last chart happened to be carrying: a fresh
+        // arrangement is a fresh start, which is the reason to open one.
+        let pane =
+            self.new_pane(timeframe, self.store.indicators(), bar_style, session, show_grid, true);
+        *self.layout.borrow_mut() = Node::leaf(pane.id);
+        self.focused.set(pane.id);
+        self.rebuild_layout();
+        if let Some(instrument) = instrument {
+            self.show_in(&pane, instrument);
+        }
+        self.sync_header();
+        self.rebuild_indicator_legend();
+    }
+
+    /// Open a new chartbook, showing one chart on whatever you were looking
+    /// at.
+    ///
+    /// One chart rather than a copy of the arrangement you were in: splitting
+    /// is the thing that duplicates a chart in this app, and a new book you
+    /// have to dismantle before you can use it is not a new book.
+    pub fn new_chartbook(self: &Rc<Self>) {
+        self.save_workspace();
+        let instrument = self.focused_pane().instrument.borrow().clone();
+        let at = self.books.borrow().len();
+        // A placeholder, so that `active` names a book that exists before
+        // anything else looks. Saving at the end writes the real one.
+        self.books.borrow_mut().push(Chartbook {
+            name: String::new(),
+            layout: Node::leaf(0),
+            focused: 0,
+            panes: Vec::new(),
+            watchlist: None,
+        });
+        self.active.set(at);
+        self.mount_single_chart(instrument);
+        self.rebuild_book_strip();
+        self.save_workspace();
+    }
+
+    /// Close the chartbook on screen.
+    ///
+    /// The last one does not close, it quits — Ctrl+W shut the window long
+    /// before there were books to shut, and that is what every tabbed
+    /// application does with the last tab.
+    pub fn close_chartbook(self: &Rc<Self>) {
+        if self.books.borrow().len() < 2 {
+            self.window.close();
+            return;
+        }
+        let index = self.active.get();
+        self.books.borrow_mut().remove(index);
+        // The one that slid into its place, or the new last one.
+        let next = index.min(self.books.borrow().len() - 1);
+        self.active.set(next);
+        if !self.materialise_book(next) {
+            self.mount_single_chart(None);
+        }
+        self.rebuild_book_strip();
+        self.save_workspace();
+    }
+
+    /// Show a different chartbook, writing the one on screen back first.
+    pub fn activate_book(self: &Rc<Self>, index: usize) {
+        if index >= self.books.borrow().len() || index == self.active.get() {
+            return;
+        }
+        self.save_workspace();
+        self.active.set(index);
+        if !self.materialise_book(index) {
+            self.mount_single_chart(None);
+        }
+        self.rebuild_book_strip();
+        self.save_workspace();
+    }
+
+    /// Walk to the chartbook before or after this one, round the ends.
+    pub fn step_chartbook(self: &Rc<Self>, delta: i32) {
+        let count = self.books.borrow().len();
+        if count < 2 {
+            return;
+        }
+        let next = (self.active.get() as i32 + delta).rem_euclid(count as i32) as usize;
+        self.activate_book(next);
+    }
+
+    /// Give a chartbook a name of its own, or take it back to its number.
+    fn rename_book(self: &Rc<Self>, index: usize, name: &str) {
+        let name = name.trim();
+        {
+            let mut books = self.books.borrow_mut();
+            let Some(book) = books.get_mut(index) else { return };
+            // Typing the name it already shows is not naming it, so an
+            // emptied box hands it back to its position rather than leaving
+            // a book with a name that stops matching where it sits.
+            book.name = if name.is_empty() || name == default_book_name(index + 1) {
+                String::new()
+            } else {
+                name.to_string()
+            };
+        }
+        self.rebuild_book_strip();
+        self.save_workspace();
+    }
+
+    /// Draw the row of chartbook tabs, or no row at all.
+    fn rebuild_book_strip(self: &Rc<Self>) {
+        while let Some(child) = self.book_strip.first_child() {
+            self.book_strip.remove(&child);
+        }
+        let count = self.books.borrow().len();
+        // One chartbook is how the window has always looked, and a strip
+        // naming the only thing there is would be a row of furniture saying
+        // nothing. It arrives with the second book and leaves with it.
+        self.book_strip.set_visible(count > 1);
+        if count < 2 {
+            return;
+        }
+        for index in 0..count {
+            self.book_strip.append(&self.build_book_tab(index));
+        }
+    }
+
+    /// One tab: click to switch, double-click to rename.
+    fn build_book_tab(self: &Rc<Self>, index: usize) -> gtk::Widget {
+        let tab = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        tab.add_css_class("chartbook-tab");
+        if index == self.active.get() {
+            tab.add_css_class("active");
+        }
+        let label = gtk::Label::new(Some(&self.book_label(index)));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        label.set_max_width_chars(18);
+        tab.append(&label);
+
+        let click = gtk::GestureClick::new();
+        let this = self.clone();
+        click.connect_pressed(move |_, presses, _, _| {
+            // The single press that precedes a double is harmless: it
+            // switches to the book you are about to rename, which is where
+            // you wanted to be anyway.
+            if presses >= 2 {
+                this.begin_rename(index);
+            } else {
+                this.activate_book(index);
+            }
+        });
+        tab.add_controller(click);
+        tab.upcast()
+    }
+
+    /// The tab sitting at `index` in the strip right now.
+    fn book_tab(&self, index: usize) -> Option<gtk::Box> {
+        let mut child = self.book_strip.first_child()?;
+        for _ in 0..index {
+            child = child.next_sibling()?;
+        }
+        child.downcast::<gtk::Box>().ok()
+    }
+
+    /// Swap a tab's name for a box to type a new one in.
+    ///
+    /// Found in the strip rather than handed in, because the press that opens
+    /// a rename has already switched books, and switching redraws the strip —
+    /// the tab the gesture was attached to is not the tab on screen.
+    fn begin_rename(self: &Rc<Self>, index: usize) {
+        let Some(tab) = self.book_tab(index) else { return };
+        let Some(label) = tab.first_child().and_downcast::<gtk::Label>() else { return };
+        let entry = gtk::Entry::new();
+        entry.add_css_class("chartbook-rename");
+        entry.set_text(&self.book_label(index));
+        entry.set_width_chars(12);
+        entry.set_max_width_chars(18);
+        tab.remove(&label);
+        tab.append(&entry);
+        entry.grab_focus();
+        entry.select_region(0, -1);
+
+        // Enter commits, and so does clicking away — but only one of them
+        // does, because committing twice would rebuild the strip underneath
+        // the box that is still handing in its text.
+        let done = Rc::new(Cell::new(false));
+        let commit = {
+            let this = self.clone();
+            let done = done.clone();
+            move |entry: &gtk::Entry| {
+                if done.replace(true) {
+                    return;
+                }
+                this.rename_book(index, &entry.text());
+            }
+        };
+
+        let on_activate = commit.clone();
+        entry.connect_activate(move |entry| on_activate(entry));
+
+        let focus = gtk::EventControllerFocus::new();
+        let entry_weak = entry.downgrade();
+        let on_leave = commit.clone();
+        focus.connect_leave(move |_| {
+            if let Some(entry) = entry_weak.upgrade() {
+                on_leave(&entry);
+            }
+        });
+        entry.add_controller(focus);
+
+        // Escape puts the name back, which means leaving the book alone and
+        // drawing the strip again.
+        let keys = gtk::EventControllerKey::new();
+        let this = self.clone();
+        let done_on_escape = done.clone();
+        keys.connect_key_pressed(move |_, key, _, _| {
+            if key != gtk::gdk::Key::Escape {
+                return glib::Propagation::Proceed;
+            }
+            done_on_escape.set(true);
+            this.rebuild_book_strip();
+            glib::Propagation::Stop
+        });
+        entry.add_controller(keys);
     }
 
     /// Draw `ts` on every chart linked with `from`, and on none when it is
@@ -1106,6 +1597,9 @@ impl Window {
     /// everything a header bar's blank space did.
     fn build_corner(self: &Rc<Self>, split: &gtk::Paned) -> gtk::WindowHandle {
         let menu = gio::Menu::new();
+        let books = gio::Menu::new();
+        shortcuts::append(&books, "New chartbook", "win.new-chartbook");
+        menu.append_section(None, &books);
         shortcuts::append(&menu, "Preferences", "win.preferences");
         shortcuts::append(&menu, "Keyboard Shortcuts", "win.shortcuts");
         let menu_button = gtk::MenuButton::new();
@@ -1363,6 +1857,16 @@ impl Window {
         find.connect_activate(move |_, _| this.open_search());
         self.window.add_action(&find);
 
+        let new_book = gio::SimpleAction::new("new-chartbook", None);
+        let this = self.clone();
+        new_book.connect_activate(move |_, _| this.new_chartbook());
+        self.window.add_action(&new_book);
+
+        let close_book = gio::SimpleAction::new("close-chartbook", None);
+        let this = self.clone();
+        close_book.connect_activate(move |_, _| this.close_chartbook());
+        self.window.add_action(&close_book);
+
         let keys = gtk::EventControllerKey::new();
         let this = self.clone();
         keys.connect_key_pressed(move |_, key, _, state| {
@@ -1420,9 +1924,15 @@ impl Window {
                     this.show_shortcuts();
                     return glib::Propagation::Stop;
                 }
-                // Close and quit are the same thing while there is one
-                // window, but both keys exist because people reach for both.
-                Key::w | Key::q if ctrl => {
+                // Ctrl+W closes the chartbook, and closes the window when
+                // that was the only one — which is what it has always done,
+                // and what every tabbed application does with the last tab.
+                // Ctrl+Q skips the question and quits.
+                Key::w if ctrl => {
+                    this.close_chartbook();
+                    return glib::Propagation::Stop;
+                }
+                Key::q if ctrl => {
                     this.window.close();
                     return glib::Propagation::Stop;
                 }
@@ -1438,6 +1948,17 @@ impl Window {
                 }
                 Key::Right if ctrl && alt && shift => {
                     this.step_timeframe(1);
+                    return glib::Propagation::Stop;
+                }
+                // And sideways without Shift walks the chartbooks, which is
+                // the larger of the two things sideways could mean: past the
+                // edge of this arrangement and into the next.
+                Key::Left if ctrl && alt => {
+                    this.step_chartbook(-1);
+                    return glib::Propagation::Stop;
+                }
+                Key::Right if ctrl && alt => {
+                    this.step_chartbook(1);
                     return glib::Propagation::Stop;
                 }
                 Key::Up if ctrl && alt => {
@@ -1755,7 +2276,7 @@ impl Window {
     fn show_shortcuts(self: &Rc<Self>) {
         let page = adw::PreferencesPage::new();
 
-        let sections: [(&str, &[(&str, &str)]); 4] = [
+        let sections: [(&str, &[(&str, &str)]); 5] = [
             (
                 "Finding things",
                 &[
@@ -1768,7 +2289,16 @@ impl Window {
                     ("Ctrl+,", "Preferences"),
                     ("F10", "Main menu"),
                     ("? · Ctrl+?", "This list"),
-                    ("Ctrl+W · Ctrl+Q", "Close"),
+                    ("Ctrl+Q", "Quit"),
+                ],
+            ),
+            (
+                "Chartbooks",
+                &[
+                    ("Ctrl+T", "New chartbook"),
+                    ("Ctrl+W", "Close this chartbook, or the window"),
+                    ("Ctrl+Alt+← →", "Previous or next chartbook"),
+                    ("Double-click a tab", "Rename it"),
                 ],
             ),
             (
