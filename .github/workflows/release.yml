@@ -59,6 +59,10 @@ jobs:
           sed -i -E "s|omacharts-[0-9]+\.[0-9]+\.[0-9]+-1-x86_64\.pkg\.tar\.zst|omacharts-${version}-1-x86_64.pkg.tar.zst|g" README.md
           sed -i -E "s|^pkgver=.*|pkgver=${version}|" packaging/aur/PKGBUILD
           sed -i -E "s|^sha256sums=.*|sha256sums=('${digest}')|" packaging/aur/PKGBUILD
+          # And the crate itself, or `omacharts --version` keeps answering with
+          # whatever it was built at when the version last moved by hand.
+          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s||version = \"${version}\"|" Cargo.toml
+          cargo update --workspace --offline 2>/dev/null || cargo update -p omacharts --offline 2>/dev/null || true
 
           git diff --stat
       - name: Commit it back
