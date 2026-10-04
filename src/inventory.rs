@@ -16,6 +16,7 @@
 //! is how the inventory can be refreshed without a new binary.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -70,14 +71,46 @@ impl Inventory {
 
 /// The generated listings and the curated rows, as one list.
 ///
-/// A curated row wins any collision: it is the one carrying a tier, a session
-/// origin and a provider override, where the generated row for that symbol
-/// knows only its name. AAPL is in both files and must come out tier 0.
-pub fn merge(listings: &str, curated: Vec<Instrument>) -> Vec<Instrument> {
+/// A curated row wins any collision, because it is the one carrying a tier, a
+/// session origin and a provider override — judgements no feed can make. AAPL
+/// is in both files and must come out tier 0.
+///
+/// But winning is not the same as arriving alone. The feed knows two things
+/// about AAPL that the hand-written row does not: which venue lists it, and
+/// that it is the most searched ticker there is. So a curated row inherits
+/// whatever it left blank from the listing it displaces, and keeps everything
+/// it filled in. Without this the two hundred symbols people actually type
+/// would be the only ones with no venue and no ranking — the exact inverse of
+/// what either column is for.
+///
+/// Only from a listing of its own kind, though. `ES` is the E-mini and also
+/// Eversource Energy; `MGC` is micro gold and also a Vanguard fund. Sharing
+/// four letters with a stock is not a reason to claim its exchange, and the
+/// futures root would have gone out labelled NYSE.
+pub fn merge(listings: &str, mut curated: Vec<Instrument>) -> Vec<Instrument> {
     let mut items = omacharts_engine::symbols::parse_seed(listings);
-    items.retain(|listed| {
-        !curated.iter().any(|c| c.symbol == listed.symbol && c.suffix == listed.suffix)
-    });
+
+    let listed: HashMap<(&str, Option<&str>), &Instrument> =
+        items.iter().map(|i| ((i.symbol.as_str(), i.suffix.as_deref()), i)).collect();
+    for row in &mut curated {
+        let inherited = listed
+            .get(&(row.symbol.as_str(), row.suffix.as_deref()))
+            .filter(|l| l.kind == row.kind)
+            .map(|l| (l.exchange.clone(), l.popularity));
+        let Some((exchange, popularity)) = inherited else {
+            continue;
+        };
+        if row.exchange.is_none() {
+            row.exchange = exchange;
+        }
+        if row.popularity == 0 {
+            row.popularity = popularity;
+        }
+    }
+
+    let won: HashSet<(&str, Option<&str>)> =
+        curated.iter().map(|c| (c.symbol.as_str(), c.suffix.as_deref())).collect();
+    items.retain(|l| !won.contains(&(l.symbol.as_str(), l.suffix.as_deref())));
     items.extend(curated);
     items
 }
@@ -130,6 +163,34 @@ mod tests {
                 one.symbol
             );
         }
+    }
+
+    /// The curated half is written by hand and carries no venue and no
+    /// ranking, so without inheritance the two hundred symbols people actually
+    /// type would be the only ones missing both — AAPL showing no exchange
+    /// while every AAPL-derived ETF showed NASDAQ, and the most searched
+    /// ticker there is scoring below a microcap.
+    #[test]
+    fn a_curated_row_inherits_what_it_left_blank() {
+        let merged = merge(LISTINGS, omacharts_engine::symbols::seed());
+        let aapl = merged.iter().find(|i| i.symbol == "AAPL").expect("no AAPL");
+
+        assert_eq!(aapl.tier, 0, "the curated tier is the whole point and must survive");
+        assert_eq!(aapl.name, "Apple", "as is the curated name");
+        assert_eq!(aapl.exchange.as_deref(), Some("NASDAQ"), "venue comes from the listing");
+        assert_eq!(aapl.popularity, 9, "and so does the ranking");
+    }
+
+    /// `ES` is the E-mini S&P and also Eversource Energy. One ticker, two
+    /// unrelated things, and the curated row must not come out wearing the
+    /// stock's exchange.
+    #[test]
+    fn a_curated_row_inherits_nothing_from_another_kind() {
+        let merged = merge(LISTINGS, omacharts_engine::symbols::seed());
+        let es = merged.iter().find(|i| i.symbol == "ES").expect("no ES");
+        assert_eq!(es.kind, omacharts_engine::InstrumentKind::FutureRoot);
+        assert_eq!(es.exchange, None, "a futures root does not list on NYSE");
+        assert_eq!(es.popularity, 0, "nor does it borrow a utility's market cap");
     }
 
     #[test]
