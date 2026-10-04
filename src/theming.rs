@@ -388,11 +388,39 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
    start is what a header bar would have offered to be grabbed by. */
 .window-corner {
   padding: 3px 6px 3px 12px;
+}
+/* The ground the cluster stands on, for the half of the time it needs one.
+   The chart draws its price axis right up into this corner — the last price is
+   a filled tag, and a gridline label lands here as often as not — and two
+   translucent things in the same pixels read as neither of them. Being on top
+   is something a control has to look like, not only something it is.
+
+   The chart's own colour rather than a panel colour: over an empty stretch of
+   chart there is nothing to see, and where it does cover something it reads as
+   the corner being cut out of the drawing rather than as a card laid on it.
+   Translucent was tried first and is worse — a tenth of a filled price tag is
+   a smudge under the icons, which is the same two-things-one-pixel problem in
+   a quieter voice. Rounded only where it meets the drawing; the other two
+   sides are the window's own edges.
+
+   Only while the corner is over a chart. Over the rail there is nothing
+   behind it to separate from: the rail's header has already stepped down out
+   from under it, and a patch of the chart's colour there would be a square of
+   the wrong grey. The window adds the class, because only it knows which. */
+.window-corner.over-chart {
+  background: @view_bg_color;
+  border-bottom-left-radius: 12px;
+}
+/* Quiet until the pointer is near: on the buttons rather than the box, which
+   is what leaves the ground at its own strength. */
+.window-corner button {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 3px;
   opacity: 0.75;
   transition: opacity 120ms ease-out;
 }
-.window-corner:hover { opacity: 1; }
-.window-corner button { min-width: 24px; min-height: 24px; padding: 3px; }
+.window-corner:hover button { opacity: 1; }
 
 /* The corner sits over the rail when the rail is open, which is where the
    HIG puts a sidebar's menu (above the sidebar list), so the rail's column
