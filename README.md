@@ -51,10 +51,6 @@ Yahoo Finance's public endpoint, no account or key needed, cached locally in
 SQLite. Prices are delayed about 15 minutes, which is invisible on the
 timeframes this is built for. Not affiliated with Yahoo.
 
-## Known limits
-
-Futures are continuous contracts only.
-
 ## Roadmap
 
 Rough order, and nothing here is a promise.
