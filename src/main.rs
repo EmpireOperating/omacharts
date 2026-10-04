@@ -6,36 +6,34 @@ use std::cell::RefCell;
 
 use adw::prelude::*;
 use gtk::gio;
+use gtk::gio::prelude::ApplicationCommandLineExt;
 use gtk::glib;
+use omacharts::cli;
 use omacharts::store::Store;
 use omacharts::ui::Window;
 
 const APP_ID: &str = "com.jorgemanrubia.Omacharts";
 
 fn main() -> glib::ExitCode {
-    // A handful of subcommands, matched by hand. Reaching for an argument
-    // parser to tell "watchlist" from nothing would be more dependency than
-    // decision.
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        None => {}
-        Some("watchlist") => {
-            let refresh = args.iter().any(|a| a == "--refresh");
-            println!("{}", omacharts::cli::watchlist_json(refresh));
-            return glib::ExitCode::SUCCESS;
-        }
-        Some("--help" | "-h" | "help") => {
-            println!("{}", omacharts::cli::USAGE);
-            return glib::ExitCode::SUCCESS;
-        }
-        // An unknown option is a mistake worth reporting. Anything else is a
-        // symbol, and goes to the app — this matcher exists to peel off the
-        // headless commands, not to vet arguments GTK will handle.
-        Some(other) if other.starts_with('-') => {
-            eprintln!("omacharts: unknown option {other:?}\n\n{}", omacharts::cli::USAGE);
-            return glib::ExitCode::FAILURE;
-        }
-        Some(_) => {}
+    let args: Vec<String> = std::env::args().collect();
+
+    // Where a command goes depends on one thing: whether there is a window to
+    // show its result in.
+    //
+    // With one open, the command is handed to it, so a watchlist created in a
+    // terminal appears in the rail at once rather than after a restart. GTK's
+    // single-instance hand-off carries the output and the exit status back to
+    // this process, so nothing is lost by running it somewhere else.
+    //
+    // With nothing open, the same command runs right here against the
+    // database — no GTK, no display, no window. That is what makes this
+    // usable over ssh and out of a cron line, and it is why the check below
+    // asks the bus rather than starting an application to find out.
+    if cli::is_command(&args) && !app_is_running() {
+        return report(cli::run(&args, &open_store(), None));
+    }
+    if let Some(code) = peel_off(&args).filter(|_| !cli::is_command(&args)) {
+        return code;
     }
 
     // GTK4 picks the Vulkan renderer by default, and bringing up a Vulkan
@@ -69,6 +67,12 @@ fn main() -> glib::ExitCode {
 
     let window: RefCell<Option<Rc<Window>>> = RefCell::new(None);
     app.connect_command_line(move |app, command_line| {
+        let args: Vec<String> = command_line
+            .arguments()
+            .into_iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
         if window.borrow().is_none() {
             let store = match Store::open() {
                 Ok(store) => store,
@@ -119,15 +123,38 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::FAILURE;
         };
 
-        let args: Vec<String> = command_line
-            .arguments()
-            .into_iter()
-            .skip(1)
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .filter(|arg| !arg.starts_with('-'))
-            .collect();
-        if let Some(symbol) = args.first() {
-            window.show_named(&symbol.to_uppercase(), args.get(1).map(String::as_str));
+        // The window, to a command that wants what is on screen rather than
+        // what was last written down. `None` until `Window` carries the three
+        // methods `cli::Live` asks for — until then a command still runs and
+        // still answers, but the rail is redrawn on the next thing that
+        // touches it rather than at once.
+        let live: Option<Box<dyn cli::Live>> = cli::live(&window);
+
+        // A command rather than a symbol. Run here, in the process holding the
+        // window, so the output goes back down the pipe the arguments came up
+        // and the result is on screen before the terminal gets its prompt.
+        //
+        // On its own connection: SQLite in WAL mode takes a second writer
+        // beside the window's own, and a command is rare enough that opening
+        // one costs nothing anybody can measure.
+        if cli::is_command(&args) {
+            let Ok(store) = Store::open() else {
+                return glib::ExitCode::FAILURE;
+            };
+            let outcome = cli::run(&args, &store, live.as_deref());
+            if !outcome.out.is_empty() {
+                command_line.print_literal(&outcome.out);
+            }
+            if !outcome.err.is_empty() {
+                command_line.printerr_literal(&outcome.err);
+            }
+            return glib::ExitCode::from(outcome.code);
+        }
+
+        let symbols: Vec<String> =
+            args.iter().skip(1).filter(|arg| !arg.starts_with('-')).cloned().collect();
+        if let Some(symbol) = symbols.first() {
+            window.show_named(&symbol.to_uppercase(), symbols.get(1).map(String::as_str));
         }
 
         window.window.present();
@@ -146,5 +173,71 @@ fn main() -> glib::ExitCode {
         glib::ExitCode::SUCCESS
     });
 
-    app.run()
+    app.run_with_args(&args)
+}
+
+/// Is a window already open?
+///
+/// Asked of the session bus rather than by starting an application and
+/// looking, because registering one would make *this* process the instance
+/// everything else hands its commands to — for the few milliseconds before it
+/// exits, which is long enough to swallow somebody's launch.
+///
+/// No bus at all is an answer too: over ssh there is no session to have a
+/// window in, so the command belongs here.
+fn app_is_running() -> bool {
+    let Ok(bus) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return false;
+    };
+    bus.call_sync(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+        "NameHasOwner",
+        Some(&(APP_ID,).into()),
+        Some(glib::VariantTy::new("(b)").expect("a known type")),
+        gio::DBusCallFlags::NONE,
+        200,
+        gio::Cancellable::NONE,
+    )
+    .ok()
+    .and_then(|reply| reply.child_value(0).get::<bool>())
+    .unwrap_or(false)
+}
+
+fn open_store() -> Store {
+    match Store::open() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("omacharts: {error}");
+            std::process::exit(cli::EXIT_ERROR as i32);
+        }
+    }
+}
+
+fn report(outcome: cli::Outcome) -> glib::ExitCode {
+    print!("{}", outcome.out);
+    eprint!("{}", outcome.err);
+    glib::ExitCode::from(outcome.code)
+}
+
+/// The arguments answered without a database, a bus or a window.
+fn peel_off(args: &[String]) -> Option<glib::ExitCode> {
+    match args.get(1).map(String::as_str) {
+        Some("--help" | "-h") => {
+            print!("{}", cli::usage());
+            Some(glib::ExitCode::SUCCESS)
+        }
+        Some("--version" | "-V") => {
+            println!("omacharts {}", env!("CARGO_PKG_VERSION"));
+            Some(glib::ExitCode::SUCCESS)
+        }
+        // An unknown option is a mistake worth reporting. Anything else is a
+        // symbol, and goes to the app.
+        Some(other) if other.starts_with('-') => {
+            eprintln!("omacharts: unknown option {other:?}\n\n{}", cli::usage());
+            Some(glib::ExitCode::FAILURE)
+        }
+        _ => None,
+    }
 }

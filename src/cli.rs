@@ -1,9 +1,23 @@
 //! The command line.
 //!
-//! One job: hand the watchlist to something that is not the app. The Omarchy
-//! bar widget shells out to this, which is what lets the bar keep working
-//! after the window is closed — the alternative is a widget that talks to a
-//! running app and goes blank the moment you quit it.
+//! Everything the window can do, this can do — that is the contract, and
+//! `AGENTS.md` states it as one. A feature that cannot be driven from a
+//! terminal is a feature somebody has to click, which rules out scripting it
+//! and rules out an agent doing it at all.
+//!
+//! Two things follow from that and shape the whole module.
+//!
+//! The first is that a command has to take effect in a window that is already
+//! open. GTK hands a second invocation's arguments to the instance already
+//! running, so that instance is the one that executes it — the terminal gets
+//! the output and the exit status back across the same hand-off. Nothing
+//! polls and nothing watches a file: the app is told, and it refreshes the
+//! part that changed.
+//!
+//! The second is that output is built rather than printed. The same code runs
+//! in a process with a real stdout and in a window answering for somebody
+//! else's terminal, so an [`Outcome`] is returned and whoever called decides
+//! where it goes.
 
 use std::rc::Rc;
 
@@ -11,6 +25,126 @@ use omacharts_engine::providers::Yahoo;
 use omacharts_engine::{Instrument, Provider, SearchIndex, Timeframe};
 
 use crate::store::{Store, ROOT_SECTION};
+
+pub mod charts;
+pub mod completions;
+pub mod exec;
+pub mod parser;
+pub mod spec;
+
+/// What the shell is told. Documented in `doc/cli.md` and in the JSON
+/// surface, because an agent cannot read a message — only this.
+pub const EXIT_OK: u8 = 0;
+/// Something went wrong that none of the others describe.
+pub const EXIT_ERROR: u8 = 1;
+/// The command was not spelled in a way the parser accepts.
+pub const EXIT_USAGE: u8 = 2;
+/// The watchlist, section, chartbook, chart or symbol named does not exist.
+pub const EXIT_NOT_FOUND: u8 = 3;
+/// The name given fits more than one thing; say which with `id:N`.
+pub const EXIT_AMBIGUOUS: u8 = 4;
+/// Understood, and refused: deleting the last chartbook, or the one
+/// watchlist that cannot be deleted.
+pub const EXIT_REFUSED: u8 = 5;
+
+pub const EXIT_CODES: &[(u8, &str)] = &[
+    (EXIT_OK, "the command did what it says"),
+    (EXIT_ERROR, "something went wrong that none of the others describe"),
+    (EXIT_USAGE, "the command was not spelled in a way the parser accepts"),
+    (EXIT_NOT_FOUND, "what was named does not exist"),
+    (EXIT_AMBIGUOUS, "the name fits more than one thing; say which with id:N"),
+    (EXIT_REFUSED, "understood, and refused"),
+];
+
+/// A command that could not be carried out, and why.
+#[derive(Debug)]
+pub struct Fault {
+    pub code: u8,
+    pub message: String,
+}
+
+impl Fault {
+    pub fn new(code: u8, message: String) -> Fault {
+        Fault { code, message }
+    }
+    pub fn usage(message: String) -> Fault {
+        Fault { code: EXIT_USAGE, message }
+    }
+    pub fn not_found(message: String) -> Fault {
+        Fault { code: EXIT_NOT_FOUND, message }
+    }
+    pub fn ambiguous(message: String) -> Fault {
+        Fault { code: EXIT_AMBIGUOUS, message }
+    }
+    pub fn refused(message: String) -> Fault {
+        Fault { code: EXIT_REFUSED, message }
+    }
+}
+
+/// What a command produced, kept apart from where it is written.
+///
+/// A command runs either in a short-lived process of its own or inside the
+/// window, answering a terminal in another process entirely. Returning the
+/// text rather than printing it is what lets one implementation serve both.
+#[derive(Default)]
+pub struct Outcome {
+    pub code: u8,
+    pub out: String,
+    pub err: String,
+}
+
+impl Outcome {
+    pub fn ok(out: String) -> Outcome {
+        Outcome { code: EXIT_OK, out, err: String::new() }
+    }
+    pub fn failed(fault: Fault) -> Outcome {
+        Outcome {
+            code: fault.code,
+            out: String::new(),
+            err: format!("omacharts: {}\n", fault.message),
+        }
+    }
+}
+
+/// The window, to a command typed in a terminal.
+///
+/// Three methods, and all three exist because of one thing: the arrangement
+/// of charts is held in memory and written out on a debounce, so a command
+/// that read the stored copy would see what was true a moment ago, and one
+/// that wrote it would be overwritten by the next save.
+///
+/// So the window flushes before a command reads, and reloads after one
+/// writes. Everything else — watchlists, sections, settings — is rows, which
+/// a command can change directly; the window only has to be told to show them
+/// again.
+pub trait Live {
+    /// Write the arrangement out now, so a command about to read or change it
+    /// sees what is on screen.
+    fn flush_workspace(&self);
+    /// Read the arrangement back and rebuild from it.
+    fn reload_workspace(&self);
+    /// Draw the rail again, after a command changed a watchlist.
+    fn reload_watchlists(&self);
+}
+
+/// Is this argument list a command rather than a symbol to open?
+///
+/// Checked against the table rather than by looking for a leading dash,
+/// because `omacharts NVDA` and `omacharts watchlist add` arrive the same
+/// way and mean entirely different things.
+pub fn is_command(args: &[String]) -> bool {
+    let Some(first) = args.get(1).map(String::as_str) else { return false };
+    matches!(first, "help" | "surface") || spec::SURFACE.iter().any(|n| n.name == first)
+}
+
+/// Run one command.
+///
+/// `live` is the window when there is one. Its absence is not an error: the
+/// same commands work with nothing running, which is what makes this usable
+/// over ssh and out of a script.
+pub fn run(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outcome {
+    exec::dispatch(args, store, live)
+}
 
 /// How many closes the row's sparkline gets.
 ///
@@ -201,16 +335,23 @@ fn json_string(value: &str) -> String {
     out
 }
 
-pub const USAGE: &str = "\
-omacharts — market charts
+/// The old top-level help, kept as the one-line summary `--help` opens with.
+///
+/// The real help is rendered by the parser from `spec`, so this is only what
+/// a caller that wants a string rather than a printed page gets.
+pub fn usage() -> String {
+    parser::command().render_help().to_string()
+}
 
-    omacharts                      open the app
-    omacharts <SYMBOL> [SUFFIX]    open it on a symbol, or focus the window
-                                   that is already open and switch it
-    omacharts watchlist [--refresh]
-                                   print the watchlist as JSON
-    omacharts --help               this
-";
+/// The window as something a command can refresh, when it is able to be one.
+///
+/// `Window` has to carry three methods for this to return anything — see
+/// [`Live`]. Until it does, a command still runs against the database and
+/// still answers the terminal; what it does not do is redraw what is on
+/// screen, so the rail catches up the next time something touches it.
+pub fn live(_window: &Rc<crate::ui::Window>) -> Option<Box<dyn Live>> {
+    None
+}
 
 #[cfg(test)]
 mod tests {

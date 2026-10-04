@@ -53,3 +53,16 @@ exchange listings is planned. Futures are continuous contracts only.
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
+
+## From a terminal
+
+Everything the window can do, `omacharts` can do from a command line — and a
+command takes effect in a window that is already open, straight away.
+
+```
+omacharts watchlist create Semis
+omacharts watchlist add Semis NVDA AMD AVGO TSM MU
+```
+
+See [doc/cli.md](doc/cli.md), or `omacharts surface --json` for the whole
+command surface in a form a script can read.

@@ -169,6 +169,20 @@ impl Store {
             .flatten()
     }
 
+    /// Every setting that has been written, in key order.
+    ///
+    /// For `omacharts config list`, which is the only way somebody outside
+    /// the app can find out what a setting is called before asking for it.
+    pub fn settings(&self) -> Vec<(String, String)> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT key, value FROM settings ORDER BY key") else {
+            return Vec::new();
+        };
+        let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) else {
+            return Vec::new();
+        };
+        rows.filter_map(Result::ok).collect()
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) {
         let _ = self.conn.execute(
             "INSERT INTO settings (key, value) VALUES (?1, ?2)

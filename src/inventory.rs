@@ -69,6 +69,17 @@ impl Inventory {
     }
 }
 
+/// Every instrument, built now rather than on a thread.
+///
+/// The window never calls this — it shows the curated half immediately and
+/// swaps the rest in behind the first frame, which is what keeps startup
+/// fast. A command-line process has no frame to be behind and exits in
+/// milliseconds, so it pays the few milliseconds once and searches
+/// everything.
+pub fn everything() -> SearchIndex {
+    SearchIndex::new(merge(LISTINGS, omacharts_engine::symbols::seed()))
+}
+
 /// The generated listings and the curated rows, as one list.
 ///
 /// A curated row wins any collision, because it is the one carrying a tier, a
