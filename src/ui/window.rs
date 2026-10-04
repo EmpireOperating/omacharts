@@ -368,6 +368,40 @@ mod tests {
         assert_eq!(book_using(&books, 0, DEFAULT_WATCHLIST), None);
     }
 
+    /// Dragging a tab must not switch chartbooks: the charts on screen stay
+    /// where they are, and only the order of the strip changes.
+    #[test]
+    fn the_chartbook_on_screen_travels_with_its_tab() {
+        // Three books, looking at the first, dragged to the end.
+        assert_eq!(shifted(0, 0, 2), 2, "the one you dragged is the one you are looking at");
+        // Looking at the last, dragging the first past it.
+        assert_eq!(shifted(2, 0, 2), 1, "it moved up one as the other left");
+        // Looking at the middle, dragging the last to the front.
+        assert_eq!(shifted(1, 2, 0), 2);
+        // Dragging something that was already past you, and stays past you.
+        assert_eq!(shifted(0, 1, 2), 0, "nothing to do with you");
+    }
+
+    /// Every book has to come out of a reorder somewhere, exactly once: a
+    /// mapping that collided would put two tabs on one chartbook.
+    #[test]
+    fn a_reorder_lands_every_chartbook_in_its_own_place() {
+        for count in 1..=5 {
+            for from in 0..count {
+                for to in 0..count {
+                    let mut landed: Vec<usize> =
+                        (0..count).map(|active| shifted(active, from, to)).collect();
+                    landed.sort();
+                    assert_eq!(
+                        landed,
+                        (0..count).collect::<Vec<_>>(),
+                        "{count} books, {from} -> {to}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Or the switcher slowly fills with rows held by chartbooks nobody can
     /// find. The books are the only record of who is using what, so removing
     /// one is all it takes.
@@ -578,6 +612,24 @@ fn book_using(books: &[Chartbook], besides: usize, watchlist: i64) -> Option<usi
         .enumerate()
         .find(|(at, book)| *at != besides && book.watchlist == Some(watchlist))
         .map(|(at, _)| at)
+}
+
+/// Where the chartbook at `active` ends up when the one at `from` is taken out
+/// of the list and put back at `to`.
+///
+/// Written down rather than worked out at the call site, because `active` is a
+/// position in `books` and not a book: a reorder that did not carry it along
+/// would switch chartbooks as a side effect of dragging a tab.
+fn shifted(active: usize, from: usize, to: usize) -> usize {
+    if active == from {
+        return to;
+    }
+    let lifted = if active > from { active - 1 } else { active };
+    if lifted >= to {
+        lifted + 1
+    } else {
+        lifted
+    }
 }
 
 /// Read what was written down, in whichever shape it was written.
@@ -968,6 +1020,19 @@ impl Window {
                     _ => return,
                 }
                 resizer.set_indicators_of(&pane, indicators);
+            }
+        });
+
+        // The arrows in a strip's corner move it through the stack, the price
+        // plot included. The order lives with the indicators, which is the same
+        // order the settings list drags around — one order, two ways to change
+        // it.
+        let mover = self.clone();
+        pane.view.set_pane_move_handler(move |indicator_id, direction| {
+            let Some(pane) = mover.pane(id) else { return };
+            let mut indicators = pane.indicators.borrow().clone();
+            if omacharts_engine::indicators::move_pane(&mut indicators, indicator_id, direction) {
+                mover.set_indicators_of(&pane, indicators);
             }
         });
 
@@ -2148,6 +2213,32 @@ impl Window {
         self.save_workspace();
     }
 
+    /// Put a chartbook somewhere else in the strip.
+    ///
+    /// The order of `books` is three things at once: the strip, what
+    /// Ctrl+Alt+Left and Right walk, and what is written down. Moving one entry
+    /// moves all three, which is the point — there is one order, and dragging a
+    /// tab is a second way to change it.
+    fn move_book(self: &Rc<Self>, from: usize, to: usize) {
+        {
+            let mut books = self.books.borrow_mut();
+            if from >= books.len() || to >= books.len() || from == to {
+                return;
+            }
+            // Taken out before the destination is used, so a tab dropped to the
+            // right lands after the tab it was dropped on and one dropped to
+            // the left lands in its place — which is where the pointer was
+            // either way.
+            let book = books.remove(from);
+            books.insert(to, book);
+        }
+        self.active.set(shifted(self.active.get(), from, to));
+        self.rebuild_book_strip();
+        // The charts on screen have not changed, only the order they are
+        // written in, so this can wait with the dragged dividers.
+        self.save_soon();
+    }
+
     /// Draw the row of chartbook tabs, or no row at all.
     fn rebuild_book_strip(self: &Rc<Self>) {
         while let Some(child) = self.book_strip.first_child() {
@@ -2179,18 +2270,60 @@ impl Window {
         tab.append(&label);
 
         let click = gtk::GestureClick::new();
-        let this = self.clone();
+        let renamer = self.clone();
         click.connect_pressed(move |_, presses, _, _| {
-            // The single press that precedes a double is harmless: it
-            // switches to the book you are about to rename, which is where
-            // you wanted to be anyway.
             if presses >= 2 {
-                this.begin_rename(index);
-            } else {
-                this.activate_book(index);
+                renamer.begin_rename(index);
+            }
+        });
+        // Switching happens on release rather than on press, and not at all
+        // once a drag has started, because switching rebuilds the strip — which
+        // would pull the dragged tab out from under the drag. The release that
+        // precedes a rename is harmless: it switches to the book you are about
+        // to rename, which is where you wanted to be anyway.
+        let dragging = Rc::new(Cell::new(false));
+        let switcher = self.clone();
+        let held = dragging.clone();
+        click.connect_released(move |_, presses, _, _| {
+            if presses < 2 && !held.get() {
+                switcher.activate_book(index);
             }
         });
         tab.add_controller(click);
+
+        // Drag a tab onto another to put it there, the same gesture the
+        // watchlist and the indicator list already use for an order.
+        //
+        // The position travels as the payload, which it can here because
+        // nothing rebuilds the strip while a drag is in flight — a tab that is
+        // being dragged has not switched chartbooks.
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::MOVE);
+        let payload = index.to_string();
+        source.connect_prepare(move |_, _, _| {
+            Some(gtk::gdk::ContentProvider::for_value(&payload.to_value()))
+        });
+        let started = dragging.clone();
+        source.connect_drag_begin(move |_, _| started.set(true));
+        let finished = dragging.clone();
+        source.connect_drag_end(move |_, _, _| finished.set(false));
+        tab.add_controller(source);
+
+        let target = gtk::DropTarget::new(glib::Type::STRING, gtk::gdk::DragAction::MOVE);
+        let mover = self.clone();
+        target.connect_drop(move |_, value, _, _| {
+            let Ok(from) = value.get::<String>().unwrap_or_default().parse::<usize>() else {
+                return false;
+            };
+            // A tab dropped on itself is a click that travelled a few pixels
+            // too far, and means nothing.
+            if from == index {
+                return false;
+            }
+            mover.move_book(from, index);
+            true
+        });
+        tab.add_controller(target);
 
         // Right-clicking a tab switches to it first, then offers the menu for
         // it. The app already settles this ambiguity the same way — clicking
