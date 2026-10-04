@@ -16,6 +16,8 @@ use adw::prelude::*;
 use gtk::glib;
 use omacharts_engine::{Instrument, SearchIndex};
 
+use crate::ui::dialogs;
+
 /// Rows beyond this are noise — nobody scrolls a symbol picker.
 const LIMIT: usize = 24;
 
@@ -92,6 +94,16 @@ impl SymbolSearch {
         // arrow keys or the mouse.
         let list = self.list.clone();
         self.entry.connect_activate(move |_| {
+            if let Some(row) = list.selected_row() {
+                row.activate();
+            }
+        });
+
+        // The same from anywhere in the dialog, for a hand that has left the
+        // box for the list. Enter there is the row's own key and means this
+        // too, so the two agree rather than compete.
+        let list = self.list.clone();
+        dialogs::commit_on_ctrl_enter(&self.dialog, move || {
             if let Some(row) = list.selected_row() {
                 row.activate();
             }

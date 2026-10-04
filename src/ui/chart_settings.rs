@@ -14,6 +14,7 @@ use omacharts_engine::{BarStyle, Indicator, Session};
 
 use crate::store::Store;
 use crate::ui::colors;
+use crate::ui::dialogs;
 use crate::ui::window::Window;
 
 pub const SETTING_SESSION: &str = "chart_session";
@@ -531,7 +532,14 @@ fn open_indicator_panel_for(window: &Rc<Window>, refresh: &Refresh, id: u32, pan
                 added_on_click.set(true);
                 modal_for_add.close();
             });
+            add.set_tooltip_text(Some(&format!("Add ({})", dialogs::commit_label())));
             header.pack_end(&add);
+
+            // The key goes through the button rather than around it, so there
+            // is one path by which an indicator is kept and one place to look
+            // when it is not.
+            let add_on_key = add.clone();
+            dialogs::commit_on_ctrl_enter(&modal, move || add_on_key.emit_clicked());
 
             // Closed any other way — Escape, the close button, clicking out —
             // means it was never added, so it comes back off the chart.
@@ -1435,6 +1443,15 @@ fn pick_indicator(window: &Rc<Window>, refresh: &Refresh) {
         // Straight into its settings: picking the kind and setting it up are
         // two steps, and the second is where you say whether you meant it.
         open_indicator_panel_for(&window_for_pick, &refresh_for_pick, id, Panel::Add);
+    });
+
+    // What Enter does in the box, from anywhere in the dialog — including the
+    // list, where Enter is already the row's own key and means the same thing.
+    let rows_for_commit = rows.clone();
+    dialogs::commit_on_ctrl_enter(&dialog, move || {
+        if let Some(row) = rows_for_commit.selected_row() {
+            row.activate();
+        }
     });
 
     // A GtkSearchEntry swallows Escape to clear itself, so closing hangs off

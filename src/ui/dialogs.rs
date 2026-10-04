@@ -1,0 +1,78 @@
+//! What Ctrl+Enter means in a dialog.
+//!
+//! Anything that creates something has one action that finishes it, and in
+//! this app that action is always a button in a corner you are not looking at:
+//! you are looking at the list you just picked from. Ctrl+Enter is the key for
+//! it.
+//!
+//! Enter alone could not be. Every dialog here is built around a search box
+//! and a list, where Return already means "take the highlighted row" — which
+//! is a different thing from "I am done", and sometimes the step before it.
+
+use adw::prelude::*;
+use gtk::glib;
+
+/// Finish a dialog with Ctrl+Enter.
+///
+/// Caught on the way down rather than on the way up, because by then the key
+/// may be gone: a dialog's content is a text box and a list, and either may
+/// decide a Return belongs to it before a controller on the dialog itself
+/// hears about it. Catching it first and stopping it there also settles how
+/// many times it can happen, which for a button that adds an indicator is the
+/// difference between one indicator and two.
+pub fn commit_on_ctrl_enter(dialog: &impl IsA<gtk::Widget>, commit: impl Fn() + 'static) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(move |_, key, _, state| {
+        if !state.contains(gtk::gdk::ModifierType::CONTROL_MASK) || !is_enter(key) {
+            return glib::Propagation::Proceed;
+        }
+        commit();
+        glib::Propagation::Stop
+    });
+    dialog.as_ref().add_controller(keys);
+}
+
+/// "Ctrl+Enter", written the way this desktop writes it.
+///
+/// For the tooltip on the button the key stands in for. A finishing key that
+/// is only in a key handler is a finishing key nobody finds, and the button it
+/// belongs to is the one place somebody is already looking for it.
+pub fn commit_label() -> String {
+    gtk::accelerator_get_label(gtk::gdk::Key::Return, gtk::gdk::ModifierType::CONTROL_MASK)
+        .to_string()
+}
+
+/// Return, wherever on the keyboard it was pressed.
+///
+/// The keypad's is a different keyval from the main one, and a keyboard laid
+/// out for some other script can send a third. A dialog that commits from one
+/// Return and not another is a dialog that looks broken.
+fn is_enter(key: gtk::gdk::Key) -> bool {
+    use gtk::gdk::Key;
+    matches!(key, Key::Return | Key::KP_Enter | Key::ISO_Enter)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_return_key_commits() {
+        use gtk::gdk::Key;
+        for key in [Key::Return, Key::KP_Enter, Key::ISO_Enter] {
+            assert!(is_enter(key), "{key:?} should finish a dialog");
+        }
+    }
+
+    #[test]
+    fn nothing_else_does() {
+        use gtk::gdk::Key;
+        // Space is the one worth naming: it activates a focused button, so a
+        // dialog that treated it as Return would commit from a Cancel button
+        // somebody was only trying to press.
+        for key in [Key::space, Key::Escape, Key::Tab, Key::a] {
+            assert!(!is_enter(key), "{key:?} should not finish a dialog");
+        }
+    }
+}

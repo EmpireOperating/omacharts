@@ -3,6 +3,7 @@
 pub mod chart;
 pub mod chart_settings;
 pub mod colors;
+pub mod dialogs;
 pub mod pane;
 pub mod palette;
 pub mod preferences;
