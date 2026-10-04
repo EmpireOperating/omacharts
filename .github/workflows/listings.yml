@@ -23,7 +23,15 @@ jobs:
           title: 'Refresh the generated symbol listings'
           body: |
             Rebuilt from Nasdaq Trader's daily files by `tools/build_listings.py`.
-            The diff is every symbol that listed or delisted since the last run.
+            The diff is every symbol that listed or delisted since the last run,
+            plus the ones whose popularity band moved — that column is a rank
+            over market cap and traded value, so a little churn each week is
+            the column working, not a fault.
+
+            A `warning:` line in the build step means a ranking feed was down.
+            That is survivable by design: those rows go out unranked and search
+            falls back to the ordering it had before the column existed. Worth
+            re-running rather than merging a file that lost half its ranking.
           branch: listings-refresh
           delete-branch: true
           add-paths: crates/omacharts-engine/src/listings.tsv

@@ -466,6 +466,7 @@ mod tests {
             session_origin: 0,
             overrides: Vec::new(),
             exchange: None,
+            popularity: 0,
         }
     }
 

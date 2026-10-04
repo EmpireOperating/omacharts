@@ -284,6 +284,7 @@ fn unlisted(query: &str) -> Option<Instrument> {
         session_origin: 0,
         overrides: Vec::new(),
         exchange: None,
+        popularity: 0,
     })
 }
 

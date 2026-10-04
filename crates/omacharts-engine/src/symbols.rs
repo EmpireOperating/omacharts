@@ -80,6 +80,10 @@ pub struct Instrument {
     /// Where it trades, when the source knew. Unset for anything whose venue
     /// can be worked out from its suffix or its kind.
     pub exchange: Option<String>,
+    /// How well known this is among things of its own sort, 1 (obscure) to 9
+    /// (household name); 0 when nothing ranked it. Curated rows leave it at 0
+    /// and win on `tier` instead.
+    pub popularity: u8,
 }
 
 impl Instrument {
@@ -260,7 +264,6 @@ impl SearchIndex {
     /// A name that *is* the query counts as exact too. People type `DAX`
     /// meaning the index, whose canonical symbol is `GDAXI`; without this the
     /// NASDAQ ETF that happens to own the ticker would win on spelling alone.
-
     fn score(&self, i: usize, q: &str) -> Option<i32> {
         let symbol = &self.symbol_lc[i];
         let name = &self.name_lc[i];
@@ -299,7 +302,16 @@ impl SearchIndex {
             InstrumentKind::Etf => 12,
             _ => 0,
         };
-        Some(textual + tier_weight + kind_weight)
+        // Six a band, so fame tops out at 54, and the ceiling is what matters:
+        // it sits just under the 60 a tier-1 row carries, so the most famous
+        // listing a feed can name still loses to the least of the instruments
+        // someone chose to curate — searching `bank` finds Bank of America,
+        // not whichever bank ETF traded most yesterday. Well clear of the
+        // 4-a-character penalty a longer ticker pays, though, which is the
+        // whole point: `aa` should find Alcoa before AAON. It reorders a band
+        // from within; it never promotes one match over a better one.
+        let fame = item.popularity as i32 * 6;
+        Some(textual + tier_weight + kind_weight + fame)
     }
 }
 
@@ -312,7 +324,11 @@ pub fn seed() -> Vec<Instrument> {
     parse_seed(include_str!("seed.tsv"))
 }
 
-/// `kind<TAB>symbol<TAB>name<TAB>suffix<TAB>currency<TAB>tier<TAB>session_origin<TAB>yahoo_override`
+/// `kind<TAB>symbol<TAB>name<TAB>suffix<TAB>currency<TAB>tier<TAB>session_origin<TAB>yahoo_override<TAB>exchange<TAB>popularity`
+///
+/// Everything past `tier` is optional, so a file written before a column
+/// existed still parses — which is what lets the generated half gain columns
+/// without the curated half being rewritten to match.
 pub fn parse_seed(text: &str) -> Vec<Instrument> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -341,6 +357,7 @@ pub fn parse_seed(text: &str) -> Vec<Instrument> {
                 None => Vec::new(),
             },
             exchange: f.get(8).copied().and_then(blank),
+            popularity: f.get(9).and_then(|v| v.parse().ok()).unwrap_or(0),
         });
     }
     out
@@ -352,6 +369,22 @@ mod tests {
 
     fn index() -> SearchIndex {
         SearchIndex::new(seed())
+    }
+
+    /// A generated-half row: tier 2, no overrides, as popular as you say.
+    fn listed(symbol: &str, name: &str, popularity: u8) -> Instrument {
+        Instrument {
+            symbol: symbol.into(),
+            name: name.into(),
+            kind: InstrumentKind::Equity,
+            suffix: None,
+            currency: Some("USD".into()),
+            tier: 2,
+            session_origin: 0,
+            overrides: Vec::new(),
+            exchange: Some("NASDAQ".into()),
+            popularity,
+        }
     }
 
     #[test]
@@ -400,9 +433,77 @@ mod tests {
             session_origin: 0,
             overrides: Vec::new(),
             exchange: Some("NASDAQ".into()),
+            popularity: 0,
         });
         let idx = SearchIndex::new(items);
         assert_eq!(idx.get(idx.search("dax", 5)[0].index).unwrap().symbol, "GDAXI");
+    }
+
+    #[test]
+    fn fame_settles_a_tie_the_spelling_cannot() {
+        // Both are prefix matches of the same length, so every other term in
+        // the score is identical and the old ranking fell back to alphabetical
+        // order — which put a microcap above the aluminium company.
+        let idx = SearchIndex::new(vec![
+            listed("AAON", "AAON Inc.", 3),
+            listed("AAPX", "Some Obscure Thing", 1),
+            listed("AACQ", "Alcoa-ish Corporation", 9),
+        ]);
+        let hits = idx.search("aa", 5);
+        assert_eq!(idx.get(hits[0].index).unwrap().symbol, "AACQ");
+        assert_eq!(idx.get(hits[2].index).unwrap().symbol, "AAPX");
+    }
+
+    #[test]
+    fn fame_never_promotes_a_worse_match() {
+        // The whole point of capping fame below the gaps between the textual
+        // bands: someone typing a ticker in full gets that ticker, however
+        // famous the thing that merely starts with it.
+        let idx = SearchIndex::new(vec![
+            listed("NVDA", "NVIDIA Corporation", 9),
+            listed("NVD", "Nothing Very Dramatic", 1),
+        ]);
+        assert_eq!(idx.get(idx.search("nvd", 5)[0].index).unwrap().symbol, "NVD");
+    }
+
+    #[test]
+    fn a_curated_row_outranks_a_famous_generated_one() {
+        // 120 for a hand-picked row against 72 for the most famous listing
+        // there is. Curation is a stronger signal than any feed, because it is
+        // the one signal that knows what this app is for.
+        let mut items = seed();
+        items.push(listed("SPYY", "Something Else Entirely", 9));
+        let idx = SearchIndex::new(items);
+        assert_eq!(idx.get(idx.search("spy", 5)[0].index).unwrap().symbol, "SPY");
+    }
+
+    #[test]
+    fn a_row_from_before_the_column_existed_still_parses() {
+        // The curated half has eight columns and is not regenerated when the
+        // generated half gains a ninth or a tenth. Both must keep loading.
+        let eight = "equity\tOLD\tOld Eight Column\t-\tUSD\t2\t0\t-";
+        let ten = "equity\tNEW\tNew Ten Column\t-\tUSD\t2\t0\t-\tNASDAQ\t7";
+        let items = parse_seed(&format!("{eight}\n{ten}\n"));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].popularity, 0, "a missing column is simply unranked");
+        assert_eq!(items[0].exchange, None);
+        assert_eq!(items[1].popularity, 7);
+    }
+
+    #[test]
+    fn the_generated_listings_carry_their_ranking() {
+        // Guards the seam between tools/build_listings.py and this parser: a
+        // column written in the wrong place would read as zero everywhere and
+        // quietly cost search its ordering, with nothing else going wrong.
+        let items = parse_seed(include_str!("listings.tsv"));
+        let ranked = items.iter().filter(|i| i.popularity > 0).count();
+        assert!(
+            ranked > items.len() / 2,
+            "only {ranked} of {} listings are ranked",
+            items.len()
+        );
+        let apple = items.iter().find(|i| i.symbol == "AAPL").expect("no AAPL");
+        assert_eq!(apple.popularity, 9, "the largest company should top the scale");
     }
 
     #[test]
