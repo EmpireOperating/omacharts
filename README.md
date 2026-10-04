@@ -19,9 +19,8 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
   you like, and resize the panes with the mouse or the keyboard. Each chart
   keeps its own symbol, resolution, indicators and settings. Keep as many
   arrangements as you want as chartbooks, each with its own watchlist, and
-  switch between them from the strip along the bottom. It all comes back the
-  way you left it.
-- **Linked or parked.** Link charts and watchlists as you need to.
+  switch between them from the strip along the bottom. Link charts and
+  watchlists as you need to. It all comes back the way you left it.
 - **Keyboard first.** Hotkeys for the whole app: split and close charts,
   resize them, walk the chartbooks, step the resolution, rotate the
   watchlists. Type a letter to find a symbol, a number to set a resolution.
