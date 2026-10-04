@@ -3,6 +3,10 @@
 Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 <p align="center">
+  <img src="doc/gallery.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
+</p>
+
+<p align="center">
   <img src="doc/screenshot.png" width="79%" align="top" alt="Omacharts">
   <img src="doc/bar-widget.png" width="18%" align="top" alt="The Omarchy plugin">
 </p>
