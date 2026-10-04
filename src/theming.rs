@@ -308,6 +308,17 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
   border-radius: 5px;
 }
 
+/* One group in the chain's popover. A menu row rather than a button: the dot
+   carries the colour, so the row itself should stay out of the way and let
+   nine of them read as a list. */
+.link-row {
+  padding: 3px 10px;
+  min-height: 0;
+  border-radius: 5px;
+  font-size: 0.9em;
+}
+.link-row:hover { background: alpha(currentColor, 0.09); }
+
 /* The symbol over the chart is a button, because clicking the name of the
    thing you are looking at to change it is the shortest route there is — but
    it should read as the title it replaced until you reach for it. */

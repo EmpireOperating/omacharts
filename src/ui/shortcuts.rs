@@ -48,21 +48,26 @@ pub const BINDINGS: &[Binding] = &[
     global("win.watchlist", &["<Ctrl>b"]),
     global("win.preferences", &["<Ctrl>comma"]),
     global("chart.indicators", &["<Ctrl>i"]),
-    global("chart.settings", &["<Ctrl><Shift>comma"]),
+    // A letter, because Shift and punctuation together is a trap. GTK
+    // matches the keyval the key produces *after* modifiers, and shifting
+    // the comma key does not produce a comma: it gives "<" on a US layout
+    // and ";" on a Spanish one, so `<Ctrl><Shift>comma` matched on neither
+    // and chart settings had no key at all. Naming the shifted keyval
+    // instead only moves which layouts it is broken on. Punctuation can be
+    // bound here, but only bare, the way `question` below is.
+    global("chart.settings", &["<Ctrl><Shift>s"]),
     global("chart.reset-view", &["<Alt>r"]),
     global("chart.split-h", &["<Ctrl>h"]),
     global("chart.maximize", &["<Ctrl>m"]),
-    global("win.new-chartbook", &["<Ctrl>t"]),
+    global("win.new-chartbook", &["<Ctrl>n"]),
     global("win.rename-chartbook", &["<Ctrl><Shift>r"]),
+    // Ctrl+X closes a chart, so the chartbook holding it is the same
+    // key with Shift. Safe to own outright: Shift+X is nobody's cut.
+    global("win.close-chartbook", &["<Ctrl><Shift>x"]),
     // Paste and cut. The keys are the keys; what changes is whether
     // the keyboard is in something you can type into.
     careful("chart.split-v", &["<Ctrl>v"]),
     careful("chart.close", &["<Ctrl>x"]),
-    // Ctrl+W closed the window long before there were chartbooks to
-    // close, and still does when there is only one. Owning it outright
-    // would take it away from whatever has the keyboard, so it stays
-    // here only to be written down.
-    careful("win.close-chartbook", &["<Ctrl>w"]),
     // A bare key, which an entry has to see first.
     careful("win.shortcuts", &["question"]),
 ];

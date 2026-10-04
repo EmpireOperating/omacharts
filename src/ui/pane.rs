@@ -14,18 +14,18 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk::prelude::*;
-use omacharts_engine::{BarStyle, Indicator, Instrument, Session, Theme, Timeframe};
+use omacharts_engine::{BarStyle, Indicator, Instrument, LinkGroup, Session, Theme, Timeframe};
 
 use crate::ui::chart::ChartView;
 use crate::ui::shortcuts;
 
-/// How a pane follows the watchlist.
+/// How a pane follows the others.
 ///
-/// Linked panes share one symbol: the watchlist drives them, and a symbol
-/// picked on any of them moves the rest. Unlinked panes are parked — the
-/// reason to split a chart in the first place is usually to leave one of them
-/// showing something while you go looking at something else.
-pub const LINK_ON: &str = "Linked to the watchlist";
+/// Panes in the same group share one symbol: a watchlist in that group drives
+/// them, and a symbol picked on any of them moves the rest. An unlinked pane
+/// is parked — the reason to split a chart in the first place is usually to
+/// leave one of them showing something while you go looking at something
+/// else.
 pub const LINK_OFF: &str = "Not linked — this chart stays where it is";
 
 /// One chart filling the window, and the way back.
@@ -53,7 +53,7 @@ pub struct ChartPane {
     /// One row per indicator, under the readout.
     pub indicator_legend: gtk::Box,
     pub gear: gtk::Button,
-    pub link: gtk::ToggleButton,
+    pub link: gtk::MenuButton,
     /// Fills the window with this chart, and puts it back. In the top right
     /// corner, out from under the legend, and only there while the pointer is
     /// on the chart: with four charts open, four of these drawn all the time
@@ -68,7 +68,11 @@ pub struct ChartPane {
     pub bar_style: Cell<BarStyle>,
     pub session: Cell<Session>,
     pub show_grid: Cell<bool>,
-    pub linked: Cell<bool>,
+    pub linked: Cell<LinkGroup>,
+    /// What the chain is painted in, so the group can be read off four charts
+    /// at a glance rather than by opening four popovers. Held here because the
+    /// drawing happens on every frame and the theme it comes from does not.
+    link_colour: Rc<RefCell<Option<String>>>,
 }
 
 impl ChartPane {
@@ -82,7 +86,7 @@ impl ChartPane {
         bar_style: BarStyle,
         session: Session,
         show_grid: bool,
-        linked: bool,
+        linked: LinkGroup,
     ) -> Rc<ChartPane> {
         let view = ChartView::new(theme, scheme);
 
@@ -112,12 +116,16 @@ impl ChartPane {
         // theme, so here is one: two capsules and the bar that joins them,
         // painted in whatever colour the button currently has, which is what
         // makes it follow the theme and dim with the rest of the legend.
-        let link = gtk::ToggleButton::new();
-        link.set_child(Some(&chain_icon()));
+        let link_colour: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let link = gtk::MenuButton::new();
+        link.set_child(Some(&chain_icon(link_colour.clone())));
         link.add_css_class("flat");
         link.add_css_class("legend-link");
         link.set_valign(gtk::Align::Center);
-        link.set_active(linked);
+        // A MenuButton draws a chevron beside whatever it is given unless it
+        // is told not to, and a chain with an arrow under it was the exact
+        // thing the drawn icon exists to avoid.
+        link.set_always_show_arrow(false);
         set_link_look(&link, linked);
 
         let gear = gtk::Button::from_icon_name("emblem-system-symbolic");
@@ -210,6 +218,7 @@ impl ChartPane {
             session: Cell::new(session),
             show_grid: Cell::new(show_grid),
             linked: Cell::new(linked),
+            link_colour,
         })
     }
 
@@ -236,12 +245,16 @@ impl ChartPane {
         self.timeframe_label.set_visible(!focused);
     }
 
-    pub fn set_linked(&self, linked: bool) {
-        self.linked.set(linked);
-        if self.link.is_active() != linked {
-            self.link.set_active(linked);
+    /// Join a group, or leave. The colour is resolved against the live theme
+    /// by the window and handed in, because a pane has no theme of its own to
+    /// ask once the user has changed it.
+    pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
+        self.linked.set(group);
+        *self.link_colour.borrow_mut() = colour;
+        set_link_look(&self.link, group);
+        if let Some(icon) = self.link.child() {
+            icon.queue_draw();
         }
-        set_link_look(&self.link, linked);
     }
 
     /// Push the maximize corner in from the right, to leave room for
@@ -369,18 +382,26 @@ fn expand_icon(maximized: Rc<Cell<bool>>) -> gtk::DrawingArea {
 /// why every chain icon is drawn that way, and it survives being shrunk to
 /// sixteen pixels where the flat version does not. Checked by rendering all
 /// three at true size and looking at them.
-fn chain_icon() -> gtk::DrawingArea {
+pub(crate) fn chain_icon(tint: Rc<RefCell<Option<String>>>) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_content_width(18);
     area.set_content_height(18);
-    area.set_draw_func(|area, cr, width, height| {
-        let colour = area.color();
-        cr.set_source_rgba(
-            colour.red() as f64,
-            colour.green() as f64,
-            colour.blue() as f64,
-            colour.alpha() as f64,
-        );
+    area.set_draw_func(move |area, cr, width, height| {
+        // The group's colour when it has one, and the legend's own otherwise:
+        // an unlinked chain is furniture and should dim with everything else
+        // around it rather than insisting on a hue of its own.
+        match tint.borrow().as_deref() {
+            Some(hex) => crate::ui::colors::set_source(cr, hex),
+            None => {
+                let colour = area.color();
+                cr.set_source_rgba(
+                    colour.red() as f64,
+                    colour.green() as f64,
+                    colour.blue() as f64,
+                    colour.alpha() as f64,
+                );
+            }
+        }
         let (w, h) = (width as f64, height as f64);
         let link_w = w * 0.56;
         let link_h = h * 0.36;
@@ -413,8 +434,12 @@ fn rounded(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
 /// The legend stays out of the way, so an unlinked chart's toggle is nearly
 /// invisible. A linked one is not: following the rail is the state worth being
 /// able to see across four charts without looking for it.
-fn set_link_look(link: &gtk::ToggleButton, linked: bool) {
-    link.set_tooltip_text(Some(if linked { LINK_ON } else { LINK_OFF }));
+fn set_link_look(link: &gtk::MenuButton, group: LinkGroup) {
+    let linked = group.is_linked();
+    link.set_tooltip_text(Some(&match group {
+        LinkGroup::None => LINK_OFF.to_string(),
+        other => format!("Linked · {}", other.label()),
+    }));
     // Two states that cannot be confused, from one icon: Adwaita has a chain
     // and no broken chain, so the difference has to be carried by weight
     // rather than by a second glyph. A linked chart says so plainly; an

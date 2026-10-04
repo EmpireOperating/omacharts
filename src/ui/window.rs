@@ -20,10 +20,12 @@ use omacharts_engine::{
 };
 
 use crate::loader::{Loader, Request, Response, BACKGROUND, FOREGROUND};
-use crate::store::Store;
+use crate::store::{Store, DEFAULT_WATCHLIST};
 use crate::theming::Theming;
-use crate::ui::chart::Drawn;
+use crate::ui::chart::{Drawn, Echo};
 use crate::ui::pane::{self, ChartPane, Node};
+use omacharts_engine::link;
+use omacharts_engine::LinkGroup;
 use crate::ui::colors;
 use crate::ui::preferences::Preferences;
 use crate::ui::search::SymbolSearch;
@@ -167,6 +169,51 @@ mod tests {
     /// Anybody upgrading has one of these in their database. Reading it as
     /// the single book it describes is the difference between keeping the
     /// layout they left and being handed an empty window.
+    /// Every chart stored before there were groups says `"linked": true`, and
+    /// nothing rewrites that file — it is the live layout, read once. A chart
+    /// that was linked has to come back in the group that looks and behaves
+    /// like the only link there used to be.
+    #[test]
+    fn a_chart_linked_before_there_were_groups_joins_the_first_one() {
+        let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
+        let panes = &workspace.books[0].panes;
+        assert_eq!(panes[0].linked, LinkGroup::Group(1), "linked meant the neutral group");
+        assert_eq!(panes[1].linked, LinkGroup::None, "and unlinked still means nobody");
+    }
+
+    #[test]
+    fn a_group_survives_being_written_down() {
+        let json = r#"{"id": 1, "symbol": "SPY", "suffix": null, "timeframe": "1D",
+             "indicators": [], "bar_style": "candle", "session": "extended",
+             "show_grid": true, "linked": 4}"#;
+        let pane: StoredPane = serde_json::from_str(json).expect("a numbered group should parse");
+        assert_eq!(pane.linked, LinkGroup::Group(4));
+        let back: StoredPane =
+            serde_json::from_str(&serde_json::to_string(&pane).unwrap()).unwrap();
+        assert_eq!(back.linked, LinkGroup::Group(4));
+    }
+
+    /// The menu marks the row this chart is in, so the number it carries and
+    /// the number the action is told have to be the same number.
+    #[test]
+    fn a_groups_menu_target_is_its_number() {
+        assert_eq!(group_state(LinkGroup::None).get::<i32>(), Some(0));
+        assert_eq!(group_state(LinkGroup::Group(7)).get::<i32>(), Some(7));
+    }
+
+    /// A click in the bar widget hands back a canonical ticker and a suffix,
+    /// and looks for a list holding that pair. Matching on the ticker alone
+    /// would find SAP in Frankfurt from a click on SAP in New York.
+    #[test]
+    fn a_list_holds_a_symbol_only_with_the_venue_it_was_stored_under() {
+        let store = Store::memory().expect("an in-memory store");
+        store.add_to_root("SAP", Some("DE"));
+
+        assert!(list_holds(&store, DEFAULT_WATCHLIST, "SAP", Some("DE")));
+        assert!(!list_holds(&store, DEFAULT_WATCHLIST, "SAP", None), "a different listing");
+        assert!(!list_holds(&store, DEFAULT_WATCHLIST, "SAP.DE", None), "not the display form");
+    }
+
     #[test]
     fn a_workspace_written_before_chartbooks_comes_back_as_one() {
         let workspace = parse_workspace(ONE_ARRANGEMENT).expect("the old shape should parse");
@@ -199,7 +246,7 @@ mod tests {
                 bar_style: "candle".to_string(),
                 session: "extended".to_string(),
                 show_grid: true,
-                linked: false,
+                linked: LinkGroup::None,
             }],
             watchlist: Some(4),
             sidebar_shown: Some(false),
@@ -286,6 +333,44 @@ mod tests {
 /// so a four-item menu whose submenu has more rows than that opens with dead
 /// space below it and a scrollbar down the side. Nested submenus fly out as
 /// their own popovers, leaving each menu exactly as tall as what is in it.
+/// A group's colour as a small filled circle, or an empty space the same size
+/// for the group that has no colour — so the labels line up down the popover
+/// however many of the rows are coloured.
+fn swatch_dot(colour: Option<String>) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(12);
+    area.set_content_height(12);
+    area.set_valign(gtk::Align::Center);
+    area.set_draw_func(move |_, cr, width, height| {
+        let Some(hex) = colour.as_deref() else { return };
+        crate::ui::colors::set_source(cr, hex);
+        let r = (width.min(height) as f64) / 2.0 - 1.5;
+        cr.arc(width as f64 / 2.0, height as f64 / 2.0, r, 0.0, std::f64::consts::TAU);
+        let _ = cr.fill();
+    });
+    area
+}
+
+/// Does this watchlist hold that symbol?
+///
+/// Matched on the canonical ticker and the exchange suffix together, never on
+/// what either of them is displayed as: BRK.B is one symbol with a dot in it
+/// and SAN.MC is a symbol and a suffix, and a comparison that cannot tell
+/// those apart finds the wrong one abroad.
+fn list_holds(store: &Store, watchlist: i64, symbol: &str, suffix: Option<&str>) -> bool {
+    store.watchlist_sections(watchlist).iter().any(|section| {
+        section
+            .entries
+            .iter()
+            .any(|entry| entry.symbol == symbol && entry.suffix.as_deref() == suffix)
+    })
+}
+
+/// A group as a menu action's target: the number, and zero for unlinked.
+fn group_state(group: LinkGroup) -> glib::Variant {
+    (group.number().unwrap_or(0) as i32).to_variant()
+}
+
 fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
     let popover = gtk::PopoverMenu::from_model_full(model, gtk::PopoverMenuFlags::NESTED);
     popover.set_parent(over);
@@ -356,7 +441,7 @@ struct StoredPane {
     bar_style: String,
     session: String,
     show_grid: bool,
-    linked: bool,
+    linked: LinkGroup,
 }
 
 /// One arrangement of charts, saved under a name.
@@ -583,8 +668,25 @@ impl Window {
         // way of changing it has to write the book down. One hook, because a
         // second route to the same state is a second route that can forget.
         let saver = this.clone();
-        watchlist.connect_switched(move || saver.save_soon());
+        let rail = watchlist.clone();
+        watchlist.connect_switched(move || {
+            // A different list is a different group: the chain has to say what
+            // the list in front of you drives, not what the last one did.
+            let colours = saver.clone();
+            rail.adopt_link_group(move |group| colours.link_colour(group));
+            saver.save_soon();
+        });
         *this.watchlist.borrow_mut() = Some(watchlist.clone());
+
+        watchlist.link_button().set_popover(Some(&this.link_popover(|window, group| {
+            let colour = window.link_colour(group);
+            if let Some(rail) = window.watchlist.borrow().as_ref() {
+                rail.set_link_group(group, colour);
+            }
+            window.save_workspace();
+        })));
+        let colours = this.clone();
+        watchlist.adopt_link_group(move |group| colours.link_colour(group));
 
         let split = &this.split;
         split.set_end_child(Some(&watchlist.widget));
@@ -632,7 +734,7 @@ impl Window {
                 .and_then(|k| Session::from_key(&k))
                 .unwrap_or_default(),
             store.setting_bool(SETTING_SHOW_GRID, true),
-            true,
+            LinkGroup::Group(1),
         );
         *this.layout.borrow_mut() = Node::leaf(first.id);
         this.focused.set(first.id);
@@ -684,7 +786,7 @@ impl Window {
         bar_style: BarStyle,
         session: Session,
         show_grid: bool,
-        linked: bool,
+        linked: LinkGroup,
     ) -> Rc<ChartPane> {
         let id = self.next_pane.get();
         self.next_pane.set(id + 1);
@@ -719,10 +821,13 @@ impl Window {
             expander.toggle_maximized();
         });
 
-        let linker = self.clone();
-        pane.link.connect_toggled(move |toggle| {
-            linker.set_pane_linked(id, toggle.is_active());
-        });
+        // The chain opens the list of groups rather than toggling one, now
+        // that there are nine of them and "off" is a tenth answer.
+        pane.link.set_popover(Some(&self.link_popover(move |window, group| {
+            window.focus(id);
+            window.set_pane_link_group(id, group);
+        })));
+        pane.set_link_group(linked, self.link_colour(linked));
 
         // Right-clicking a strip offers to edit the list, rather than throwing
         // a modal at you for a click you may not have meant. The list is one
@@ -783,13 +888,14 @@ impl Window {
             closer.set_indicators_of(&pane, kept);
         });
 
-        // The pointer on one chart draws a line on the charts linked with it,
-        // so you can read the same moment on all of them at once. Only the
-        // time travels: two charts at different resolutions share no bar
-        // index, and two symbols share no price.
+        // The pointer on one chart draws a crosshair on the charts linked
+        // with it, so you can read the same moment and the same price on all
+        // of them at once. Both halves travel as values rather than as
+        // pixels: charts at different resolutions share no bar index, and
+        // charts at different zooms share no y.
         let echoer = self.clone();
         pane.view.set_hover_handler(move |hover| {
-            echoer.echo_crosshair(id, hover.map(|h| h.bar.ts));
+            echoer.echo_crosshair(id, hover.map(|h| Echo { ts: h.bar.ts, price: h.price }));
         });
 
         // Clicking anywhere on a chart focuses it, which is what makes the
@@ -860,7 +966,7 @@ impl Window {
     /// to be re-pointed when the focus moves.
     fn sync_chart_actions(self: &Rc<Self>, pane: &Rc<ChartPane>) {
         if let Some(action) = self.linked_action.borrow().as_ref() {
-            action.set_state(&pane.linked.get().to_variant());
+            action.set_state(&group_state(pane.linked.get()));
         }
         if let Some(action) = self.bar_style_action.borrow().as_ref() {
             action.set_state(&pane.bar_style.get().key().to_variant());
@@ -1184,18 +1290,62 @@ impl Window {
         }
     }
 
-    pub fn set_pane_linked(self: &Rc<Self>, id: u32, linked: bool) {
+    pub fn set_pane_link_group(self: &Rc<Self>, id: u32, group: LinkGroup) {
         let Some(pane) = self.pane(id) else { return };
-        pane.set_linked(linked);
-        // Joining the group adopts what the group is showing, which is what
-        // "linked" means — otherwise the toggle says linked and the chart is
+        pane.set_link_group(group, self.link_colour(group));
+        // Joining a group adopts what the group is showing, which is what
+        // joining means — otherwise the chain says group 3 and the chart is
         // somewhere else.
-        if linked {
-            if let Some(instrument) = self.linked_instrument(id) {
-                self.show_in(&pane, instrument);
-            }
+        if let Some(instrument) = self.group_instrument(group, id) {
+            self.show_in(&pane, instrument);
         }
+        self.sync_chart_actions(&pane);
         self.save_workspace();
+    }
+
+    /// What a group's badge is painted in, against the theme in force now.
+    ///
+    /// Resolved on demand rather than stored, because the number is the group
+    /// and the colour is only this theme's answer about it.
+    fn link_colour(&self, group: LinkGroup) -> Option<String> {
+        group.colour(&self.theming.borrow().theme())
+    }
+
+    /// The list of groups, as a popover. `choose` is handed the group the row
+    /// stands for; which chart or rail it applies to is the caller's business.
+    fn link_popover(
+        self: &Rc<Self>,
+        choose: impl Fn(&Rc<Self>, LinkGroup) + 'static,
+    ) -> gtk::Popover {
+        let popover = gtk::Popover::new();
+        popover.set_has_arrow(false);
+        let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let choose = Rc::new(choose);
+        for group in link::ALL {
+            let row = gtk::Button::new();
+            row.add_css_class("flat");
+            row.add_css_class("link-row");
+            let line = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            line.append(&swatch_dot(self.link_colour(group)));
+            let label = gtk::Label::new(Some(group.label()));
+            label.set_xalign(0.0);
+            label.set_hexpand(true);
+            line.append(&label);
+            row.set_child(Some(&line));
+
+            let this = self.clone();
+            let choose = choose.clone();
+            let popover_weak = popover.downgrade();
+            row.connect_clicked(move |_| {
+                if let Some(popover) = popover_weak.upgrade() {
+                    popover.popdown();
+                }
+                choose(&this, group);
+            });
+            menu.append(&row);
+        }
+        popover.set_child(Some(&menu));
+        popover
     }
 
     /// Remember where a divider was dragged to.
@@ -1439,7 +1589,14 @@ impl Window {
         // not on whatever the last chart happened to be carrying: a fresh
         // arrangement is a fresh start, which is the reason to open one.
         let pane =
-            self.new_pane(timeframe, self.store.indicators(), bar_style, session, show_grid, true);
+            self.new_pane(
+            timeframe,
+            self.store.indicators(),
+            bar_style,
+            session,
+            show_grid,
+            LinkGroup::Group(1),
+        );
         *self.layout.borrow_mut() = Node::leaf(pane.id);
         self.focused.set(pane.id);
         self.rebuild_layout();
@@ -1456,39 +1613,153 @@ impl Window {
     /// One chart rather than a copy of the arrangement you were in: splitting
     /// is the thing that duplicates a chart in this app, and a new book you
     /// have to dismantle before you can use it is not a new book.
+    /// Ask what the new chartbook is called, and which list sits beside it.
+    ///
+    /// A dialog rather than the inline tab the strip uses for renaming,
+    /// because the strip is not there yet: going from one book to two is the
+    /// moment it appears, and a caret arriving in a twenty-one pixel row at
+    /// the bottom edge of the window is easy to miss entirely.
     pub fn new_chartbook(self: &Rc<Self>) {
+        let proposed = default_book_name(self.books.borrow().len() + 1);
+        let lists = self
+            .watchlist
+            .borrow()
+            .as_ref()
+            .map(|rail| rail.watchlists())
+            .unwrap_or_default();
+
+        let name = adw::EntryRow::new();
+        name.set_title("Name");
+        name.set_text(&proposed);
+
+        let chosen = adw::ComboRow::new();
+        chosen.set_title("Watchlist");
+        let names: Vec<&str> = lists.iter().map(|(_, name)| name.as_str()).collect();
+        chosen.set_model(Some(&gtk::StringList::new(&names)));
+        let at = lists.iter().position(|(id, _)| *id == DEFAULT_WATCHLIST).unwrap_or(0);
+        chosen.set_selected(at as u32);
+
+        let fresh = adw::SwitchRow::new();
+        fresh.set_title("Create new watchlist");
+        fresh.set_subtitle("An empty one, named after the chartbook");
+
+        // Disabled rather than hidden while a new list is being made: a
+        // control that greys out still says what the other answer would have
+        // been, and one that vanishes leaves you wondering what moved.
+        let picker = chosen.clone();
+        fresh.connect_active_notify(move |switch| picker.set_sensitive(!switch.is_active()));
+
+        let rows = adw::PreferencesGroup::new();
+        rows.add(&name);
+        rows.add(&chosen);
+        rows.add(&fresh);
+
+        let dialog = adw::AlertDialog::new(Some("New chartbook"), None);
+        dialog.set_extra_child(Some(&rows));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("create", "Create");
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        // Creating is not destroying, so Return may finish it — unlike the
+        // alerts that delete something, which default to Cancel on purpose.
+        dialog.set_default_response(Some("create"));
+        dialog.set_close_response("cancel");
+
+        let committing = dialog.clone();
+        crate::ui::dialogs::commit_on_ctrl_enter(&dialog, move || {
+            // The binding has no emitter for this signal, and a dialog that
+            // can only be finished with the mouse is the thing Ctrl+Enter is
+            // for.
+            committing.emit_by_name::<()>("response", &[&"create"]);
+        });
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "create" {
+                return;
+            }
+            let typed = name.text().trim().to_string();
+            let label = if typed.is_empty() { proposed.clone() } else { typed };
+            let watchlist = if fresh.is_active() {
+                // Made only now, so cancelling leaves no list behind that
+                // nothing points at.
+                match this.store.add_watchlist(&label) {
+                    Some(id) => Some(id),
+                    None => return,
+                }
+            } else {
+                lists.get(chosen.selected() as usize).map(|(id, _)| *id)
+            };
+            this.open_chartbook(&label, watchlist);
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn open_chartbook(self: &Rc<Self>, name: &str, watchlist: Option<i64>) {
         self.save_workspace();
         let instrument = self.focused_pane().instrument.borrow().clone();
         let at = self.books.borrow().len();
         // A placeholder, so that `active` names a book that exists before
         // anything else looks. Saving at the end writes the real one.
         self.books.borrow_mut().push(Chartbook {
-            name: String::new(),
+            name: if name == default_book_name(at + 1) { String::new() } else { name.to_string() },
             layout: Node::leaf(0),
             focused: 0,
             panes: Vec::new(),
-            // The rail is left exactly as it is, and the save at the end
-            // writes down what that turned out to be: a new book opens beside
-            // the list you were already reading, not beside a default.
-            watchlist: None,
+            watchlist,
             sidebar_shown: None,
             sidebar_width: None,
         });
         self.active.set(at);
         self.mount_single_chart(instrument);
+        // Through the one path a book's rail always arrives by, so a list
+        // chosen here and a list restored later cannot disagree.
+        self.apply_sidebar(watchlist, None, None);
         self.rebuild_book_strip();
         self.save_workspace();
     }
 
-    /// Close the chartbook on screen.
+    /// Ask before taking a chartbook and its charts away.
     ///
-    /// The last one does not close, it quits — Ctrl+W shut the window long
-    /// before there were books to shut, and that is what every tabbed
-    /// application does with the last tab.
+    /// The only one does not go: there would be nothing left to show, the
+    /// same guard closing the last chart already keeps.
     pub fn close_chartbook(self: &Rc<Self>) {
         if self.books.borrow().len() < 2 {
-            self.window.close();
             return;
+        }
+        let index = self.active.get();
+        let charts = self.layout.borrow().leaves().len();
+        let body = format!(
+            "{} and its {} will be removed. This cannot be undone.",
+            self.book_label(index),
+            match charts {
+                1 => "chart".to_string(),
+                n => format!("{n} charts"),
+            },
+        );
+
+        let dialog = adw::AlertDialog::new(Some("Remove chartbook"), Some(&body));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("remove", "Remove");
+        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "remove" {
+                this.remove_chartbook(index);
+            }
+        });
+        dialog.present(Some(&self.window));
+    }
+
+    fn remove_chartbook(self: &Rc<Self>, index: usize) {
+        if self.books.borrow().len() < 2 {
+            return;
+        }
+        // The book that was asked about may not be the one on screen any more.
+        if index != self.active.get() {
+            self.activate_book(index);
         }
         let index = self.active.get();
         self.books.borrow_mut().remove(index);
@@ -1588,6 +1859,27 @@ impl Window {
             }
         });
         tab.add_controller(click);
+
+        // Right-clicking a tab switches to it first, then offers the menu for
+        // it. The app already settles this ambiguity the same way — clicking
+        // another chart's corner focuses that chart before maximizing it —
+        // and it is what keeps the accelerators the rows advertise honest,
+        // since both of them act on the book that is open.
+        let menu = gtk::GestureClick::new();
+        menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+        let this = self.clone();
+        menu.connect_pressed(move |_, _, x, y| {
+            this.activate_book(index);
+            // Found in the strip rather than captured: switching books redrew
+            // it, and the tab this gesture is attached to is no longer the
+            // tab on screen.
+            let Some(tab) = this.book_tab(this.active.get()) else { return };
+            let model = gio::Menu::new();
+            shortcuts::append(&model, "Rename", "win.rename-chartbook");
+            shortcuts::append(&model, "Remove", "win.close-chartbook");
+            popup_menu(&model, &tab, x, y);
+        });
+        tab.add_controller(menu);
         tab.upcast()
     }
 
@@ -1680,17 +1972,20 @@ impl Window {
 
     /// Draw `ts` on every chart linked with `from`, and on none when it is
     /// unlinked: an unlinked chart is deliberately somewhere else.
-    fn echo_crosshair(self: &Rc<Self>, from: u32, ts: Option<i64>) {
+    fn echo_crosshair(self: &Rc<Self>, from: u32, echo: Option<Echo>) {
         if !self.store.setting_bool(SETTING_SYNC_CROSSHAIR, true) {
             return;
         }
-        let source_linked = self.pane(from).map(|p| p.linked.get()).unwrap_or(false);
+        let source = self.pane(from).map(|p| p.linked.get()).unwrap_or_default();
         for pane in self.panes.borrow().iter() {
             if pane.id == from {
                 continue;
             }
-            let show = source_linked && pane.linked.get();
-            pane.view.set_echo(if show { ts } else { None });
+            // Same group, or no line: a chart in another group is tracking a
+            // different symbol, and a crosshair from this one would be
+            // pointing at a bar that is not the bar under the pointer.
+            let show = source.is_linked() && pane.linked.get() == source;
+            pane.view.set_echo(if show { echo } else { None });
         }
     }
 
@@ -1702,12 +1997,16 @@ impl Window {
         }
     }
 
-    /// What the linked charts are showing, ignoring `except`.
-    fn linked_instrument(&self, except: u32) -> Option<Instrument> {
+    /// What a group is already showing, ignoring `except`. `None` for the
+    /// unlinked group, which is not a pool and has nothing to agree on.
+    fn group_instrument(&self, group: LinkGroup, except: u32) -> Option<Instrument> {
+        if !group.is_linked() {
+            return None;
+        }
         self.panes
             .borrow()
             .iter()
-            .filter(|p| p.id != except && p.linked.get())
+            .filter(|p| p.id != except && p.linked.get() == group)
             .find_map(|p| p.instrument.borrow().clone())
     }
 
@@ -1962,7 +2261,7 @@ impl Window {
             self.index.clone(),
             self.search.clone(),
             quote,
-            move |instrument| this.show(instrument),
+            move |instrument| this.show_from_rail(instrument),
         )
     }
 
@@ -2015,10 +2314,16 @@ impl Window {
 
             match key {
                 // Ctrl+L: follow the rail, or stop following it.
+                // Ctrl+L: in or out of the neutral group, which is the one a
+                // chart that was simply "linked" has always been in. Picking
+                // one of the other eight is a thing you do by looking.
                 Key::l | Key::L if ctrl => {
                     let pane = this.focused_pane();
-                    this.set_pane_linked(pane.id, !pane.linked.get());
-                    this.sync_chart_actions(&this.focused_pane());
+                    let next = match pane.linked.get() {
+                        LinkGroup::None => LinkGroup::Group(1),
+                        _ => LinkGroup::None,
+                    };
+                    this.set_pane_link_group(pane.id, next);
                     return glib::Propagation::Stop;
                 }
                 Key::Left if alt && !ctrl => {
@@ -2066,10 +2371,6 @@ impl Window {
                 // that was the only one — which is what it has always done,
                 // and what every tabbed application does with the last tab.
                 // Ctrl+Q skips the question and quits.
-                Key::w if ctrl => {
-                    this.close_chartbook();
-                    return glib::Propagation::Stop;
-                }
                 Key::q if ctrl => {
                     this.window.close();
                     return glib::Propagation::Stop;
@@ -2263,6 +2564,14 @@ impl Window {
         };
         for pane in self.panes.borrow().iter() {
             pane.view.restyle(theme.clone(), scheme.clone());
+            // The group is the number and the colour is the theme's answer
+            // about it, which has just changed.
+            let group = pane.linked.get();
+            pane.set_link_group(group, group.colour(&theme));
+        }
+        if let Some(rail) = self.watchlist.borrow().as_ref() {
+            let group = rail.link_group();
+            rail.set_link_group(group, group.colour(&theme));
         }
         // Indicators without a colour of their own take one from the theme's
         // palette, and that answer just changed. Repainting without asking
@@ -2434,7 +2743,7 @@ impl Window {
                     ("Ctrl+K", "Find a symbol"),
                     ("Ctrl+I", "Indicators"),
                     ("Ctrl+Shift+I", "Add an indicator"),
-                    ("Ctrl+Shift+,", "Chart settings"),
+                    ("Ctrl+Shift+S", "Chart settings"),
                     ("Ctrl+,", "Preferences"),
                     ("F10", "Main menu"),
                     ("? · Ctrl+?", "This list"),
@@ -2444,11 +2753,12 @@ impl Window {
             (
                 "Chartbooks",
                 &[
-                    ("Ctrl+T", "New chartbook"),
+                    ("Ctrl+N", "New chartbook"),
                     ("Ctrl+Shift+R", "Rename this chartbook"),
-                    ("Ctrl+W", "Close this chartbook, or the window"),
+                    ("Ctrl+Shift+X", "Remove this chartbook"),
                     ("Ctrl+Alt+← →", "Previous or next chartbook"),
                     ("Double-click a tab", "Rename it"),
+                    ("Right-click a tab", "Rename or remove it"),
                 ],
             ),
             (
@@ -2599,20 +2909,63 @@ impl Window {
     /// elsewhere is most of the reason to have split it.
     pub fn show(self: &Rc<Self>, instrument: Instrument) {
         let focused = self.focused_pane();
-        self.show_in(&focused, instrument.clone());
-        if focused.linked.get() {
+        self.spread(instrument, focused.linked.get(), Some(focused.id));
+    }
+
+    /// Chart what the rail just picked.
+    ///
+    /// The chart you are looking at always moves — that is what clicking a
+    /// symbol in the list has always meant — and so does every chart in the
+    /// rail's own group, wherever it is.
+    pub fn show_from_rail(self: &Rc<Self>, instrument: Instrument) {
+        let group =
+            self.watchlist.borrow().as_ref().map(|rail| rail.link_group()).unwrap_or_default();
+        self.spread(instrument, group, Some(self.focused.get()));
+    }
+
+    /// Put `instrument` on `seed`, on every live chart in `group`, and on
+    /// every chart in `group` that belongs to a chartbook which is not on
+    /// screen.
+    ///
+    /// The books that are away are data rather than widgets, so they are
+    /// written to directly. Skipping them would make a group mean "the charts
+    /// in this group I can currently see", which is a rule nobody could
+    /// predict from one chartbook away.
+    fn spread(self: &Rc<Self>, instrument: Instrument, group: LinkGroup, seed: Option<u32>) {
+        if let Some(pane) = seed.and_then(|id| self.pane(id)) {
+            self.show_in(&pane, instrument.clone());
+        }
+        if group.is_linked() {
             let others: Vec<Rc<ChartPane>> = self
                 .panes
                 .borrow()
                 .iter()
-                .filter(|p| p.id != focused.id && p.linked.get())
+                .filter(|p| Some(p.id) != seed && p.linked.get() == group)
                 .cloned()
                 .collect();
             for pane in others {
                 self.show_in(&pane, instrument.clone());
             }
+            self.spread_to_stored_books(&instrument, group);
         }
         self.save_workspace();
+    }
+
+    /// Move a group's charts in the books that are not on screen.
+    ///
+    /// The active book is skipped: its charts are the live ones, and saving
+    /// writes them back over whatever was stored anyway.
+    fn spread_to_stored_books(&self, instrument: &Instrument, group: LinkGroup) {
+        let active = self.active.get();
+        for (index, book) in self.books.borrow_mut().iter_mut().enumerate() {
+            if index == active {
+                continue;
+            }
+            for pane in book.panes.iter_mut().filter(|p| p.linked == group) {
+                pane.symbol = instrument.symbol.clone();
+                pane.suffix = instrument.suffix.clone();
+            }
+        }
     }
 
     /// Chart an instrument on one chart: paint from cache now, fetch the gap
@@ -3074,7 +3427,16 @@ impl Window {
         menu.append_section(None, &layout);
 
         let rest = gio::Menu::new();
-        shortcuts::append(&rest, "Linked to watchlist", "chart.linked");
+        let groups = gio::Menu::new();
+        for group in link::ALL {
+            let item = gio::MenuItem::new(Some(group.label()), None);
+            item.set_action_and_target_value(
+                Some("chart.link-group"),
+                Some(&group_state(group)),
+            );
+            groups.append_item(&item);
+        }
+        rest.append_submenu(Some("Link group"), &groups);
         shortcuts::append(&rest, "Indicators…", "chart.indicators");
         shortcuts::append(&rest, "Chart settings…", "chart.settings");
         menu.append_section(None, &rest);
@@ -3171,16 +3533,19 @@ impl Window {
         close.connect_activate(move |_, _| this.close_focused());
         actions.add_action(&close);
 
+        // Stateful over the group number, so the menu draws a radio mark
+        // beside the one this chart is in rather than a tick that can only
+        // say linked or not.
         let linked = gio::SimpleAction::new_stateful(
-            "linked",
-            None,
-            &self.focused_pane().linked.get().to_variant(),
+            "link-group",
+            Some(glib::VariantTy::INT32),
+            &group_state(self.focused_pane().linked.get()),
         );
         let this = self.clone();
-        linked.connect_activate(move |action, _| {
-            let next = !this.focused_pane().linked.get();
-            action.set_state(&next.to_variant());
-            this.set_pane_linked(this.focused.get(), next);
+        linked.connect_activate(move |action, target| {
+            let Some(number) = target.and_then(|t| t.get::<i32>()) else { return };
+            action.set_state(&number.to_variant());
+            this.set_pane_link_group(this.focused.get(), LinkGroup::numbered(number.max(0) as u8));
         });
         actions.add_action(&linked);
         *self.linked_action.borrow_mut() = Some(linked);
@@ -3396,12 +3761,49 @@ impl Window {
     /// Takes the canonical symbol and the exchange suffix separately, because
     /// a display symbol cannot be split back apart: BRK.B is one symbol with a
     /// dot in it, SAN.MC is a symbol and a suffix.
+    /// Selected in the first chartbook whose watchlist holds it, rather than
+    /// forced onto whichever chart happens to be focused: the bar widget is a
+    /// way back into what you were already watching, and a click there that
+    /// rewrote the chart in front of you would be a different feature.
+    ///
+    /// `false` when no list holds it, which leaves the caller to do the one
+    /// thing that is still right — put the window up.
     pub fn show_named(self: &Rc<Self>, symbol: &str, suffix: Option<&str>) -> bool {
         let Some(instrument) = self.index.find(symbol, suffix) else {
             return false;
         };
-        self.show(instrument);
-        true
+
+        // The book you are in wins any tie. "The first where it is available"
+        // says nothing about two books holding the same symbol, and being
+        // moved out of what you were looking at because another book sorts
+        // earlier would be the wrong half of that silence.
+        let here = self.watchlist.borrow().as_ref().map(|rail| rail.active_watchlist());
+        if here.is_some_and(|id| self.list_holds(id, symbol, suffix)) {
+            return self.pick_in_rail(&instrument);
+        }
+
+        let elsewhere = {
+            let books = self.books.borrow();
+            books.iter().enumerate().find_map(|(index, book)| {
+                let id = book.watchlist?;
+                self.list_holds(id, symbol, suffix).then_some(index)
+            })
+        };
+        let Some(index) = elsewhere else { return false };
+        self.activate_book(index);
+        // After the switch, never before: selecting looks through the rows the
+        // rail is showing, and until it has been rebuilt those are the last
+        // book's rows.
+        self.pick_in_rail(&instrument)
+    }
+
+    fn list_holds(&self, watchlist: i64, symbol: &str, suffix: Option<&str>) -> bool {
+        list_holds(&self.store, watchlist, symbol, suffix)
+    }
+
+    fn pick_in_rail(self: &Rc<Self>, instrument: &Instrument) -> bool {
+        let rail = self.watchlist.borrow().as_ref().cloned();
+        rail.is_some_and(|rail| rail.pick(instrument))
     }
 
     pub fn indicators(&self) -> Vec<Indicator> {

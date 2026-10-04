@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use omacharts_engine::Instrument;
+use omacharts_engine::{Instrument, LinkGroup};
 
 use crate::store::{Entry, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
@@ -193,6 +193,10 @@ pub struct Watchlist {
     /// Set while we are selecting a row ourselves, so rebuilding does not
     /// re-load the chart.
     quiet: Cell<bool>,
+    /// The chain beside the name: which group of charts this list drives.
+    link: gtk::MenuButton,
+    link_tint: Rc<RefCell<Option<String>>>,
+    link_group: Cell<LinkGroup>,
     /// Which watchlist the rail is showing. Not which one the bar widget
     /// shows — that is always the default one.
     active: Cell<i64>,
@@ -240,14 +244,29 @@ impl Watchlist {
         let switcher = gtk::MenuButton::new();
         switcher.add_css_class("flat");
         switcher.add_css_class("rail-switcher");
-        switcher.set_halign(gtk::Align::Start);
-        switcher.set_valign(gtk::Align::Start);
-        switcher.set_margin_start(8);
-        switcher.set_margin_top(3);
+        switcher.set_valign(gtk::Align::Center);
+
+        // The chain beside the name, because the question it answers is about
+        // this list: which group of charts does picking a symbol here move.
+        let link_tint: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+        let link = gtk::MenuButton::new();
+        link.set_child(Some(&crate::ui::pane::chain_icon(link_tint.clone())));
+        link.add_css_class("flat");
+        link.add_css_class("legend-link");
+        link.set_always_show_arrow(false);
+        link.set_valign(gtk::Align::Center);
+
+        let named = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+        named.set_halign(gtk::Align::Start);
+        named.set_valign(gtk::Align::Start);
+        named.set_margin_start(8);
+        named.set_margin_top(1);
+        named.append(&switcher);
+        named.append(&link);
 
         let band = gtk::Overlay::new();
         band.set_child(Some(&header));
-        band.add_overlay(&switcher);
+        band.add_overlay(&named);
 
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_size_request(248, -1);
@@ -277,6 +296,9 @@ impl Watchlist {
             rows: RefCell::new(Vec::new()),
             columns: RefCell::new(columns),
             quiet: Cell::new(false),
+            link: link.clone(),
+            link_tint,
+            link_group: Cell::new(LinkGroup::None),
             active: Cell::new(active),
             switcher: switcher.clone(),
             on_switch: RefCell::new(None),
@@ -333,6 +355,84 @@ impl Watchlist {
     }
 
     /// Hear about the rail being pointed at a different watchlist.
+    /// The chain, for the window to hang the group popover off — the list of
+    /// groups is the same list a chart offers, and it is built where the
+    /// theme that colours it lives.
+    pub fn link_button(&self) -> gtk::MenuButton {
+        self.link.clone()
+    }
+
+    /// Which group picking a symbol here moves.
+    pub fn link_group(&self) -> LinkGroup {
+        self.link_group.get()
+    }
+
+    /// Join a group, or leave it. Remembered against the watchlist rather
+    /// than the rail, so a list keeps driving the same charts when a
+    /// chartbook brings it back.
+    pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
+        self.link_group.set(group);
+        self.store.set_setting(
+            &link_setting(self.active.get()),
+            &group.number().unwrap_or(0).to_string(),
+        );
+        self.paint_link(group, colour);
+    }
+
+    /// The same, for a list that has just been shown: read what it was left
+    /// in rather than writing anything down.
+    pub fn adopt_link_group(&self, colour: impl Fn(LinkGroup) -> Option<String>) {
+        let stored = self
+            .store
+            .setting(&link_setting(self.active.get()))
+            .and_then(|v| v.parse::<u8>().ok())
+            .map(LinkGroup::numbered)
+            .unwrap_or_default();
+        self.link_group.set(stored);
+        self.paint_link(stored, colour(stored));
+    }
+
+    fn paint_link(&self, group: LinkGroup, colour: Option<String>) {
+        self.link.set_tooltip_text(Some(&match group {
+            LinkGroup::None => "Not linked — this list drives the chart you are on".to_string(),
+            other => format!("Linked · {}", other.label()),
+        }));
+        self.link.set_opacity(if group.is_linked() { 1.0 } else { 0.28 });
+        *self.link_tint.borrow_mut() = colour;
+        if let Some(icon) = self.link.child() {
+            icon.queue_draw();
+        }
+    }
+
+    /// Select a symbol the way a click does, so whatever is listening for a
+    /// pick hears about it.
+    ///
+    /// Not [`highlight`](Self::highlight), which is deliberately silent: that
+    /// one exists for the other direction, a chart moving and the rail
+    /// following, and using it here would light up a row and move nothing.
+    pub fn pick(self: &Rc<Self>, instrument: &Instrument) -> bool {
+        let Some(at) = self.row_of(instrument) else { return false };
+        let Some(row) = self.list.row_at_index(at as i32) else { return false };
+        // Selecting what is already selected emits nothing, so the pick has
+        // to be made by hand — otherwise clicking the symbol you are already
+        // on in the bar widget would do nothing at all.
+        if self.list.selected_row().as_ref() == Some(&row) {
+            (self.on_pick)(instrument.clone());
+        } else {
+            self.list.select_row(Some(&row));
+        }
+        true
+    }
+
+    fn row_of(&self, instrument: &Instrument) -> Option<usize> {
+        self.rows.borrow().iter().position(|kind| match kind {
+            RowKind::Entry { instrument: i, .. } => {
+                i.symbol == instrument.symbol && i.suffix == instrument.suffix
+            }
+            RowKind::Header { .. } => false,
+        })
+    }
+
     pub fn connect_switched(&self, on_switch: impl Fn() + 'static) {
         *self.on_switch.borrow_mut() = Some(Rc::new(on_switch));
     }
@@ -423,13 +523,7 @@ impl Watchlist {
 
     /// Highlight a symbol without loading it again.
     pub fn highlight(self: &Rc<Self>, instrument: &Instrument) {
-        let target = self.rows.borrow().iter().position(|kind| match kind {
-            RowKind::Entry { instrument: i, .. } => {
-                i.symbol == instrument.symbol && i.suffix == instrument.suffix
-            }
-            RowKind::Header { .. } => false,
-        });
-        let Some(at) = target else { return };
+        let Some(at) = self.row_of(instrument) else { return };
         let Some(row) = self.list.row_at_index(at as i32) else { return };
         self.quiet.set(true);
         self.list.select_row(Some(&row));
@@ -1247,6 +1341,16 @@ impl Watchlist {
         });
         dialog.present(Some(anchor));
     }
+}
+
+/// Where a watchlist's group is written down.
+///
+/// Against the watchlist's id rather than the rail, because the rail shows a
+/// different list from one chartbook to the next and the group belongs to the
+/// list — an energy list that drives group 3 should still drive group 3 when
+/// another book brings it back.
+fn link_setting(id: i64) -> String {
+    format!("watchlist_link_{id}")
 }
 
 /// Unpack a dragged row: which section it came from, and which entry it is.
