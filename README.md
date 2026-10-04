@@ -34,19 +34,16 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 
 ## Installing
 
-On Arch, from the AUR:
-
-```sh
-yay -S omacharts
-```
-
-Or build the package yourself from a clone:
+On Arch, build the package from a clone:
 
 ```sh
 git clone https://github.com/jorgemanrubia/omacharts
 cd omacharts/packaging/aur
 makepkg -si
 ```
+
+It is on its way to the AUR, and `yay -S omacharts` will be the shorter
+answer once it lands.
 
 That gets you the command on your path, the man page, shell completions and
 the agent skill. To run it from a working tree instead — it rebuilds on every
