@@ -410,11 +410,34 @@ pub fn stylesheet(theme: &Theme, scheme: &BarScheme) -> String {
 .subtle-link:hover { opacity: 1; }
 .subtle-link:disabled { opacity: 0.25; }
 
-/* The two offers an empty rail makes. Buttons, so the keyboard can reach
-   them, but Adwaita draws button text bold and bold is exactly wrong here:
-   they would be the two loudest things in a column that has nothing else in
-   it, which is the opposite of an invitation. */
-.rail-empty-action { font-weight: normal; }
+/* The two offers an empty rail makes. Bigger than a row on purpose: this is
+   the first thing somebody sees after making a watchlist, and it should read
+   as an invitation with some presence rather than as a caption apologising
+   for the space. Buttons, so the keyboard can reach them, but Adwaita draws
+   button text bold and bold here would shout. Only ever opacity on the text's
+   own colour, so light and dark need no separate answer. */
+.rail-empty-action {
+  font-weight: normal;
+  font-size: 1.05em;
+  opacity: 0.7;
+  padding: 10px 8px;
+  min-height: 0;
+  background: none;
+  background-image: none;
+  border: none;
+  box-shadow: none;
+  transition: opacity 120ms ease-out;
+}
+/* The sentence the block is built around, at the offers' own size so it does
+   not read as a footnote to them. */
+.rail-empty-blurb { font-size: 1.05em; }
+
+.rail-empty-action:hover,
+.rail-empty-action:focus-visible {
+  opacity: 1;
+  background: alpha(currentColor, 0.10);
+  border-radius: 8px;
+}
 
 /* Keys read as keys. */
 .keycap {

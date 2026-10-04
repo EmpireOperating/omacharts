@@ -363,7 +363,7 @@ impl Watchlist {
         actions.append(&add_symbol);
 
         let add_section = gtk::Button::from_icon_name("folder-new-symbolic");
-        add_section.set_tooltip_text(Some("New section"));
+        add_section.set_tooltip_text(Some("Add a section"));
         add_section.add_css_class("flat");
         let this = watchlist.clone();
         add_section.connect_clicked(move |button| this.prompt_new_section(button));
@@ -383,66 +383,83 @@ impl Watchlist {
     ///
     /// Common rather than rare now that there can be several watchlists:
     /// making one lands you here, so this is the first thing somebody sees
-    /// after creating one. Quiet enough to belong in a rail that hides its
-    /// own buttons until you reach for them — muted text and two links, no
-    /// card and no illustration — but not so quiet that a new watchlist looks
-    /// like a column that failed to draw.
+    /// after creating one — and what they see should be an invitation with
+    /// some presence to it, not a caption apologising for the space.
+    ///
+    /// The keys are set as keys rather than as words. A shortcut written in
+    /// running text reads as a sentence somebody has to parse; in a pill it
+    /// reads as something to press, which is the whole reason for saying it
+    /// here at all.
     fn empty_state(self: &Rc<Self>) -> gtk::Box {
         let state = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        state.set_halign(gtk::Align::Center);
-        // Above centre rather than on it: centred in a tall rail it reads as
-        // a dialog, and at the top it reads as a row that did not arrive.
         state.set_valign(gtk::Align::Center);
-        state.set_margin_bottom(72);
-        state.set_margin_start(18);
-        state.set_margin_end(18);
+        state.set_margin_start(8);
+        state.set_margin_end(8);
 
-        let title = gtk::Label::new(Some("Nothing on this watchlist yet"));
-        // Adwaita's own muted colour rather than an opacity of ours: half of
-        // a dark label on white is far quieter than half of a light one on
-        // black, and this has to read on both.
-        title.add_css_class("dim-label");
-        title.set_wrap(true);
-        title.set_justify(gtk::Justification::Center);
-        state.append(&title);
+        // What the thing is for, rather than what state it is in. Somebody
+        // who has just made their first watchlist learns nothing from being
+        // told it is empty — they can see that — and this is the one moment
+        // the app can say what to put in it and why.
+        //
+        // It names both halves of what is offered below it — symbols, and
+        // sections — which is what makes the pair of actions read as
+        // explained rather than arbitrary. It wraps rather than being cut
+        // down, because a placeholder's minimum width becomes the sidebar's
+        // minimum width and the sentence is not the part that gives way.
+        let sentence =
+            gtk::Label::new(Some("Keep the symbols you follow here, grouped into sections."));
+        sentence.add_css_class("dim-label");
+        // The block exists to carry this, so it is not the smallest thing in
+        // it: quieter than the two offers in tone, but not in size.
+        sentence.add_css_class("rail-empty-blurb");
+        sentence.set_wrap(true);
+        sentence.set_justify(gtk::Justification::Center);
+        sentence.set_margin_bottom(6);
+        state.append(&sentence);
 
-        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-        actions.set_halign(gtk::Align::Center);
-
-        let symbol = gtk::Button::with_label("Add a symbol");
-        symbol.add_css_class("flat");
-        symbol.add_css_class("subtle-link");
-        symbol.add_css_class("rail-empty-action");
+        let symbol = self.empty_action("Add a symbol", NEW_SYMBOL_ACCEL);
         let this = self.clone();
         symbol.connect_clicked(move |_| this.add_symbol());
-        actions.append(&symbol);
+        state.append(&symbol);
         *self.empty_focus.borrow_mut() = Some(symbol.clone());
 
-        let section = gtk::Button::with_label("Add a section");
-        section.add_css_class("flat");
-        section.add_css_class("subtle-link");
-        section.add_css_class("rail-empty-action");
+        let section = self.empty_action("Add a section", NEW_SECTION_ACCEL);
         let this = self.clone();
         section.connect_clicked(move |button| this.prompt_new_section(button));
-        actions.append(&section);
-        state.append(&actions);
-
-        // Somebody looking at an empty rail is exactly the person who wants
-        // to know the keys, and there is nowhere better in the app to say so.
-        if let (Some(for_symbol), Some(for_section)) =
-            (key_label(NEW_SYMBOL_ACCEL), key_label(NEW_SECTION_ACCEL))
-        {
-            let keys = gtk::Label::new(Some(&format!(
-                "{for_symbol} adds a symbol\n{for_section} adds a section"
-            )));
-            keys.add_css_class("dim-label");
-            keys.add_css_class("caption");
-            keys.set_wrap(true);
-            keys.set_justify(gtk::Justification::Center);
-            state.append(&keys);
-        }
+        state.append(&section);
 
         state
+    }
+
+    /// One of the two offers: what it does, and the key that does it.
+    ///
+    /// The key sits inside the button, so it belongs to the thing you click
+    /// and brightens with it. It wears the same pill the keyboard-shortcuts
+    /// window uses, which is the app's one way of saying "this is a key".
+    ///
+    /// The verb gives way on a narrow rail and the key never does: half a
+    /// shortcut is worse than no shortcut, and the rail can be dragged down
+    /// to a hundred and sixty pixels.
+    fn empty_action(&self, verb: &str, accel: &str) -> gtk::Button {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        row.set_halign(gtk::Align::Center);
+
+        let label = gtk::Label::new(Some(verb));
+        label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        row.append(&label);
+
+        if let Some(key) = key_label(accel) {
+            let key = gtk::Label::new(Some(&key));
+            key.add_css_class("keycap");
+            row.append(&key);
+        }
+
+        let button = gtk::Button::new();
+        button.set_child(Some(&row));
+        button.add_css_class("flat");
+        button.add_css_class("rail-empty-action");
+        button.set_hexpand(true);
+        button
     }
 
     /// Which watchlist the rail is showing.
@@ -476,10 +493,22 @@ impl Watchlist {
         self.link_group.get()
     }
 
+    /// The list already driving `group`, for a row that has to explain why it
+    /// cannot be picked. `None` means the group is free, or is this list's.
+    pub fn group_held_by(&self, group: LinkGroup) -> Option<(i64, String)> {
+        group_held_by(&self.store, group, self.active.get())
+    }
+
     /// Join a group, or leave it. Remembered against the watchlist rather
     /// than the rail, so a list keeps driving the same charts when a
     /// chartbook brings it back.
     pub fn set_link_group(&self, group: LinkGroup, colour: Option<String>) {
+        // A group drives one list. The popover disables a group another list
+        // already holds, so reaching here with one is a bug rather than a
+        // choice — refuse it instead of quietly stealing it.
+        if group_held_by(&self.store, group, self.active.get()).is_some() {
+            return;
+        }
         self.link_group.set(group);
         self.store.set_setting(
             &link_setting(self.active.get()),
@@ -491,12 +520,14 @@ impl Watchlist {
     /// The same, for a list that has just been shown: read what it was left
     /// in rather than writing anything down.
     pub fn adopt_link_group(&self, colour: impl Fn(LinkGroup) -> Option<String>) {
-        let stored = self
-            .store
-            .setting(&link_setting(self.active.get()))
-            .and_then(|v| v.parse::<u8>().ok())
-            .map(LinkGroup::numbered)
-            .unwrap_or_default();
+        let mut stored = stored_group(&self.store, self.active.get());
+        // A database written before a group could only be held once can have
+        // two lists claiming one. The first keeps it and this one comes back
+        // unlinked, written down so the same surprise does not happen twice.
+        if group_held_by(&self.store, stored, self.active.get()).is_some() {
+            stored = LinkGroup::None;
+            self.store.set_setting(&link_setting(self.active.get()), "0");
+        }
         self.link_group.set(stored);
         self.paint_link(stored, colour(stored));
     }
@@ -1392,6 +1423,9 @@ impl Watchlist {
                 return;
             }
             this.store.remove_watchlist(id);
+            // Or the group leaks: every row in the popover eventually reads
+            // as taken, by a list nobody can find.
+            this.store.set_setting(&link_setting(id), "0");
             // Whatever was being looked at has gone, and the one that is
             // always there is where there is always something to see.
             let fell_back = this.active.get() == id;
@@ -1530,6 +1564,52 @@ impl Watchlist {
     }
 }
 
+/// The group a watchlist is left in, read from the one place it is written.
+///
+/// A list with nothing written down is unlinked, except the default one,
+/// which drives group 1. Charts start in group 1 too, so out of the box the
+/// watchlist drives the charts — which is what linking did before there were
+/// groups to choose between. A default that left the two in different groups
+/// would make a fresh install less useful than the version before it.
+fn stored_group(store: &Store, watchlist: i64) -> LinkGroup {
+    match store.setting(&link_setting(watchlist)) {
+        Some(value) => value.parse::<u8>().ok().map(LinkGroup::numbered).unwrap_or_default(),
+        None if watchlist == DEFAULT_WATCHLIST => LinkGroup::numbered(1),
+        None => LinkGroup::None,
+    }
+}
+
+/// Which watchlist holds each group, as group, id and name.
+///
+/// A scan rather than an index. There are a handful of lists, and a second
+/// copy of who holds what is a second copy that can come to disagree with the
+/// first — the settings are the one source of truth and this reads them.
+///
+/// Many charts share a group, but only one list drives it: a group is the
+/// thing a list drives. Where two claim one — possible in a database written
+/// before that was enforced — the earlier in display order keeps it, so the
+/// answer does not depend on which list happened to be opened first.
+pub fn group_owners(store: &Store) -> Vec<(u8, i64, String)> {
+    let mut held: Vec<(u8, i64, String)> = Vec::new();
+    for (id, name) in store.watchlists() {
+        let Some(group) = stored_group(store, id).number() else { continue };
+        if held.iter().any(|(taken, ..)| *taken == group) {
+            continue;
+        }
+        held.push((group, id, name));
+    }
+    held
+}
+
+/// The list already driving `group`, if it is not this one.
+pub fn group_held_by(store: &Store, group: LinkGroup, besides: i64) -> Option<(i64, String)> {
+    let number = group.number()?;
+    group_owners(store)
+        .into_iter()
+        .find(|(taken, id, _)| *taken == number && *id != besides)
+        .map(|(_, id, name)| (id, name))
+}
+
 /// Where a watchlist's group is written down.
 ///
 /// Against the watchlist's id rather than the rail, because the rail shows a
@@ -1624,6 +1704,74 @@ fn popup_menu(model: &gio::Menu, over: &impl IsA<gtk::Widget>, x: f64, y: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Out of the box the watchlist drives the charts, which is what linking
+    /// did before there were groups to pick between. Charts start in group 1,
+    /// so the default list has to as well or a fresh install links nothing to
+    /// anything.
+    #[test]
+    fn the_default_watchlist_starts_driving_group_one() {
+        let store = Store::memory().unwrap();
+        assert_eq!(stored_group(&store, DEFAULT_WATCHLIST), LinkGroup::numbered(1));
+
+        // Any other list starts out of the way.
+        let scratch = store.add_watchlist("Scratch").expect("made");
+        assert_eq!(stored_group(&store, scratch), LinkGroup::None);
+    }
+
+    /// Many charts share a group; one list drives it. So a group another list
+    /// already holds is not available, and the row that says so needs to name
+    /// the list holding it.
+    #[test]
+    fn a_group_drives_one_watchlist_and_says_who_holds_it() {
+        let store = Store::memory().unwrap();
+        let scratch = store.add_watchlist("Scratch").expect("made");
+
+        // The default list holds group 1 without anything being written down.
+        assert_eq!(
+            group_held_by(&store, LinkGroup::numbered(1), scratch),
+            Some((DEFAULT_WATCHLIST, "Default".to_string())),
+        );
+        // And nothing holds group 2.
+        assert_eq!(group_held_by(&store, LinkGroup::numbered(2), scratch), None);
+        // A list never collides with itself.
+        assert_eq!(group_held_by(&store, LinkGroup::numbered(1), DEFAULT_WATCHLIST), None);
+    }
+
+    /// Deleting a list has to give its group back, or the popover fills up
+    /// with groups held by lists nobody can find.
+    #[test]
+    fn deleting_a_watchlist_frees_the_group_it_held() {
+        let store = Store::memory().unwrap();
+        let energy = store.add_watchlist("Energy").expect("made");
+        store.set_setting(&link_setting(energy), "3");
+        assert!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST).is_some());
+
+        store.remove_watchlist(energy);
+        store.set_setting(&link_setting(energy), "0");
+        assert_eq!(group_held_by(&store, LinkGroup::numbered(3), DEFAULT_WATCHLIST), None);
+    }
+
+    /// Nothing stopped two lists claiming one group until now, so a database
+    /// can already hold that. Display order decides, rather than whichever
+    /// list the window happened to open first.
+    #[test]
+    fn a_group_claimed_twice_stays_with_the_earlier_list() {
+        let store = Store::memory().unwrap();
+        let first = store.add_watchlist("Energy").expect("made");
+        let second = store.add_watchlist("Metals").expect("made");
+        store.set_setting(&link_setting(first), "4");
+        store.set_setting(&link_setting(second), "4");
+
+        let owners = group_owners(&store);
+        let holders: Vec<i64> =
+            owners.iter().filter(|(group, ..)| *group == 4).map(|(_, id, _)| *id).collect();
+        assert_eq!(holders, vec![first], "only one list may hold a group");
+        assert!(
+            group_held_by(&store, LinkGroup::numbered(4), second).is_some(),
+            "the later list is told the group is taken rather than sharing it",
+        );
+    }
 
     /// The section each row belongs to, laid out the way `rebuild` lays the
     /// rail out: every named section's title, then its symbols, with the
