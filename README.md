@@ -50,8 +50,8 @@ cargo build --release
 Omacharts is prepared to work with multiple data providers, but at launch only
 Yahoo Finance is supported.
 
-We are interested in adding more feeds, both free and commercial. If you
-want to see yours supported, please create a Pull Request.
+We are interested in adding more feeds, both free and paid. If you want to see
+yours supported, please create a Pull Request.
 
 ## From a terminal
 
