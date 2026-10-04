@@ -87,11 +87,49 @@ pub struct Noun {
 pub const SELECTOR: &str =
     "a name, case-insensitive, or `id:N` when two of them share one";
 
+/// How a chart is named on the command line.
+///
+/// Position, not identity, is the stable way to point at one. Rebuilding an
+/// arrangement hands out fresh pane ids in layout order, so an id read before
+/// a rebuild names a different chart afterwards — `pos:0` is the first chart
+/// in the arrangement whatever the ids happen to be this time round.
+pub const CHART_SELECTOR: &str =
+    "`pos:N`, counting from 0 in layout order, or a raw id from `chart list` \
+     — prefer the position, which survives the window rebuilding";
+
 const STYLES: &[&str] = &["candles", "ohlc"];
 const SESSIONS: &[&str] = &["regular", "extended"];
 const SPLITS: &[&str] = &["horizontal", "vertical"];
+const KINDS: &[&str] = &["volume", "sma", "ema", "vwap", "volume_profile", "rsi", "atr"];
+const ANCHORS: &[&str] = &["session", "week", "month", "quarter", "year"];
+const LINE_STYLES: &[&str] = &["solid", "dashed", "dotted"];
+const SWITCHES: &[&str] = &["on", "off"];
+
+/// How a colour is written on the command line.
+///
+/// Both forms, because the app itself keeps them apart: a named swatch is
+/// re-resolved every time the theme changes, and a hex is the one the user
+/// picked and is never touched again. Offering only hex would quietly opt
+/// every scripted indicator out of following the desktop's theme.
+pub const COLOUR: &str =
+    "a palette name — Blue, Amber, Violet, Teal, Rose, Green, Orange, Cyan — \
+     which follows the theme, or #rrggbb, which does not";
 
 pub const SURFACE: &[Noun] = &[
+    Noun {
+        name: "status",
+        about: "What the app has open right now",
+        verbs: &[Verb {
+            name: "show",
+            about: "The open chartbook, the focused chart, and what else is arranged around it",
+            args: &[],
+            flags: &[],
+            example: "omacharts status show --json",
+            json: true,
+            writes: false,
+            workspace: true,
+        }],
+    },
     Noun {
         name: "symbol",
         about: "Search the instrument inventory",
@@ -373,7 +411,7 @@ pub const SURFACE: &[Noun] = &[
                 args: &[Arg::req("DIRECTION", "which way to divide it").of(SPLITS)],
                 flags: &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
-                    Flag::valued("chart", "ID", "which chart (default: the focused one)"),
+                    Flag::valued("chart", "CHART", CHART_SELECTOR),
                 ],
                 example: "omacharts chart split horizontal",
                 json: true,
@@ -386,7 +424,7 @@ pub const SURFACE: &[Noun] = &[
                 args: &[],
                 flags: &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
-                    Flag::valued("chart", "ID", "which chart (default: the focused one)"),
+                    Flag::valued("chart", "CHART", CHART_SELECTOR),
                 ],
                 example: "omacharts chart close --chart 2",
                 json: true,
@@ -396,7 +434,7 @@ pub const SURFACE: &[Noun] = &[
             Verb {
                 name: "focus",
                 about: "Make a chart the one the keyboard and the menus act on",
-                args: &[Arg::req("ID", "the chart's id, from `chart list`")],
+                args: &[Arg::req("CHART", CHART_SELECTOR)],
                 flags: &[Flag::valued("book", "BOOK", "which chartbook (default: the open one)")],
                 example: "omacharts chart focus 2",
                 json: true,
@@ -409,7 +447,7 @@ pub const SURFACE: &[Noun] = &[
                 args: &[],
                 flags: &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
-                    Flag::valued("chart", "ID", "which chart (default: the focused one)"),
+                    Flag::valued("chart", "CHART", CHART_SELECTOR),
                     Flag::valued("symbol", "SYMBOL", "the instrument to chart"),
                     Flag::valued("suffix", "S", "its venue suffix, for a listing abroad"),
                     Flag::valued("resolution", "TF", "such as 5m, 1h, 1D, 1W"),
@@ -425,19 +463,45 @@ pub const SURFACE: &[Noun] = &[
             },
             Verb {
                 name: "indicator",
-                about: "Add, remove or list a chart's indicators",
+                about: "Add, remove, list or reconfigure a chart's indicators",
                 args: &[
-                    Arg::req("ACTION", "what to do").of(&["list", "add", "remove"]),
-                    Arg::opt("KIND", "the indicator, for add and remove"),
+                    Arg::req("ACTION", "what to do").of(&["list", "add", "remove", "set"]),
+                    Arg::opt("KIND", "the indicator, for add, remove and set").of(KINDS),
                 ],
                 flags: &[
                     Flag::valued("book", "BOOK", "which chartbook (default: the open one)"),
-                    Flag::valued("chart", "ID", "which chart (default: the focused one)"),
+                    Flag::valued("chart", "CHART", CHART_SELECTOR),
+                    Flag::valued("id", "N", "which one, when a chart has two of a kind"),
+                    Flag::valued("period", "N", "bars averaged: SMA, EMA, RSI, ATR"),
+                    Flag::valued("anchor", "WHEN", "what VWAP and the volume profile reset on")
+                        .of(ANCHORS),
+                    Flag::valued("rows", "N", "volume profile rows, or `auto` to follow the instrument's own increment"),
+                    Flag::valued("value-area", "F", "the share of volume the value area covers, 0-1"),
+                    Flag::valued("poc-color", "COLOUR", "the volume profile's point of control"),
+                    Flag::valued("color", "COLOUR", "the line, or the volume profile's background"),
+                    Flag::valued("width", "F", "line thickness; 0 draws no line at all"),
+                    Flag::valued("style", "STYLE", "how the line is drawn").of(LINE_STYLES),
+                    Flag::valued("height", "F", "share of the chart a pane takes: volume, RSI, ATR"),
+                    Flag::valued("overbought", "F", "the RSI level drawn across the top"),
+                    Flag::valued("oversold", "F", "the RSI level drawn across the bottom"),
+                    Flag::valued("bands", "LIST", "which VWAP bands are drawn: 1,2,3 or none"),
+                    Flag::valued("band-alpha", "F", "how solid the VWAP shading is, 0.02-0.6"),
+                    Flag::valued("visible", "BOOL", "draw it at all").of(SWITCHES),
                 ],
-                example: "omacharts chart indicator add rsi",
+                example: "omacharts chart indicator add sma --period 200 --color Amber --style dashed",
                 json: true,
                 writes: true,
                 workspace: true,
+            },
+            Verb {
+                name: "crosshair",
+                about: "Whether a pointer on one chart draws a line on the charts linked to it",
+                args: &[Arg::opt("STATE", "omit to read it").of(SWITCHES)],
+                flags: &[],
+                example: "omacharts chart crosshair off",
+                json: true,
+                writes: true,
+                workspace: false,
             },
         ],
     },
@@ -534,7 +598,8 @@ pub fn verb(noun: &str, verb: &str) -> Option<&'static Verb> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use omacharts_engine::{BarStyle, Session};
+    use omacharts_engine::indicators::LineStyle;
+    use omacharts_engine::{BarStyle, IndicatorKind, Reset, Session};
 
     #[test]
     fn the_bar_styles_on_offer_are_the_ones_that_exist() {
@@ -549,6 +614,46 @@ mod tests {
         engine.sort_unstable();
         offered.sort_unstable();
         assert_eq!(offered, engine);
+    }
+
+    #[test]
+    fn the_indicators_on_offer_are_the_ones_that_exist() {
+        let engine: Vec<&str> = IndicatorKind::ALL.iter().map(|k| k.key()).collect();
+        let mut offered = KINDS.to_vec();
+        let mut engine = engine;
+        offered.sort_unstable();
+        engine.sort_unstable();
+        assert_eq!(offered, engine);
+    }
+
+    #[test]
+    fn the_anchors_on_offer_are_the_ones_that_exist() {
+        let mut engine: Vec<&str> = Reset::ALL.iter().map(|r| r.key()).collect();
+        let mut offered = ANCHORS.to_vec();
+        offered.sort_unstable();
+        engine.sort_unstable();
+        assert_eq!(offered, engine);
+    }
+
+    /// `LineStyle` is spelled by serde rather than by a `key` method, so this
+    /// compares against what it actually serialises to.
+    #[test]
+    fn the_line_styles_on_offer_are_the_ones_that_exist() {
+        let engine: Vec<String> = LineStyle::ALL
+            .iter()
+            .map(|s| serde_json::to_string(s).unwrap().trim_matches('"').to_string())
+            .collect();
+        assert_eq!(LINE_STYLES.to_vec(), engine);
+    }
+
+    /// The help names the palette, and a name it offers that the theme does
+    /// not carry resolves to the accent — which looks like the command was
+    /// ignored rather than wrong.
+    #[test]
+    fn the_colours_the_help_names_are_the_ones_every_theme_carries() {
+        for name in omacharts_engine::theme::SWATCH_NAMES {
+            assert!(COLOUR.contains(name), "the help does not mention {name}");
+        }
     }
 
     #[test]

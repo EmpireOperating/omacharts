@@ -11,7 +11,9 @@
 
 use serde_json::{json, Value};
 
-use omacharts_engine::{BarStyle, Indicator, IndicatorKind, Session, Timeframe};
+use omacharts_engine::indicators::{LineStyle, Stroke};
+use omacharts_engine::theme::{ColorChoice, SWATCH_NAMES};
+use omacharts_engine::{BarStyle, Indicator, IndicatorKind, Reset, Session, Timeframe};
 
 use super::charts::{self, Workspace};
 use super::{parser, Fault, Live, Outcome, EXIT_USAGE};
@@ -93,7 +95,21 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("section", "delete") => section_delete(store, m, json),
         ("section", "promote") => section_promote(store, m, json),
 
-        ("chartbook", _) | ("chart", _) => charts_verb(store, noun, verb, m, json),
+        ("status", "show") => status(store, live.is_some(), json),
+        ("chart", "crosshair") => crosshair(store, m, json),
+        ("chartbook", _) | ("chart", _) => {
+            // "The one I am looking at" needs something to be looking at. The
+            // stored arrangement is what the window had when it last closed,
+            // and an agent cannot tell that from what is on screen now — so a
+            // command with no target is refused rather than answered from it.
+            if live.is_none() && !names_a_target(noun, verb, m) {
+                return Outcome::failed(Fault::no_window(match noun {
+                    "chartbook" => "open chartbook",
+                    _ => "focused chart",
+                }));
+            }
+            charts_verb(store, noun, verb, m, json)
+        }
 
         ("config", "list") => config_list(store, json),
         ("config", "get") => config_get(store, m, json),
@@ -121,6 +137,18 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
             Outcome::ok(out)
         }
     }
+}
+
+/// Did the command say which chartbook or chart it meant?
+///
+/// Verbs that take one as a required argument always have; the rest default
+/// to what is on screen, and that default only exists while something is.
+fn names_a_target(noun: &str, verb: &str, m: &clap::ArgMatches) -> bool {
+    if arg(m, "BOOK").is_some() || arg(m, "book").is_some() {
+        return true;
+    }
+    // Creating one invents its own target, and listing them all needs none.
+    matches!((noun, verb), ("chartbook", "create") | ("chartbook", "list"))
 }
 
 fn help_for(path: Option<Vec<String>>) -> Outcome {
@@ -731,7 +759,7 @@ fn chart_verb(
             format!("focused chart {id}")
         }
         "set" => return chart_set(store, m, as_json, workspace, at, pane),
-        "indicator" => return chart_indicator(m, as_json, workspace, at, pane),
+        "indicator" => return chart_indicator(store, m, as_json, workspace, at, pane),
         _ => return Err(Fault::usage(format!("no such command: chart {verb}"))),
     };
 
@@ -844,6 +872,7 @@ fn chart_set(
 }
 
 fn chart_indicator(
+    store: &Store,
     m: &clap::ArgMatches,
     as_json: bool,
     workspace: &mut Workspace,
@@ -857,32 +886,50 @@ fn chart_indicator(
         .find(|p| p["id"].as_u64() == Some(pane as u64))
         .cloned()
         .unwrap_or_else(|| json!({}));
-    let listed = chart["indicators"].as_array().cloned().unwrap_or_default();
 
     if action == "list" {
-        let names: Vec<String> = listed
+        let listed = chart["indicators"].as_array().cloned().unwrap_or_default();
+        let rows: Vec<String> = listed
             .iter()
-            .filter_map(|i| i["kind"].as_str().map(str::to_string))
+            .map(|i| {
+                json!({
+                    "id": i["id"],
+                    "kind": i["kind"],
+                    "params": i["params"],
+                    "color": i["color"],
+                    "stroke": i["stroke"],
+                    "visible": i["visible"],
+                })
+                .to_string()
+            })
             .collect();
         return match as_json {
-            true => Ok(format!("{}\n", json!({"chart": pane, "indicators": names}))),
-            false => Ok(names.join("\n") + "\n"),
+            true => Ok(format!("{{\"chart\":{pane},\"indicators\":[{}]}}\n", rows.join(","))),
+            false => Ok(listed
+                .iter()
+                .map(describe_indicator)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"),
         };
     }
 
-    let wanted = m
-        .get_one::<String>("KIND")
+    let wanted = arg(m, "KIND")
         .ok_or_else(|| Fault::usage(format!("`indicator {action}` needs an indicator to {action}")))?
         .to_lowercase();
     let kind = IndicatorKind::ALL
         .into_iter()
-        .find(|k| k.key() == wanted || k.short_name().to_lowercase() == wanted)
+        .find(|k| k.key() == wanted)
         .ok_or_else(|| {
             Fault::usage(format!(
                 "{wanted:?} is not an indicator; try {}",
                 IndicatorKind::ALL.map(|k| k.key()).join(", ")
             ))
         })?;
+
+    // Everything is read and checked before anything is written, so a command
+    // carrying one bad value leaves the chart exactly as it was.
+    let edits = Edits::read(m)?;
 
     let target = workspace.book_mut(at);
     let Some(chart) = charts::pane_mut(target, pane) else {
@@ -900,25 +947,354 @@ fn chart_indicator(
                 .max()
                 .map(|id| id as u32 + 1)
                 .unwrap_or(1);
-            let added = serde_json::to_value(Indicator::new(next, kind))
+            let mut added = serde_json::to_value(Indicator::new(next, kind))
                 .map_err(|e| Fault::new(super::EXIT_ERROR, e.to_string()))?;
+            edits.apply(&mut added, kind)?;
+            let described = describe_indicator(&added);
             indicators.push(added);
-            format!("added {} to chart {pane}", kind.short_name())
+            format!("added {described}")
         }
         "remove" => {
             let before = indicators.len();
-            indicators.retain(|i| i["kind"].as_str() != Some(kind.key()));
+            indicators.retain(|i| !is_kind(i, kind));
             if indicators.len() == before {
                 return Err(Fault::not_found(format!(
-                    "chart {pane} has no {}",
+                    "this chart has no {}",
                     kind.short_name()
                 )));
             }
-            format!("removed {} from chart {pane}", kind.short_name())
+            format!("removed {}", kind.short_name())
         }
-        other => return Err(Fault::usage(format!("{other:?} is not list, add or remove"))),
+        "set" => {
+            let wanted_id = match arg(m, "id") {
+                None => None,
+                Some(text) => Some(
+                    text.parse::<u64>()
+                        .map_err(|_| Fault::usage(format!("{text:?} is not an indicator id")))?,
+                ),
+            };
+            let matching: Vec<usize> = indicators
+                .iter()
+                .enumerate()
+                .filter(|(_, i)| is_kind(i, kind))
+                .filter(|(_, i)| wanted_id.is_none_or(|id| i["id"].as_u64() == Some(id)))
+                .map(|(at, _)| at)
+                .collect();
+            let which = match matching.as_slice() {
+                [one] => *one,
+                [] => {
+                    return Err(Fault::not_found(format!(
+                        "this chart has no {}",
+                        kind.short_name()
+                    )))
+                }
+                many => {
+                    return Err(Fault::ambiguous(format!(
+                        "this chart has {} of them; say which with --id {}",
+                        many.len(),
+                        many.iter()
+                            .filter_map(|at| indicators[*at]["id"].as_u64())
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    )))
+                }
+            };
+            if edits.is_empty() {
+                return Err(Fault::usage(
+                    "nothing to change; pass --period, --anchor, --rows, --color and so on \
+                     (see `omacharts chart indicator --help`)"
+                        .into(),
+                ));
+            }
+            edits.apply(&mut indicators[which], kind)?;
+            format!("set {}", describe_indicator(&indicators[which]))
+        }
+        other => return Err(Fault::usage(format!("{other:?} is not list, add, remove or set"))),
     };
-    said(as_json, json!({"chart": pane, "message": text}), text)
+
+    workspace.save(store);
+
+    // What it actually hit, not just that it worked. A command that named no
+    // chart has to say which one it found, or nobody can catch it reaching
+    // the wrong one.
+    let where_at = format!(
+        "{text} on {} in {:?}",
+        chart_label(workspace.book(at)?, pane),
+        workspace.name_of(at)
+    );
+    said(as_json, json!({"chart": pane, "message": where_at}), where_at)
+}
+
+/// Does this stored indicator have that kind?
+///
+/// `Params` is tagged by kind and the kind is also its own field, and a value
+/// written by an older build may carry only one of them.
+fn is_kind(stored: &Value, kind: IndicatorKind) -> bool {
+    stored["kind"].as_str() == Some(kind.key())
+        || stored["params"]["kind"].as_str() == Some(kind.key())
+}
+
+/// How a chart is named back to somebody who did not name it.
+fn chart_label(book: &Value, pane: u32) -> String {
+    let Some(found) = charts::panes(book).iter().find(|p| p["id"].as_u64() == Some(pane as u64))
+    else {
+        return format!("chart {pane}");
+    };
+    let at = charts::position_of(book, pane).map(|at| format!("pos:{at} ")).unwrap_or_default();
+    format!(
+        "{at}{} {}",
+        spell(found["symbol"].as_str().unwrap_or("?"), found["suffix"].as_str()),
+        found["timeframe"].as_str().unwrap_or("")
+    )
+}
+
+fn describe_indicator(stored: &Value) -> String {
+    let kind = stored["kind"].as_str().unwrap_or("?");
+    let mut text = IndicatorKind::ALL
+        .into_iter()
+        .find(|k| k.key() == kind)
+        .map(|k| k.short_name().to_string())
+        .unwrap_or_else(|| kind.to_string());
+    if let Some(period) = stored["params"]["period"].as_u64() {
+        text.push_str(&format!("({period})"));
+    }
+    if let Some(reset) = stored["params"]["reset"].as_str() {
+        text.push_str(&format!(" · {reset}"));
+    }
+    text
+}
+
+/// Every parameter a command offered, read and checked before one is written.
+struct Edits {
+    period: Option<u64>,
+    anchor: Option<Reset>,
+    rows: Option<Option<u64>>,
+    value_area: Option<f64>,
+    poc_color: Option<ColorChoice>,
+    color: Option<ColorChoice>,
+    width: Option<f64>,
+    style: Option<LineStyle>,
+    height: Option<f64>,
+    overbought: Option<f64>,
+    oversold: Option<f64>,
+    bands: Option<Vec<usize>>,
+    band_alpha: Option<f64>,
+    visible: Option<bool>,
+}
+
+impl Edits {
+    fn read(m: &clap::ArgMatches) -> Result<Edits, Fault> {
+        Ok(Edits {
+            period: number(m, "period")?.map(|n| n as u64),
+            anchor: match arg(m, "anchor") {
+                None => None,
+                Some(text) => Some(Reset::from_key(text).ok_or_else(|| {
+                    Fault::usage(format!("{text:?} is not an anchor; try session or week"))
+                })?),
+            },
+            rows: match arg(m, "rows") {
+                None => None,
+                Some(text) if text.eq_ignore_ascii_case("auto") => Some(None),
+                Some(text) => Some(Some(text.parse::<u64>().map_err(|_| {
+                    Fault::usage(format!("{text:?} is not a row count; use a number or `auto`"))
+                })?)),
+            },
+            value_area: fraction(m, "value-area", 0.0, 1.0)?,
+            poc_color: colour(m, "poc-color")?,
+            color: colour(m, "color")?,
+            width: number(m, "width")?,
+            style: match arg(m, "style") {
+                None => None,
+                Some(text) => Some(
+                    LineStyle::ALL
+                        .into_iter()
+                        .find(|s| serde_json::to_value(s).ok().as_ref().and_then(Value::as_str) == Some(text.as_str()))
+                        .ok_or_else(|| Fault::usage(format!("{text:?} is not a line style")))?,
+                ),
+            },
+            height: fraction(m, "height", 0.0, 1.0)?,
+            overbought: number(m, "overbought")?,
+            oversold: number(m, "oversold")?,
+            bands: match arg(m, "bands") {
+                None => None,
+                Some(text) if text.eq_ignore_ascii_case("none") => Some(Vec::new()),
+                Some(text) => Some(
+                    text.split(',')
+                        .map(|part| {
+                            part.trim().parse::<usize>().ok().filter(|n| (1..=3).contains(n)).map(|n| n - 1)
+                        })
+                        .collect::<Option<Vec<usize>>>()
+                        .ok_or_else(|| {
+                            Fault::usage(format!("{text:?} is not a band list; try 1,2 or none"))
+                        })?,
+                ),
+            },
+            band_alpha: fraction(m, "band-alpha", 0.02, 0.6)?,
+            visible: arg(m, "visible").map(|v| v == "on"),
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.period.is_none()
+            && self.anchor.is_none()
+            && self.rows.is_none()
+            && self.value_area.is_none()
+            && self.poc_color.is_none()
+            && self.color.is_none()
+            && self.width.is_none()
+            && self.style.is_none()
+            && self.height.is_none()
+            && self.overbought.is_none()
+            && self.oversold.is_none()
+            && self.bands.is_none()
+            && self.band_alpha.is_none()
+            && self.visible.is_none()
+    }
+
+    /// Write what was given, and refuse what this indicator has no use for.
+    ///
+    /// Silently ignoring `--period` on a volume profile would read as the
+    /// command having worked, which is the one thing a caller that cannot see
+    /// the screen must never be told.
+    fn apply(&self, stored: &mut Value, kind: IndicatorKind) -> Result<(), Fault> {
+        let params = &mut stored["params"];
+        let refuse = |what: &str| {
+            Fault::usage(format!("{} has no {what}", kind.short_name()))
+        };
+
+        if let Some(period) = self.period {
+            match params.get("period").is_some() {
+                true => params["period"] = json!(period.max(1)),
+                false => return Err(refuse("period")),
+            }
+        }
+        if let Some(anchor) = self.anchor {
+            match params.get("reset").is_some() {
+                true => params["reset"] = json!(anchor.key()),
+                false => return Err(refuse("anchor")),
+            }
+        }
+        if let Some(rows) = self.rows {
+            match kind == IndicatorKind::VolumeProfile {
+                true => params["rows"] = json!(rows),
+                false => return Err(refuse("rows")),
+            }
+        }
+        if let Some(share) = self.value_area {
+            match kind == IndicatorKind::VolumeProfile {
+                true => params["value_area"] = json!(share),
+                false => return Err(refuse("value area")),
+            }
+        }
+        if let Some(colour) = &self.poc_color {
+            match kind == IndicatorKind::VolumeProfile {
+                true => params["poc_color"] = to_value(colour)?,
+                false => return Err(refuse("point of control")),
+            }
+        }
+        if let Some(level) = self.overbought {
+            match params.get("overbought").is_some() {
+                true => params["overbought"] = json!(level),
+                false => return Err(refuse("overbought level")),
+            }
+        }
+        if let Some(level) = self.oversold {
+            match params.get("oversold").is_some() {
+                true => params["oversold"] = json!(level),
+                false => return Err(refuse("oversold level")),
+            }
+        }
+        if let Some(height) = self.height {
+            match params.get("height").is_some() {
+                true => params["height"] = json!(height),
+                false => return Err(refuse("pane height")),
+            }
+        }
+        if self.bands.is_some() || self.band_alpha.is_some() {
+            if kind != IndicatorKind::Vwap {
+                return Err(refuse("bands"));
+            }
+            let Some(bands) = params["bands"].as_array_mut() else {
+                return Err(refuse("bands"));
+            };
+            for (at, band) in bands.iter_mut().enumerate() {
+                if let Some(wanted) = &self.bands {
+                    band["enabled"] = json!(wanted.contains(&at));
+                }
+                if let Some(alpha) = self.band_alpha {
+                    band["fill_alpha"] = json!(alpha);
+                }
+            }
+        }
+
+        if let Some(colour) = &self.color {
+            stored["color"] = to_value(colour)?;
+        }
+        if let Some(width) = self.width {
+            stored["stroke"]["width"] = json!(width.max(0.0));
+        }
+        if let Some(style) = self.style {
+            stored["stroke"]["style"] = to_value(&style)?;
+        }
+        if stored["stroke"].is_null() {
+            stored["stroke"] = to_value(&Stroke::default())?;
+        }
+        if let Some(visible) = self.visible {
+            stored["visible"] = json!(visible);
+        }
+        Ok(())
+    }
+}
+
+fn to_value<T: serde::Serialize>(value: &T) -> Result<Value, Fault> {
+    serde_json::to_value(value).map_err(|e| Fault::new(super::EXIT_ERROR, e.to_string()))
+}
+
+fn number(m: &clap::ArgMatches, id: &str) -> Result<Option<f64>, Fault> {
+    match arg(m, id) {
+        None => Ok(None),
+        Some(text) => text
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| Fault::usage(format!("--{id} takes a number, not {text:?}"))),
+    }
+}
+
+fn fraction(m: &clap::ArgMatches, id: &str, low: f64, high: f64) -> Result<Option<f64>, Fault> {
+    match number(m, id)? {
+        None => Ok(None),
+        Some(value) if (low..=high).contains(&value) => Ok(Some(value)),
+        Some(value) => Err(Fault::usage(format!(
+            "--{id} is {value}, which is outside {low} to {high}"
+        ))),
+    }
+}
+
+/// A palette name, or a hex the theme will never touch.
+///
+/// Both, because the app keeps them apart: a swatch is re-resolved whenever
+/// the theme changes and a hex is not, so taking only hex would opt every
+/// scripted indicator out of following the desktop.
+fn colour(m: &clap::ArgMatches, id: &str) -> Result<Option<ColorChoice>, Fault> {
+    let Some(text) = arg(m, id) else { return Ok(None) };
+    if let Some(hex) = text.strip_prefix('#') {
+        let valid = matches!(hex.len(), 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+        return match valid {
+            true => Ok(Some(ColorChoice::Fixed { hex: format!("#{}", hex.to_lowercase()) })),
+            false => Err(Fault::usage(format!("{text:?} is not a colour; try #rrggbb"))),
+        };
+    }
+    SWATCH_NAMES
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(text))
+        .map(|name| Some(ColorChoice::swatch(name)))
+        .ok_or_else(|| {
+            Fault::usage(format!(
+                "{text:?} is not a palette colour; try {} — or #rrggbb for one the theme will not change",
+                SWATCH_NAMES.join(", ")
+            ))
+        })
 }
 
 fn pane_json(pane: &Value) -> String {
@@ -938,6 +1314,97 @@ fn pane_json(pane: &Value) -> String {
             .unwrap_or_default(),
     })
     .to_string()
+}
+
+// -- what is open ---------------------------------------------------------
+
+/// The live picture, in one call.
+///
+/// One command rather than `chartbook current` and `chart current`, so the
+/// answer cannot disagree with itself because something moved between two
+/// reads. Everything it names is spelled the way the other verbs accept it,
+/// so a snapshot composes into the next command without translation.
+fn status(store: &Store, window_open: bool, as_json: bool) -> Result<String, Fault> {
+    let workspace = Workspace::load(store);
+    let at = workspace.active().min(workspace.books().len().saturating_sub(1));
+    let book = workspace.books().get(at).cloned().unwrap_or_else(|| json!({}));
+    let focused = book["focused"].as_u64().unwrap_or(0) as u32;
+    let order = charts::leaves(&book["layout"]);
+    let position = order.iter().position(|id| *id == focused);
+
+    let charts_json: Vec<String> = order
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| {
+            let pane = charts::panes(&book).iter().find(|p| p["id"].as_u64() == Some(*id as u64))?;
+            Some(format!(
+                "{{\"position\":{i},\"target\":\"pos:{i}\",\"focused\":{},\"chart\":{}}}",
+                Some(*id) == Some(focused),
+                pane_json(pane)
+            ))
+        })
+        .collect();
+
+    if as_json {
+        return Ok(format!(
+            "{{\"windowOpen\":{window_open},\"chartbook\":{},\"target\":{},\"watchlist\":{},\
+             \"focusedPosition\":{},\"charts\":[{}]}}\n",
+            super::json_string(&workspace.name_of(at)),
+            super::json_string(&format!("id:{at}")),
+            book["watchlist"],
+            match position {
+                Some(at) => at.to_string(),
+                None => "null".to_string(),
+            },
+            charts_json.join(",")
+        ));
+    }
+
+    let mut out = match window_open {
+        true => String::new(),
+        false => "nothing is open; this is what was stored when the window last closed\n\n"
+            .to_string(),
+    };
+    out.push_str(&format!("chartbook  {} (id:{at})\n", workspace.name_of(at)));
+    for (i, id) in order.iter().enumerate() {
+        let Some(pane) = charts::panes(&book).iter().find(|p| p["id"].as_u64() == Some(*id as u64))
+        else {
+            continue;
+        };
+        out.push_str(&format!(
+            "{} pos:{i}  {:<10} {:<5} {}\n",
+            if *id == focused { "*" } else { " " },
+            spell(pane["symbol"].as_str().unwrap_or("?"), pane["suffix"].as_str()),
+            pane["timeframe"].as_str().unwrap_or(""),
+            match pane["linked"].as_u64().unwrap_or(0) {
+                0 => "unlinked".to_string(),
+                group => format!("link {group}"),
+            },
+        ));
+    }
+    Ok(out)
+}
+
+/// Whether a pointer on one chart draws a line on the ones linked to it.
+///
+/// One setting for the whole window rather than one per chart, which is why
+/// it reads and writes a setting rather than a pane.
+fn crosshair(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+    const KEY: &str = "sync_crosshair";
+    let Some(state) = arg(m, "STATE") else {
+        let on = store.setting_bool(KEY, true);
+        return match as_json {
+            true => Ok(format!("{}\n", json!({"crosshairSync": on}))),
+            false => Ok(format!("{}\n", if on { "on" } else { "off" })),
+        };
+    };
+    let on = state == "on";
+    store.set_setting_bool(KEY, on);
+    said(
+        as_json,
+        json!({"crosshairSync": on}),
+        format!("crosshair syncing across linked charts is {state}"),
+    )
 }
 
 // -- settings and cache ---------------------------------------------------
@@ -1177,10 +1644,10 @@ mod tests {
     fn a_chartbook_can_be_created_split_and_read_back() {
         let store = Store::memory().unwrap();
         assert_eq!(run("chartbook create Macro --symbol SPY --switch", &store).code, 0);
-        let split = run("chart split horizontal", &store);
+        let split = run("chart split horizontal --book Macro", &store);
         assert_eq!(split.code, 0, "{}", split.err);
 
-        let listed = run("chart list --json", &store);
+        let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"].as_array().unwrap().len(), 2);
     }
@@ -1189,17 +1656,17 @@ mod tests {
     fn the_last_chart_in_a_chartbook_cannot_be_closed() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --switch", &store);
-        assert_eq!(run("chart close", &store).code, super::super::EXIT_REFUSED);
+        assert_eq!(run("chart close --book Macro", &store).code, super::super::EXIT_REFUSED);
     }
 
     #[test]
     fn a_charts_symbol_and_resolution_can_be_set_together() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --switch", &store);
-        let set = run("chart set --symbol NVDA --resolution 1h --style ohlc", &store);
+        let set = run("chart set --book Macro --symbol NVDA --resolution 1h --style ohlc", &store);
         assert_eq!(set.code, 0, "{}", set.err);
 
-        let listed = run("chart list --json", &store);
+        let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"][0]["symbol"], "NVDA");
         assert_eq!(parsed["charts"][0]["resolution"], "1h");
@@ -1211,10 +1678,10 @@ mod tests {
     fn one_bad_value_leaves_the_chart_exactly_as_it_was() {
         let store = Store::memory().unwrap();
         run("chartbook create Macro --symbol SPY --switch", &store);
-        let out = run("chart set --symbol NVDA --resolution nonsense", &store);
+        let out = run("chart set --book Macro --symbol NVDA --resolution nonsense", &store);
         assert_eq!(out.code, super::super::EXIT_USAGE);
 
-        let listed = run("chart list --json", &store);
+        let listed = run("chart list --book Macro --json", &store);
         let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
         assert_eq!(parsed["charts"][0]["symbol"], "SPY", "the symbol must not have moved");
     }
@@ -1231,6 +1698,145 @@ mod tests {
         assert_eq!(out.code, 0, "{}", out.err);
         let parsed: serde_json::Value = serde_json::from_str(&out.out).unwrap();
         assert!(parsed["sections"].is_array(), "the bare form must answer with the feed");
+    }
+
+    /// The whole point of the implicit default is "the chart in front of me".
+    /// With nothing in front of anybody, answering from what was stored when
+    /// the window last closed would be indistinguishable from answering
+    /// correctly — and an agent would act on it.
+    #[test]
+    fn asking_for_the_focused_chart_with_nothing_open_says_so() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        let out = run("chart indicator add rsi", &store);
+        assert_eq!(out.code, super::super::EXIT_NO_WINDOW);
+        assert!(out.err.contains("name one, or start Omacharts"), "{}", out.err);
+    }
+
+    #[test]
+    fn an_indicator_carries_the_parameters_it_was_given() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        let out = run(
+            "chart indicator add sma --book Macro --period 200 --color Amber --style dashed --width 2",
+            &store,
+        );
+        assert_eq!(out.code, 0, "{}", out.err);
+
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let sma = &parsed["indicators"][0];
+        assert_eq!(sma["params"]["period"], 200);
+        assert_eq!(sma["color"]["name"], "Amber", "a swatch, so it follows the theme");
+        assert_eq!(sma["stroke"]["style"], "dashed");
+        assert_eq!(sma["stroke"]["width"], 2.0);
+    }
+
+    /// A hex is the colour somebody picked and is never re-resolved; a name is
+    /// the theme's and is. Both have to arrive as what they are.
+    #[test]
+    fn a_colour_is_either_the_themes_or_the_users_and_the_two_stay_apart() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        run("chart indicator add ema --book Macro --color #ff8800", &store);
+
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["indicators"][0]["color"]["hex"], "#ff8800");
+
+        let bad = run("chart indicator add rsi --book Macro --color Chartreuse", &store);
+        assert_eq!(bad.code, super::super::EXIT_USAGE);
+        assert!(bad.err.contains("Blue"), "the error has to name the palette: {}", bad.err);
+    }
+
+    #[test]
+    fn the_volume_profile_takes_auto_rows_and_its_own_two_colours() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        let out = run(
+            "chart indicator add volume_profile --book Macro --rows auto --anchor week \
+             --color Violet --poc-color Amber",
+            &store,
+        );
+        assert_eq!(out.code, 0, "{}", out.err);
+
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let vp = &parsed["indicators"][0];
+        assert!(vp["params"]["rows"].is_null(), "auto is stored as no number at all");
+        assert_eq!(vp["params"]["reset"], "week");
+        assert_eq!(vp["params"]["poc_color"]["name"], "Amber");
+    }
+
+    /// Quietly ignoring a parameter the indicator has no use for would read
+    /// as the command having worked.
+    #[test]
+    fn a_parameter_an_indicator_has_no_use_for_is_refused() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        let out = run("chart indicator add volume --book Macro --period 50", &store);
+        assert_eq!(out.code, super::super::EXIT_USAGE);
+        assert!(out.err.contains("no period"), "{}", out.err);
+    }
+
+    #[test]
+    fn an_indicator_already_on_a_chart_can_be_reconfigured() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        run("chart indicator add rsi --book Macro", &store);
+        let out = run("chart indicator set rsi --book Macro --period 21 --overbought 80", &store);
+        assert_eq!(out.code, 0, "{}", out.err);
+
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        assert_eq!(parsed["indicators"][0]["params"]["period"], 21);
+        assert_eq!(parsed["indicators"][0]["params"]["overbought"], 80.0);
+    }
+
+    #[test]
+    fn vwap_bands_can_be_turned_on_and_shaded() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --switch", &store);
+        run("chart indicator add vwap --book Macro --anchor month --bands 1,2 --band-alpha 0.3", &store);
+
+        let listed = run("chart indicator list --book Macro --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&listed.out).unwrap();
+        let bands = parsed["indicators"][0]["params"]["bands"].as_array().unwrap();
+        assert_eq!(bands[0]["enabled"], true);
+        assert_eq!(bands[1]["enabled"], true);
+        assert_eq!(bands[2]["enabled"], false);
+        assert_eq!(bands[0]["fill_alpha"], 0.3);
+    }
+
+    /// A command that resolved its own target has to say which one it found,
+    /// or nobody can catch it reaching the wrong chart.
+    #[test]
+    fn a_command_names_the_chart_it_acted_on() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        let out = run("chart indicator add rsi --book Macro", &store);
+        assert!(out.out.contains("AAPL"), "{}", out.out);
+        assert!(out.out.contains("Macro"), "{}", out.out);
+    }
+
+    #[test]
+    fn status_says_whether_anything_is_actually_open() {
+        let store = Store::memory().unwrap();
+        run("chartbook create Macro --symbol AAPL --switch", &store);
+        let out = run("status show --json", &store);
+        let parsed: serde_json::Value = serde_json::from_str(&out.out).unwrap();
+        assert_eq!(parsed["windowOpen"], false, "nothing is running in a test");
+        assert_eq!(parsed["chartbook"], "Macro");
+        assert_eq!(parsed["charts"][0]["target"], "pos:0", "spelled as the other verbs take it");
+    }
+
+    #[test]
+    fn crosshair_syncing_can_be_read_and_set() {
+        let store = Store::memory().unwrap();
+        assert_eq!(run("chart crosshair off", &store).code, 0);
+        assert_eq!(run("chart crosshair", &store).out.trim(), "off");
+        assert_eq!(run("chart crosshair on", &store).code, 0);
+        assert_eq!(run("chart crosshair", &store).out.trim(), "on");
     }
 
     #[test]

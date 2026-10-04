@@ -46,6 +46,10 @@ pub const EXIT_AMBIGUOUS: u8 = 4;
 /// Understood, and refused: deleting the last chartbook, or the one
 /// watchlist that cannot be deleted.
 pub const EXIT_REFUSED: u8 = 5;
+/// The command meant "the chart I am looking at", and nothing is open to be
+/// looking at. Its own code because the fix is different from every other
+/// failure: start the app, or name a chart.
+pub const EXIT_NO_WINDOW: u8 = 6;
 
 pub const EXIT_CODES: &[(u8, &str)] = &[
     (EXIT_OK, "the command did what it says"),
@@ -54,6 +58,7 @@ pub const EXIT_CODES: &[(u8, &str)] = &[
     (EXIT_NOT_FOUND, "what was named does not exist"),
     (EXIT_AMBIGUOUS, "the name fits more than one thing; say which with id:N"),
     (EXIT_REFUSED, "understood, and refused"),
+    (EXIT_NO_WINDOW, "the command meant the chart you are looking at, and no window is open"),
 ];
 
 /// A command that could not be carried out, and why.
@@ -78,6 +83,20 @@ impl Fault {
     }
     pub fn refused(message: String) -> Fault {
         Fault { code: EXIT_REFUSED, message }
+    }
+    /// Nothing is open, so there is no "the one I am looking at".
+    ///
+    /// Never answered from what was stored when the window last closed: an
+    /// agent cannot tell last week's arrangement from this one, and would act
+    /// on it.
+    pub fn no_window(what: &str) -> Fault {
+        Fault {
+            code: EXIT_NO_WINDOW,
+            message: format!(
+                "no window is open, so there is no {what} to act on; \
+                 name one, or start Omacharts"
+            ),
+        }
     }
 }
 

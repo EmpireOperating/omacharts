@@ -40,6 +40,28 @@ exists because something had to have a number, it is out. Note that splitting
 a chart is firmly in and the *ratio* of the split is out — building a two-by-
 two of particular symbols is worth scripting; nudging a divider to 47% is not.
 
+## Commands act on what you are looking at
+
+Every chart and chartbook verb defaults to the focused chart in the open
+chartbook. That is what makes "add an RSI to this" work in one command rather
+than a `status` call, a parse, and an identifier threaded into a second one —
+and an agent that has to guess an identifier will eventually guess wrong.
+
+Two rules keep that honest, and a new verb has to follow both:
+
+- **Say what it acted on.** With an implicit target, naming the chart in the
+  output is the only way anyone catches it reaching the wrong one. "added
+  SMA(200) on pos:0 AAPL 1D in Macro", not "ok".
+- **Refuse rather than fall back.** No window open means no focused chart.
+  That is `EXIT_NO_WINDOW`, with its own message, never an answer taken from
+  what was stored when the window last closed — an agent cannot tell stale
+  from live and will act on it.
+
+A chart is named back as `pos:N`, its position in the arrangement, not its id.
+`materialise_book` hands out fresh pane ids every time it rebuilds, so an id is
+only good until the next rebuild. Positions survive. Anything that reports a
+chart, or remembers one across a rebuild, has to use the position.
+
 ## Where the surface is defined
 
 `src/cli/spec.rs`, and nowhere else. One table describes every command, and

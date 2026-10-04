@@ -155,28 +155,51 @@ pub fn panes(book: &Value) -> &[Value] {
 }
 
 /// Which chart a command acts on: the one named, or the focused one.
+///
+/// `pos:N` counts along the arrangement in layout order and is the form worth
+/// using. Rebuilding a chartbook hands out fresh pane ids, so an id read
+/// before one names a different chart afterwards; a position names the same
+/// place on the screen either way.
 pub fn resolve_pane(book: &Value, wanted: Option<&str>) -> Result<u32, Fault> {
+    let order = leaves(&book["layout"]);
     let ids: Vec<u32> = panes(book).iter().filter_map(|p| p["id"].as_u64()).map(|i| i as u32).collect();
-    match wanted {
-        None => book["focused"]
+    let Some(text) = wanted else {
+        return book["focused"]
             .as_u64()
             .map(|id| id as u32)
             .filter(|id| ids.contains(id))
-            .or_else(|| ids.first().copied())
-            .ok_or_else(|| Fault::new(EXIT_NOT_FOUND, "this chartbook has no charts".to_string())),
-        Some(text) => {
-            let id: u32 = text
-                .parse()
-                .map_err(|_| Fault::usage(format!("{text:?} is not a chart id")))?;
-            match ids.contains(&id) {
-                true => Ok(id),
-                false => Err(Fault::new(
-                    EXIT_NOT_FOUND,
-                    format!("this chartbook has no chart {id}; try `omacharts chart list`"),
-                )),
-            }
-        }
+            .or_else(|| order.first().copied())
+            .ok_or_else(|| Fault::new(EXIT_NOT_FOUND, "this chartbook has no charts".to_string()));
+    };
+    if let Some(rest) = text.strip_prefix("pos:") {
+        let at: usize = rest
+            .parse()
+            .map_err(|_| Fault::usage(format!("{text:?} is not a position")))?;
+        return order.get(at).copied().ok_or_else(|| {
+            Fault::new(
+                EXIT_NOT_FOUND,
+                format!(
+                    "this chartbook has {} charts, so there is no pos:{at}",
+                    order.len()
+                ),
+            )
+        });
     }
+    let id: u32 = text
+        .parse()
+        .map_err(|_| Fault::usage(format!("{text:?} is not a chart; use pos:N or an id")))?;
+    match ids.contains(&id) {
+        true => Ok(id),
+        false => Err(Fault::new(
+            EXIT_NOT_FOUND,
+            format!("this chartbook has no chart {id}; try `omacharts chart list`"),
+        )),
+    }
+}
+
+/// Where a chart sits in the arrangement, which is how it is named back.
+pub fn position_of(book: &Value, id: u32) -> Option<usize> {
+    leaves(&book["layout"]).iter().position(|leaf| *leaf == id)
 }
 
 pub fn pane_mut(book: &mut Value, id: u32) -> Option<&mut Value> {
@@ -333,6 +356,24 @@ mod tests {
             }),
         };
         assert_eq!(workspace.next_pane(), 8);
+    }
+
+    /// Ids are handed out afresh every time an arrangement is rebuilt, so the
+    /// only thing that still names the same chart afterwards is where it sits.
+    #[test]
+    fn a_chart_is_named_by_where_it_sits_as_well_as_by_its_id() {
+        let tree = split_leaf(&json!({"leaf": 4}), 4, 9, true);
+        let book = json!({
+            "layout": tree,
+            "focused": 9,
+            "panes": [new_pane(4, "SPY", None), new_pane(9, "QQQ", None)],
+        });
+        assert_eq!(resolve_pane(&book, Some("pos:0")).unwrap(), 4);
+        assert_eq!(resolve_pane(&book, Some("pos:1")).unwrap(), 9);
+        assert_eq!(resolve_pane(&book, Some("9")).unwrap(), 9);
+        assert_eq!(resolve_pane(&book, None).unwrap(), 9, "no target means the focused one");
+        assert_eq!(position_of(&book, 9), Some(1));
+        assert_eq!(resolve_pane(&book, Some("pos:7")).unwrap_err().code, EXIT_NOT_FOUND);
     }
 
     #[test]
