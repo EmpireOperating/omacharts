@@ -2714,10 +2714,10 @@ impl Window {
                         return glib::Propagation::Stop;
                     }
                     let how = match key {
-                        Key::Left => pane::Resize::Narrower,
-                        Key::Right => pane::Resize::Wider,
-                        Key::Up => pane::Resize::Shorter,
-                        _ => pane::Resize::Taller,
+                        Key::Left => pane::Resize::Left,
+                        Key::Right => pane::Resize::Right,
+                        Key::Up => pane::Resize::Up,
+                        _ => pane::Resize::Down,
                     };
                     if !this.resize_focused(how) {
                         return glib::Propagation::Proceed;

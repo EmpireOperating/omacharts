@@ -536,24 +536,23 @@ const RESIZE_STEP: f64 = 0.02;
 /// other.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resize {
-    Wider,
-    Narrower,
-    Taller,
-    Shorter,
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 impl Resize {
     /// Whether it is a left-right divider that has to move.
     fn horizontal(self) -> bool {
-        matches!(self, Resize::Wider | Resize::Narrower)
+        matches!(self, Resize::Left | Resize::Right)
     }
 
-    /// How far the divider goes, signed the way it is for a chart sitting in
-    /// the first half of its split.
+    /// How far the divider goes, and which way.
     fn delta(self) -> f64 {
         match self {
-            Resize::Wider | Resize::Taller => RESIZE_STEP,
-            Resize::Narrower | Resize::Shorter => -RESIZE_STEP,
+            Resize::Right | Resize::Down => RESIZE_STEP,
+            Resize::Left | Resize::Up => -RESIZE_STEP,
         }
     }
 }
@@ -667,12 +666,15 @@ impl Node {
             }
             node = if *half { first } else { second };
         }
-        let (divider, ratio, first_half) = found?;
-        // A chart in the second half grows by the divider coming towards it,
-        // so the same key moves the ratio the other way. Getting this backwards
-        // is invisible in a test that only ever resizes the left-hand pane.
-        let towards = if first_half { 1.0 } else { -1.0 };
-        Some((divider, (ratio + how.delta() * towards).clamp(DIVIDER_MIN, DIVIDER_MAX)))
+        let (divider, ratio, _) = found?;
+        // The arrow moves the boundary, not the chart. A chart in the second
+        // half therefore shrinks when the key points away from it, which is
+        // what every tiling window manager does and what the key looks like it
+        // should do — growing whichever chart has the focus means the same
+        // arrow moves the divider opposite ways depending on which side you
+        // happen to be sitting on, and in the bottom-right pane of a four-way
+        // split all four keys then feel backwards.
+        Some((divider, (ratio + how.delta()).clamp(DIVIDER_MIN, DIVIDER_MAX)))
     }
 
     /// Point every leaf at its new id, in one pass.
@@ -897,66 +899,64 @@ mod tests {
         assert_eq!(layout.leaves(), vec![1, 3, 2, 4]);
     }
 
-    /// Both panes of a split answer "wider" by growing, which means the one
-    /// divider between them moves opposite ways depending on which side asked.
-    /// Resizing only the left-hand pane in a test would pass either way.
+    /// The key moves the boundary, so it moves the same way whichever side of
+    /// it asked. Which chart grows is then a consequence of where you were
+    /// sitting, and never a surprise about which way the key points.
     #[test]
-    fn a_chart_in_either_half_of_a_split_grows_when_it_is_asked_to() {
+    fn a_divider_goes_the_way_the_key_points_from_either_side_of_it() {
         let layout = Node::leaf(1).split(1, 2, true);
 
-        let (divider, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        let (divider, ratio) = layout.resize(1, Resize::Right).unwrap();
         assert_eq!(divider, Vec::<bool>::new());
-        assert!((ratio - 0.52).abs() < 1e-9, "the left pane grows rightwards: {ratio}");
+        assert!((ratio - 0.52).abs() < 1e-9, "the left pane gains: {ratio}");
 
-        let (divider, ratio) = layout.resize(2, Resize::Wider).unwrap();
+        let (divider, ratio) = layout.resize(2, Resize::Right).unwrap();
         assert_eq!(divider, Vec::<bool>::new());
-        assert!((ratio - 0.48).abs() < 1e-9, "the right pane grows leftwards: {ratio}");
+        assert!((ratio - 0.52).abs() < 1e-9, "same divider, same way: {ratio}");
 
-        // And narrower is the same divider the other way round again.
-        let (_, ratio) = layout.resize(1, Resize::Narrower).unwrap();
+        let (_, ratio) = layout.resize(1, Resize::Left).unwrap();
         assert!((ratio - 0.48).abs() < 1e-9, "{ratio}");
-        let (_, ratio) = layout.resize(2, Resize::Narrower).unwrap();
-        assert!((ratio - 0.52).abs() < 1e-9, "{ratio}");
+        let (_, ratio) = layout.resize(2, Resize::Left).unwrap();
+        assert!((ratio - 0.48).abs() < 1e-9, "{ratio}");
     }
 
     /// Two columns, each divided: every pane has a column divider and a row
-    /// divider over it, and the nearer of the two is the row. Pressing for a
-    /// wider chart has to reach past it to the column divider at the root.
+    /// divider over it, and the nearer of the two is the row. Pressing
+    /// sideways has to reach past it to the column divider at the root.
     #[test]
     fn a_two_by_two_resizes_on_the_divider_of_the_orientation_asked_for() {
         let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
 
         // Top left: the root divider across, its own column's divider down.
-        assert_eq!(layout.resize(1, Resize::Wider), Some((vec![], 0.52)));
-        assert_eq!(layout.resize(1, Resize::Taller), Some((vec![true], 0.52)));
+        assert_eq!(layout.resize(1, Resize::Right), Some((vec![], 0.52)));
+        assert_eq!(layout.resize(1, Resize::Down), Some((vec![true], 0.52)));
 
-        // Bottom right, in the second half of both: the same two dividers, and
-        // both of them coming towards it.
-        assert_eq!(layout.resize(4, Resize::Wider), Some((vec![], 0.48)));
-        assert_eq!(layout.resize(4, Resize::Taller), Some((vec![false], 0.48)));
+        // Bottom right reaches the same two orientations on different
+        // dividers — the root across, its own column's down.
+        assert_eq!(layout.resize(4, Resize::Right), Some((vec![], 0.52)));
+        assert_eq!(layout.resize(4, Resize::Down), Some((vec![false], 0.52)));
 
-        // Bottom left is in the first half across and the second half down, so
-        // the two keys disagree about which way their divider goes.
-        assert_eq!(layout.resize(3, Resize::Wider), Some((vec![], 0.52)));
-        assert_eq!(layout.resize(3, Resize::Taller), Some((vec![true], 0.48)));
+        // And every one of them answers the key, not the pane's side of it.
+        assert_eq!(layout.resize(3, Resize::Right), Some((vec![], 0.52)));
+        assert_eq!(layout.resize(3, Resize::Up), Some((vec![true], 0.48)));
     }
 
     /// Nothing to move is a key that does nothing. There is no divider that
     /// way, and no other divider that would be the right answer instead.
     #[test]
     fn a_chart_with_no_divider_that_way_does_not_resize() {
-        assert_eq!(Node::leaf(1).resize(1, Resize::Wider), None);
-        assert_eq!(Node::leaf(1).resize(1, Resize::Taller), None);
+        assert_eq!(Node::leaf(1).resize(1, Resize::Right), None);
+        assert_eq!(Node::leaf(1).resize(1, Resize::Down), None);
 
         let column = Node::leaf(1).split(1, 2, false);
-        assert_eq!(column.resize(1, Resize::Wider), None, "a column has no width to give");
-        assert!(column.resize(1, Resize::Shorter).is_some());
+        assert_eq!(column.resize(1, Resize::Right), None, "a column has no width to give");
+        assert!(column.resize(1, Resize::Up).is_some());
 
         let row = Node::leaf(1).split(1, 2, true);
-        assert_eq!(row.resize(2, Resize::Taller), None, "a row has no height to give");
+        assert_eq!(row.resize(2, Resize::Down), None, "a row has no height to give");
 
         // And a pane that is not in this arrangement at all.
-        assert_eq!(row.resize(9, Resize::Wider), None);
+        assert_eq!(row.resize(9, Resize::Right), None);
     }
 
     /// Held down, a resize key arrives at the end of its travel and stops
@@ -964,16 +964,16 @@ mod tests {
     #[test]
     fn a_nudged_divider_stops_where_a_dragged_one_does() {
         let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 0.94);
-        let (divider, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        let (divider, ratio) = layout.resize(1, Resize::Right).unwrap();
         assert!((ratio - DIVIDER_MAX).abs() < 1e-9, "{ratio}");
 
         // Twice more and it is still there rather than off the end.
         let layout = layout.with_ratio(&divider, ratio);
-        let (_, ratio) = layout.resize(1, Resize::Wider).unwrap();
+        let (_, ratio) = layout.resize(1, Resize::Right).unwrap();
         assert!((ratio - DIVIDER_MAX).abs() < 1e-9, "{ratio}");
 
         let layout = Node::leaf(1).split(1, 2, true).with_ratio(&[], 0.06);
-        let (_, ratio) = layout.resize(1, Resize::Narrower).unwrap();
+        let (_, ratio) = layout.resize(1, Resize::Left).unwrap();
         assert!((ratio - DIVIDER_MIN).abs() < 1e-9, "{ratio}");
     }
 
@@ -988,13 +988,13 @@ mod tests {
             .with_ratio(&[true], 0.3)
             .with_ratio(&[false], 0.7);
 
-        let (divider, ratio) = layout.resize(3, Resize::Taller).unwrap();
+        let (divider, ratio) = layout.resize(3, Resize::Down).unwrap();
         let resized = layout.with_ratio(&divider, ratio);
 
         let Node::Split { ratio: across, first, second, .. } = &resized else { panic!() };
         assert!((across - 0.5).abs() < 1e-9, "the columns did not move: {across}");
         let Node::Split { ratio: left, .. } = &**first else { panic!() };
-        assert!((left - 0.28).abs() < 1e-9, "the left column's divider rose: {left}");
+        assert!((left - 0.32).abs() < 1e-9, "the left column's divider went down: {left}");
         let Node::Split { ratio: right, .. } = &**second else { panic!() };
         assert!((right - 0.7).abs() < 1e-9, "the right column did not move: {right}");
     }
