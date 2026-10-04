@@ -321,20 +321,6 @@ struct StoredPane {
     linked: bool,
 }
 
-/// Point a leaf at a different pane id, leaving the shape alone.
-fn rename_leaf(node: &Node, from: u32, to: u32) -> Node {
-    match node {
-        Node::Leaf(id) if *id == from => Node::Leaf(to),
-        Node::Leaf(id) => Node::Leaf(*id),
-        Node::Split { horizontal, ratio, first, second } => Node::Split {
-            horizontal: *horizontal,
-            ratio: *ratio,
-            first: Box::new(rename_leaf(first, from, to)),
-            second: Box::new(rename_leaf(second, from, to)),
-        },
-    }
-}
-
 /// One arrangement of charts, saved under a name.
 ///
 /// A chartbook is the unit you switch between: a tree, the charts in it, and
@@ -1236,7 +1222,12 @@ impl Window {
         if book.panes.is_empty() {
             return false;
         }
-        let wanted = book.layout.leaves();
+        // A build before this one wrote arrangements whose every quadrant named
+        // the same pane, so a stored tree is not trusted to be one. Repeated
+        // leaves come out before anything is built from them, which turns an
+        // unmountable grid back into the chart it actually described.
+        let Some(book_layout) = book.layout.deduped() else { return false };
+        let wanted = book_layout.leaves();
         if wanted.is_empty() || wanted.iter().any(|id| !book.panes.iter().any(|p| p.id == *id)) {
             return false;
         }
@@ -1264,16 +1255,19 @@ impl Window {
         // Ids are handed out afresh in layout order, so the tree is rewritten
         // to match rather than trusting ids from another run to still be free.
         // The counter is never wound back, because the books that are not on
-        // screen still name panes by the ids they were built with.
-        let mut layout = book.layout.clone();
+        // screen still name panes by the ids they were built with — which is
+        // exactly why the whole tree is relabelled at once. The new ids overlap
+        // the stored ones, so renaming them one at a time would rename leaves
+        // an earlier step had just written.
+        let ids: HashMap<u32, u32> =
+            restored.iter().map(|(pane, stored)| (stored.id, pane.id)).collect();
         let mut focused = restored.first().map(|(pane, _)| pane.id).unwrap_or(1);
         for (pane, stored) in &restored {
-            layout = rename_leaf(&layout, stored.id, pane.id);
             if stored.id == book.focused {
                 focused = pane.id;
             }
         }
-        *self.layout.borrow_mut() = layout;
+        *self.layout.borrow_mut() = book_layout.relabel(&ids);
         self.focused.set(focused);
         self.rebuild_layout();
 

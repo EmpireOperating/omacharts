@@ -10,6 +10,7 @@
 //! focused.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use gtk::prelude::*;
@@ -514,6 +515,56 @@ impl Node {
         }
     }
 
+    /// Point every leaf at its new id, in one pass.
+    ///
+    /// One pass is the whole point. Renaming one id at a time looks equivalent
+    /// and is not: once the ids being handed out overlap the ids already in the
+    /// tree, each rename can catch a leaf an earlier rename just wrote, and the
+    /// renames chase each other down the tree. 1→2 then 2→3 then 3→4 leaves
+    /// three different panes all called 4, and an arrangement whose every
+    /// quadrant names one chart is an arrangement that cannot be drawn.
+    pub fn relabel(&self, ids: &HashMap<u32, u32>) -> Node {
+        match self {
+            Node::Leaf(id) => Node::Leaf(ids.get(id).copied().unwrap_or(*id)),
+            Node::Split { horizontal, ratio, first, second } => Node::Split {
+                horizontal: *horizontal,
+                ratio: *ratio,
+                first: Box::new(first.relabel(ids)),
+                second: Box::new(second.relabel(ids)),
+            },
+        }
+    }
+
+    /// The same arrangement with any leaf that appears twice taken out, the
+    /// first of each kept where it is.
+    ///
+    /// `None` when nothing is left, which cannot happen for a tree that has a
+    /// leaf at all. A pane can only be in one place, so a repeated leaf is not
+    /// a layout with an odd shape — it is a layout that was written down
+    /// wrongly, and mounting it would put one chart's widget into two parents
+    /// and silently lose whichever came second.
+    pub fn deduped(&self) -> Option<Node> {
+        self.pruned(&mut HashSet::new())
+    }
+
+    fn pruned(&self, seen: &mut HashSet<u32>) -> Option<Node> {
+        match self {
+            Node::Leaf(id) => seen.insert(*id).then_some(Node::Leaf(*id)),
+            Node::Split { horizontal, ratio, first, second } => {
+                match (first.pruned(seen), second.pruned(seen)) {
+                    (Some(a), Some(b)) => Some(Node::Split {
+                        horizontal: *horizontal,
+                        ratio: *ratio,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
     /// Every pane, left to right and top to bottom — which is the order the
     /// keyboard walks them in.
     pub fn leaves(&self) -> Vec<u32> {
@@ -593,6 +644,52 @@ mod tests {
         let Node::Split { first, second, .. } = &left else { panic!("{left:?}") };
         assert_eq!(**first, Node::Leaf(1));
         assert!(matches!(**second, Node::Split { .. }));
+    }
+
+    /// The arrangement this bug destroyed: four panes in two columns, restored
+    /// into ids that overlap the ones it was saved with.
+    ///
+    /// Renaming one id at a time turned all four leaves into the same pane —
+    /// 1→2 caught the leaf already called 2, which 2→3 then caught again — and
+    /// a window cannot draw one chart in four places, so three quarters of it
+    /// came back empty.
+    #[test]
+    fn relabelling_into_ids_that_overlap_the_old_ones_keeps_the_panes_apart() {
+        let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
+        let ids = HashMap::from([(1, 2), (2, 3), (3, 4), (4, 5)]);
+
+        let moved = layout.relabel(&ids);
+        assert_eq!(moved.leaves(), vec![2, 4, 3, 5], "every pane keeps its own id");
+
+        // And the shape is the one that was saved: two columns, each divided.
+        let Node::Split { horizontal, first, second, .. } = &moved else { panic!("{moved:?}") };
+        assert!(*horizontal);
+        assert!(matches!(**first, Node::Split { horizontal: false, .. }));
+        assert!(matches!(**second, Node::Split { horizontal: false, .. }));
+    }
+
+    #[test]
+    fn relabelling_leaves_an_id_nobody_renamed_where_it_was() {
+        let layout = Node::leaf(1).split(1, 2, true);
+        let moved = layout.relabel(&HashMap::from([(2, 9)]));
+        assert_eq!(moved.leaves(), vec![1, 9]);
+    }
+
+    /// A pane can only be in one place, so a tree naming one twice was written
+    /// down wrongly. Mounting it would put a single chart's widget into two
+    /// parents, and GTK would refuse the second and leave a hole.
+    #[test]
+    fn a_pane_named_twice_is_kept_only_where_it_first_appears() {
+        let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
+        let collapsed = layout.relabel(&HashMap::from([(1, 7), (2, 7), (3, 7), (4, 7)]));
+        assert_eq!(collapsed.leaves(), vec![7, 7, 7, 7], "the shape this used to produce");
+        assert_eq!(collapsed.deduped(), Some(Node::Leaf(7)));
+    }
+
+    #[test]
+    fn deduping_a_tree_that_names_each_pane_once_changes_nothing() {
+        let layout = Node::leaf(1).split(1, 2, true).split(1, 3, false).split(2, 4, false);
+        assert_eq!(layout.deduped(), Some(layout.clone()));
     }
 
     /// A dragged divider is part of the arrangement, and has to survive both
