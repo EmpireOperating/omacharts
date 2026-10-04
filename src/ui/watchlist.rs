@@ -15,7 +15,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
-use omacharts_engine::{Instrument, LinkGroup};
+use omacharts_engine::{FetchFailure, Instrument, LinkGroup};
 
 use crate::store::{Entry, Section, Store, DEFAULT_WATCHLIST};
 use crate::ui::search::SymbolSearch;
@@ -205,6 +205,8 @@ pub struct Watchlist {
     pub widget: gtk::Box,
     list: gtk::ListBox,
     header: gtk::Box,
+    /// Why the prices are dashes, shown only while they are.
+    trouble: gtk::Label,
     store: Rc<Store>,
     index: crate::inventory::Inventory,
     quote: QuoteLookup,
@@ -317,10 +319,27 @@ impl Watchlist {
         band.set_child(Some(&header));
         band.add_overlay(&named);
 
+        // A column of dashes with no explanation is the same failure as an
+        // empty chart, in a quieter voice — so the rail says why, directly
+        // above the first price it is missing rather than at the bottom where
+        // a short list would leave it far from them. Hidden entirely when
+        // there is nothing wrong, so it costs no height at all.
+        let trouble = gtk::Label::new(None);
+        trouble.add_css_class("caption");
+        trouble.add_css_class("dim-label");
+        trouble.set_wrap(true);
+        trouble.set_xalign(0.0);
+        trouble.set_margin_start(12);
+        trouble.set_margin_end(10);
+        trouble.set_margin_top(6);
+        trouble.set_margin_bottom(2);
+        trouble.set_visible(false);
+
         let widget = gtk::Box::new(gtk::Orientation::Vertical, 0);
         widget.set_size_request(248, -1);
         widget.append(&band);
         widget.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        widget.append(&trouble);
         widget.append(&scroller);
 
         let columns = parse_columns(store.setting(SETTING_COLUMNS).as_deref());
@@ -337,6 +356,7 @@ impl Watchlist {
             widget,
             list,
             header,
+            trouble,
             store,
             index,
             quote,
@@ -1179,6 +1199,36 @@ impl Watchlist {
         self.wire_row_removal(&row, section_id, entry);
         self.wire_row_reorder(&row, section_id, entry);
         (row, cells)
+    }
+
+    /// Say why the rail has no prices, or `None` once a fetch works.
+    ///
+    /// The rail draws nothing but the cache, so a provider it cannot reach
+    /// reaches a person here as a column of dashes and no reason — which
+    /// reads as a watchlist of symbols this app does not carry. One line,
+    /// the same words the chart uses, and gone the moment prices arrive.
+    pub fn set_trouble(&self, trouble: Option<FetchFailure>) {
+        // Only while something is actually missing. A rail whose prices are
+        // all cached has nothing unexplained on it, and a line sitting over a
+        // full column of numbers saying they will fill in shortly is noise
+        // about a refresh nobody asked to be told about. The chart's own
+        // corner marker is what covers that case.
+        let show = trouble.filter(|_| self.has_a_missing_price());
+        match show {
+            Some(trouble) => {
+                self.trouble.set_text(trouble.message());
+                self.trouble.set_visible(true);
+            }
+            None => self.trouble.set_visible(false),
+        }
+    }
+
+    /// Is any symbol on screen still showing a dash?
+    fn has_a_missing_price(&self) -> bool {
+        self.rows.borrow().iter().any(|kind| match kind {
+            RowKind::Entry { instrument, .. } => (self.quote)(instrument).is_none(),
+            RowKind::Header { .. } => false,
+        })
     }
 
     /// Write new numbers into the rows that are already there.

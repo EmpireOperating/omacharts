@@ -22,7 +22,7 @@ pub use bars::{
 };
 pub use indicators::{palette_colors, Indicator, Kind as IndicatorKind, Output, Params, Reset};
 pub use link::LinkGroup;
-pub use provider::{Capability, Provider, ProviderError};
+pub use provider::{Capability, FetchFailure, Provider, ProviderError};
 pub use session::Session;
 pub use symbols::{Instrument, InstrumentKind, SearchHit, SearchIndex};
 pub use frame::Frame;

@@ -17,7 +17,7 @@ use gtk::cairo;
 use gtk::prelude::*;
 use omacharts_engine::indicators::{self as indicators, vwap, Output, Profile};
 use omacharts_engine::{
-    Bar, BarScheme, BarStyle, Direction, Indicator, Instrument, Theme, Timeframe,
+    Bar, BarScheme, BarStyle, Direction, FetchFailure, Indicator, Instrument, Theme, Timeframe,
 };
 
 use crate::ui::colors;
@@ -103,7 +103,14 @@ struct State {
     indicators: Vec<Drawn>,
     bar_style: BarStyle,
     show_grid: bool,
-    stale: bool,
+    /// Why the last fetch for this chart came back with nothing, if it did.
+    ///
+    /// One piece of state for both of the things that used to be separate —
+    /// the corner marker on a chart that has bars, and the line in the middle
+    /// of one that has none. They were the same thought said twice, and only
+    /// the marker could ever be reached, because a chart with no bars returns
+    /// before it is drawn.
+    trouble: Option<FetchFailure>,
     loading: bool,
     /// Multiplier on the auto-fitted price range. 1.0 shows exactly what the
     /// visible bars need; above that is zoomed in.
@@ -509,7 +516,7 @@ impl ChartView {
             bar_style: BarStyle::default(),
             show_grid: true,
             drag: None,
-            stale: false,
+            trouble: None,
             loading: false,
             price_zoom: 1.0,
             price_offset: 0.0,
@@ -639,8 +646,14 @@ impl ChartView {
         self.area.queue_draw();
     }
 
-    pub fn set_stale(&self, stale: bool) {
-        self.state.borrow_mut().stale = stale;
+    /// Say why the last fetch brought nothing back, or `None` once one works.
+    ///
+    /// Taken rather than discarded because "No data for this symbol" is a
+    /// claim about the symbol, and a fetch that never arrived is not evidence
+    /// for it. A first-time user on a machine with no network read that line
+    /// as the app not having the S&P 500.
+    pub fn set_trouble(&self, trouble: Option<FetchFailure>) {
+        self.state.borrow_mut().trouble = trouble;
         self.area.queue_draw();
     }
 
@@ -1182,17 +1195,38 @@ fn draw(cr: &cairo::Context, width: f64, height: f64, state: &State) {
         }
     }
 
-    if state.stale {
-        draw_stale_marker(cr, state, width);
+    if let Some(trouble) = state.trouble {
+        draw_trouble_marker(cr, state, width, trouble.tag());
+    }
+}
+
+/// The one line an empty chart gets, and the whole of what a first-time user
+/// is told when nothing can be fetched.
+///
+/// "No data for this symbol" is reserved for the case it describes: the
+/// provider answered, and had nothing — a delisted ticker, or one it does not
+/// carry. It was shown for every failure, which on a fresh install with no
+/// network meant a column of untouched defaults each claiming the app does not
+/// have the S&P 500.
+///
+/// Loading wins over a failure because a retry already in flight is the newer
+/// fact, and leaving the last failure up while it runs would make a chart that
+/// is about to fill in look broken.
+fn placeholder_text(
+    have_instrument: bool,
+    loading: bool,
+    trouble: Option<FetchFailure>,
+) -> &'static str {
+    match (have_instrument, loading, trouble) {
+        (false, _, _) => "Press Ctrl+K to find a symbol",
+        (true, true, _) => "Loading…",
+        (true, false, Some(trouble)) => trouble.message(),
+        (true, false, None) => "No data for this symbol",
     }
 }
 
 fn draw_placeholder(cr: &cairo::Context, width: f64, height: f64, state: &State) {
-    let text = match (&state.instrument, state.loading) {
-        (None, _) => "Press Ctrl+K to find a symbol",
-        (Some(_), true) => "Loading…",
-        (Some(_), false) => "No data for this symbol",
-    };
+    let text = placeholder_text(state.instrument.is_some(), state.loading, state.trouble);
     colors::set_source_alpha(cr, &state.theme.ui.text_muted, 0.8);
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(13.0);
@@ -1853,8 +1887,9 @@ fn nearest_bar(bars: &[Bar], ts: i64) -> Option<usize> {
     (gap <= step * 2).then_some(best)
 }
 
-fn draw_stale_marker(cr: &cairo::Context, state: &State, width: f64) {
-    let text = "stale";
+/// The marker in the top corner of a chart that has bars but could not get
+/// newer ones. What is drawn is real and out of date, and this says why.
+fn draw_trouble_marker(cr: &cairo::Context, state: &State, width: f64, text: &str) {
     cr.select_font_face("sans-serif", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
     cr.set_font_size(10.0);
     let Ok(extents) = cr.text_extents(text) else { return };
@@ -2182,6 +2217,39 @@ fn format_time_full(ts: i64, timeframe: Timeframe) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug: a chart that could not fetch told the user the symbol had no
+    /// data, which on a first run reads as the app not having the S&P 500.
+    #[test]
+    fn a_chart_that_could_not_fetch_does_not_blame_the_symbol() {
+        assert_eq!(
+            placeholder_text(true, false, Some(FetchFailure::Offline)),
+            FetchFailure::Offline.message()
+        );
+        assert_ne!(
+            placeholder_text(true, false, Some(FetchFailure::RateLimited)),
+            "No data for this symbol"
+        );
+    }
+
+    /// The one case the old line was true for, and the one it keeps.
+    #[test]
+    fn a_provider_that_answered_with_nothing_still_says_there_is_no_data() {
+        assert_eq!(placeholder_text(true, false, None), "No data for this symbol");
+    }
+
+    #[test]
+    fn a_retry_in_flight_outranks_the_failure_it_is_retrying() {
+        assert_eq!(placeholder_text(true, true, Some(FetchFailure::Unreachable)), "Loading…");
+    }
+
+    #[test]
+    fn a_chart_with_no_symbol_on_it_asks_for_one_whatever_else_went_wrong() {
+        assert_eq!(
+            placeholder_text(false, false, Some(FetchFailure::Offline)),
+            "Press Ctrl+K to find a symbol"
+        );
+    }
 
     /// A chart 500 pixels of stack tall, with its rows in this order. `None`
     /// is the price plot, which is always one of them.

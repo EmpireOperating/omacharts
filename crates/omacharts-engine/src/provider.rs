@@ -16,6 +16,11 @@ pub enum ProviderError {
     Unsupported(String),
     /// Rate limited. The cache is the defence; back off and show what we have.
     RateLimited,
+    /// Nothing on this machine could get to the provider: no route, no name
+    /// resolution, nothing listening. Apart from [`ProviderError::Network`]
+    /// because the two are different sentences on a chart, and only one of
+    /// them is about the provider at all.
+    Offline(String),
     Network(String),
     /// A response arrived but did not look like data.
     Malformed(String),
@@ -28,6 +33,7 @@ impl fmt::Display for ProviderError {
         match self {
             ProviderError::Unsupported(what) => write!(f, "not supported: {what}"),
             ProviderError::RateLimited => write!(f, "rate limited"),
+            ProviderError::Offline(e) => write!(f, "offline: {e}"),
             ProviderError::Network(e) => write!(f, "network: {e}"),
             ProviderError::Malformed(e) => write!(f, "unexpected response: {e}"),
             ProviderError::NotFound => write!(f, "no such symbol"),
@@ -36,6 +42,99 @@ impl fmt::Display for ProviderError {
 }
 
 impl std::error::Error for ProviderError {}
+
+/// Why a chart has nothing new, in the words it is allowed to use on screen.
+///
+/// This exists because "No data for this symbol" was shown for every one of
+/// these, and it is only true for one of them. A first-time user whose first
+/// fetch is refused reads that line as "this app does not have the S&P 500"
+/// and concludes the app is empty — when the symbol is fine and the request
+/// never arrived.
+///
+/// Separate from [`ProviderError`] because the two answer different
+/// questions. That one says what went wrong, in as much detail as the
+/// transport had. This one says which of a handful of sentences is the true
+/// one, and several provider errors collapse onto a single sentence: a 503
+/// and a dropped connection are both "the provider is not answering" to
+/// somebody looking at a chart.
+///
+/// `Copy` and allocation-free on purpose: it crosses the worker-to-UI channel
+/// on every failed fetch and is read again on every repaint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FetchFailure {
+    /// The provider is throttling us. Temporary and self-correcting, which is
+    /// the one thing the user has to be told, because waiting is the fix.
+    RateLimited,
+    /// This machine cannot reach anything.
+    Offline,
+    /// This machine is fine; the provider did not answer.
+    Unreachable,
+    /// Something answered, and it was not data.
+    Garbled,
+    /// The provider does not serve this instrument at this resolution.
+    Unsupported,
+    /// The provider answered, and does not know this symbol. Distinct from a
+    /// provider that knows it and has no bars for it, which is not a failure
+    /// and keeps "No data for this symbol" to itself.
+    NoSuchSymbol,
+    /// The local price cache could not be opened. Nothing to do with the
+    /// network, and saying so stops a disk problem looking like one.
+    LocalCache,
+}
+
+impl FetchFailure {
+    /// The line a chart with no bars at all puts where the bars would be.
+    ///
+    /// One sentence for what happened, and — only where it is true — a second
+    /// for the fact that it fixes itself. Never an instruction, because there
+    /// is nothing for the user to do about any of these.
+    pub fn message(self) -> &'static str {
+        match self {
+            FetchFailure::RateLimited => {
+                "Rate limited by the data provider. Prices fill in shortly."
+            }
+            FetchFailure::Offline => "No network connection. Prices fill in when there is one.",
+            FetchFailure::Unreachable => {
+                "The data provider is not answering. Prices fill in when it does."
+            }
+            FetchFailure::Garbled => "The data provider sent a reply this could not read.",
+            FetchFailure::Unsupported => "The data provider does not serve this resolution.",
+            FetchFailure::NoSuchSymbol => "The data provider does not have this symbol.",
+            FetchFailure::LocalCache => "Could not open the local price cache.",
+        }
+    }
+
+    /// The same thing in the corner of a chart that does have bars.
+    ///
+    /// What is drawn there is real, and older than it should be; this says why
+    /// nothing newer arrived. It replaced a marker that only ever said
+    /// "stale", which left the user to guess between a dead symbol, a broken
+    /// app and a provider having a bad minute.
+    pub fn tag(self) -> &'static str {
+        match self {
+            FetchFailure::RateLimited => "rate limited",
+            FetchFailure::Offline => "offline",
+            FetchFailure::Unreachable => "no answer",
+            FetchFailure::Garbled => "bad reply",
+            FetchFailure::Unsupported => "unsupported",
+            FetchFailure::NoSuchSymbol => "no symbol",
+            FetchFailure::LocalCache => "no cache",
+        }
+    }
+}
+
+impl From<&ProviderError> for FetchFailure {
+    fn from(error: &ProviderError) -> FetchFailure {
+        match error {
+            ProviderError::RateLimited => FetchFailure::RateLimited,
+            ProviderError::Offline(_) => FetchFailure::Offline,
+            ProviderError::Network(_) => FetchFailure::Unreachable,
+            ProviderError::Malformed(_) => FetchFailure::Garbled,
+            ProviderError::Unsupported(_) => FetchFailure::Unsupported,
+            ProviderError::NotFound => FetchFailure::NoSuchSymbol,
+        }
+    }
+}
 
 /// What a provider can serve for one timeframe.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -102,5 +201,109 @@ pub trait Provider: Send + Sync {
     /// Does this provider serve the timeframe natively?
     fn serves(&self, timeframe: Timeframe) -> bool {
         self.capabilities().iter().any(|c| c.timeframe == timeframe)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bug this whole type exists for: every failure used to reach the
+    /// chart as the same empty placeholder, which said the symbol had no data.
+    #[test]
+    fn a_fetch_that_failed_never_says_the_symbol_has_no_data() {
+        let failures = [
+            FetchFailure::RateLimited,
+            FetchFailure::Offline,
+            FetchFailure::Unreachable,
+            FetchFailure::Garbled,
+            FetchFailure::Unsupported,
+            FetchFailure::NoSuchSymbol,
+            FetchFailure::LocalCache,
+        ];
+        for failure in failures {
+            assert_ne!(failure.message(), "No data for this symbol");
+        }
+    }
+
+    #[test]
+    fn being_rate_limited_says_so_and_says_it_passes() {
+        let message = FetchFailure::RateLimited.message();
+        assert!(message.contains("Rate limited"), "{message}");
+        assert!(message.contains("shortly"), "waiting is the fix, so say so: {message}");
+    }
+
+    #[test]
+    fn having_no_network_is_not_blamed_on_the_provider() {
+        let message = FetchFailure::Offline.message();
+        assert!(message.contains("No network"), "{message}");
+        assert!(!message.contains("provider"), "this one is about the machine: {message}");
+    }
+
+    /// A provider that is up and does not know the ticker is a different
+    /// thing from one nothing could reach, and the rail and the chart have to
+    /// be able to tell a person which they are looking at.
+    #[test]
+    fn an_unknown_symbol_and_an_unreachable_provider_read_differently() {
+        assert_ne!(
+            FetchFailure::NoSuchSymbol.message(),
+            FetchFailure::Unreachable.message()
+        );
+    }
+
+    #[test]
+    fn every_provider_error_carries_its_own_words_to_the_chart() {
+        let cases = [
+            (ProviderError::RateLimited, FetchFailure::RateLimited),
+            (ProviderError::Offline(String::new()), FetchFailure::Offline),
+            (ProviderError::Network(String::new()), FetchFailure::Unreachable),
+            (ProviderError::Malformed(String::new()), FetchFailure::Garbled),
+            (ProviderError::Unsupported(String::new()), FetchFailure::Unsupported),
+            (ProviderError::NotFound, FetchFailure::NoSuchSymbol),
+        ];
+        for (error, expected) in &cases {
+            assert_eq!(FetchFailure::from(error), *expected, "{error}");
+        }
+    }
+
+    /// The corner of a chart that has bars is about sixty pixels wide, and a
+    /// marker that does not fit is a marker nobody reads.
+    #[test]
+    fn every_tag_is_short_enough_for_the_corner_of_a_chart() {
+        for failure in [
+            FetchFailure::RateLimited,
+            FetchFailure::Offline,
+            FetchFailure::Unreachable,
+            FetchFailure::Garbled,
+            FetchFailure::Unsupported,
+            FetchFailure::NoSuchSymbol,
+            FetchFailure::LocalCache,
+        ] {
+            let tag = failure.tag();
+            assert!(tag.len() <= 12, "{tag} is too long for the marker");
+            assert_eq!(tag, tag.to_lowercase(), "the marker is lowercase: {tag}");
+        }
+    }
+
+    /// Two failures that read the same are two failures the user cannot tell
+    /// apart, which is the state this replaced.
+    #[test]
+    fn no_two_failures_say_the_same_thing() {
+        let mut messages: Vec<&str> = [
+            FetchFailure::RateLimited,
+            FetchFailure::Offline,
+            FetchFailure::Unreachable,
+            FetchFailure::Garbled,
+            FetchFailure::Unsupported,
+            FetchFailure::NoSuchSymbol,
+            FetchFailure::LocalCache,
+        ]
+        .iter()
+        .map(|f| f.message())
+        .collect();
+        let total = messages.len();
+        messages.sort_unstable();
+        messages.dedup();
+        assert_eq!(messages.len(), total);
     }
 }

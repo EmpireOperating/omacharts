@@ -238,13 +238,41 @@ impl Yahoo {
             Err(ureq::Error::StatusCode(code)) => {
                 return Err(ProviderError::Malformed(format!("HTTP {code}")))
             }
-            Err(error) => return Err(ProviderError::Network(error.to_string())),
+            Err(error) => return Err(could_not_reach(error)),
         };
 
         response
             .body_mut()
             .read_json()
             .map_err(|e| ProviderError::Malformed(e.to_string()))
+    }
+}
+
+/// Which side of the wire a transport failure was on.
+///
+/// Worth separating because the chart says one of two different things, and
+/// only one of them is about Yahoo. A name that cannot be resolved and a route
+/// that does not exist mean this machine is not connected to anything — the
+/// case a fresh install on a laptop with the wifi off hits first — and telling
+/// that person the provider is having trouble sends them looking in the wrong
+/// place. Anything else is Yahoo's end, and worth a retry; being offline is
+/// not, which is why [`ProviderError::Offline`] is absent from the retry arm.
+fn could_not_reach(error: ureq::Error) -> ProviderError {
+    let offline = match &error {
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(io) => matches!(
+            io.kind(),
+            std::io::ErrorKind::NetworkUnreachable
+                | std::io::ErrorKind::HostUnreachable
+                | std::io::ErrorKind::NetworkDown
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::AddrNotAvailable
+        ),
+        _ => false,
+    };
+    match offline {
+        true => ProviderError::Offline(error.to_string()),
+        false => ProviderError::Network(error.to_string()),
     }
 }
 
@@ -454,6 +482,35 @@ fn collapse_days(bars: Vec<Bar>, timeframe: Timeframe) -> Vec<Bar> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A laptop with the wifi off must not be told the data provider is
+    /// having trouble: the provider is fine and the user would go looking in
+    /// the wrong place.
+    #[test]
+    fn a_name_that_cannot_be_resolved_is_reported_as_being_offline() {
+        assert!(matches!(
+            could_not_reach(ureq::Error::HostNotFound),
+            ProviderError::Offline(_)
+        ));
+        let unreachable = std::io::Error::from(std::io::ErrorKind::NetworkUnreachable);
+        assert!(matches!(
+            could_not_reach(ureq::Error::Io(unreachable)),
+            ProviderError::Offline(_)
+        ));
+    }
+
+    #[test]
+    fn a_connection_that_broke_midway_is_reported_against_the_provider() {
+        let reset = std::io::Error::from(std::io::ErrorKind::ConnectionReset);
+        assert!(matches!(
+            could_not_reach(ureq::Error::Io(reset)),
+            ProviderError::Network(_)
+        ));
+        assert!(matches!(
+            could_not_reach(ureq::Error::TooManyRedirects),
+            ProviderError::Network(_)
+        ));
+    }
 
     fn instrument(kind: InstrumentKind, symbol: &str) -> Instrument {
         Instrument {

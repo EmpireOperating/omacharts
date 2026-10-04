@@ -2,14 +2,16 @@
 //!
 //! The window never waits on the network. It paints whatever the cache holds,
 //! asks for the gap, and repaints when the answer arrives. A failure is not an
-//! empty chart — it is the same chart, marked stale.
+//! empty chart — it is the same chart, saying what went wrong. On a fresh
+//! install there is no chart to keep, so the reason is all there is, which is
+//! why it travels rather than being thrown away here.
 //!
 //! The worker opens its own [`Store`]: a rusqlite connection is `Send` but not
 //! `Sync`, and WAL means a writer here never blocks the reader there.
 
 use std::sync::{Arc, Condvar, Mutex};
 
-use omacharts_engine::{Bar, Provider, ProviderError, Timeframe};
+use omacharts_engine::{Bar, FetchFailure, Provider, Timeframe};
 
 use crate::store::Store;
 
@@ -42,8 +44,16 @@ pub struct Request {
 pub enum Response {
     /// Bars at the *native* timeframe. The caller folds to what it is showing.
     Bars { key: String, timeframe: Timeframe, bars: Vec<Bar> },
-    /// Nothing new arrived. `bars` is whatever the cache already had.
-    Failed { key: String, timeframe: Timeframe, bars: Vec<Bar>, error: String, rate_limited: bool },
+    /// Nothing new arrived. `bars` is whatever the cache already had, and
+    /// `failure` is why nothing joined it.
+    ///
+    /// The reason travels rather than a flag, because the window has to say
+    /// it out loud: a chart with no cached bars at all is the first thing a
+    /// new user sees, and "could not fetch" and "the provider has nothing"
+    /// are not the same sentence. This used to be a string nobody read and a
+    /// `rate_limited` bool, which is how every failure ended up looking like
+    /// a symbol with no data.
+    Failed { key: String, timeframe: Timeframe, bars: Vec<Bar>, failure: FetchFailure },
 }
 
 /// The chart you are looking at. Jumps every queued prefetch.
@@ -222,8 +232,7 @@ fn run<P: Provider>(request: &Request, provider: &P) -> Response {
             key: request.key.clone(),
             timeframe: native,
             bars: Vec::new(),
-            error: "could not open the local database".into(),
-            rate_limited: false,
+            failure: FetchFailure::LocalCache,
         };
     };
 
@@ -254,8 +263,7 @@ fn run<P: Provider>(request: &Request, provider: &P) -> Response {
                             key: request.key.clone(),
                             timeframe: native,
                             bars: Vec::new(),
-                            error: error.to_string(),
-                            rate_limited: matches!(error, ProviderError::RateLimited),
+                            failure: FetchFailure::from(&error),
                         }
                     }
                 };
@@ -270,8 +278,7 @@ fn run<P: Provider>(request: &Request, provider: &P) -> Response {
             key: request.key.clone(),
             timeframe: native,
             bars: cached,
-            error: error.to_string(),
-            rate_limited: matches!(error, ProviderError::RateLimited),
+            failure: FetchFailure::from(&error),
         },
     }
 }
