@@ -31,3 +31,5 @@ Omarchy build, so it sits with the light themes rather than the dark ones.
 - `collages/mosaic-*.jpg`, `collages/wide-strip.jpg` — mixed, layout and theme
   changing tile to tile
 - `youtube/` — video thumbnails, with their 2560x1440 masters
+- `screenshot.png`, `bar-widget.png` — earlier shots of the window and the
+  Omarchy bar widget, kept for reuse

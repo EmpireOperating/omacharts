@@ -3,7 +3,7 @@
 Fast, beautiful charting software for [Omarchy](https://omarchy.org).
 
 <p align="center">
-  <img src="doc/gallery/banner.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
+  <img src="assets/examples/banner.jpg" width="100%" alt="Four chart layouts, each under a different Omarchy theme">
 </p>
 
 ## Features
