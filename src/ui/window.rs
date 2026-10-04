@@ -1649,7 +1649,23 @@ impl Window {
         let rail = self.watchlist.borrow().as_ref().cloned();
         if let Some(rail) = rail {
             rail.reload();
+            // The chain beside the name is painted from the group the rail
+            // holds, and reloading the list does not re-ask for it — so a group
+            // set from a terminal was right in the database and stale on
+            // screen until the next time you switched lists.
+            let colours = self.clone();
+            rail.adopt_link_group(move |group| colours.link_colour(group));
         }
+    }
+
+    /// Adopt a theme or bar scheme chosen outside this window, and repaint.
+    ///
+    /// `restyle` paints from the `Theming` this process is holding, so without
+    /// re-reading the choice first it would faithfully repaint the theme the
+    /// window already had.
+    pub fn adopt_theming(self: &Rc<Self>) {
+        self.theming.borrow_mut().reload_selection(&self.store);
+        self.restyle();
     }
 
     /// Build a chartbook into widgets, replacing whatever is on screen.

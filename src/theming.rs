@@ -138,6 +138,20 @@ impl Theming {
         self.custom_schemes = store.custom_bar_schemes();
     }
 
+    /// Re-read which theme and bar scheme are chosen, for a choice made
+    /// outside this process.
+    ///
+    /// A command from a terminal writes the setting and nothing else; the
+    /// window is still wearing whatever it started in, and would write its own
+    /// choice back over the new one the next time anything touched it.
+    pub fn reload_selection(&mut self, store: &Store) {
+        let default_theme = if self.omarchy.is_some() { OMARCHY_ID } else { FALLBACK_THEME_ID };
+        self.theme_id = store.setting(SETTING_THEME).unwrap_or_else(|| default_theme.to_string());
+        self.scheme_id =
+            store.setting(SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
+        self.reload_custom(store);
+    }
+
     /// Re-read the desktop palette. `true` when something moved and the app
     /// should restyle and repaint.
     ///

@@ -628,7 +628,7 @@ mod tests {
         let mut volume = Indicator::new(1, Kind::Volume);
         volume.params = Params::Volume { height: 5.0 };
         match compute(&volume, &bars(&[1.0, 2.0]), 0, Timeframe::days(1), None) {
-            Output::Volume { height, .. } => assert_eq!(height, 0.6),
+            Output::Volume { height, .. } => assert_eq!(height, MAX_PANE_SHARE),
             other => panic!("{other:?}"),
         }
     }
