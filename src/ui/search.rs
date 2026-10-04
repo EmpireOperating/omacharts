@@ -109,26 +109,9 @@ impl SymbolSearch {
             }
         });
 
-        // A GtkSearchEntry handles Escape itself: it emits stop-search and
-        // clears the box, swallowing the key before anything above it sees it.
-        // So closing has to hang off that, not off the key.
-        let dialog = self.dialog.clone();
-        self.entry.connect_stop_search(move |_| {
-            dialog.close();
-        });
-
-        // And again on the dialog, for an Escape pressed while focus is in the
-        // list rather than the entry.
-        let escape = gtk::EventControllerKey::new();
-        let dialog = self.dialog.clone();
-        escape.connect_key_pressed(move |_, key, _, _| {
-            if key == gtk::gdk::Key::Escape {
-                dialog.close();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        self.dialog.add_controller(escape);
+        // Only the box needs saying. Escape anywhere else in here already
+        // closes the dialog, which is why there is no controller for it.
+        dialogs::close_on_search_escape(&self.entry, &self.dialog);
 
         // Up and down move the selection while focus stays in the entry.
         let keys = gtk::EventControllerKey::new();

@@ -1454,24 +1454,9 @@ fn pick_indicator(window: &Rc<Window>, refresh: &Refresh) {
         }
     });
 
-    // A GtkSearchEntry swallows Escape to clear itself, so closing hangs off
-    // what it emits rather than off the key.
-    let dialog_for_stop = dialog.clone();
-    entry.connect_stop_search(move |_| {
-        dialog_for_stop.close();
-    });
-
-    // And again on the dialog, for an Escape pressed with focus in the list.
-    let escape = gtk::EventControllerKey::new();
-    let dialog_for_escape = dialog.clone();
-    escape.connect_key_pressed(move |_, key, _, _| {
-        if key == gtk::gdk::Key::Escape {
-            dialog_for_escape.close();
-            return glib::Propagation::Stop;
-        }
-        glib::Propagation::Proceed
-    });
-    dialog.add_controller(escape);
+    // Only the box needs saying. Escape anywhere else in here already closes
+    // the dialog, which is why there is no controller for it.
+    dialogs::close_on_search_escape(&entry, &dialog);
 
     dialog.present(Some(&window.window));
     entry.grab_focus();

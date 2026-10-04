@@ -1,4 +1,4 @@
-//! What Ctrl+Enter means in a dialog.
+//! What Ctrl+Enter and Escape mean in a dialog.
 //!
 //! Anything that creates something has one action that finishes it, and in
 //! this app that action is always a button in a corner you are not looking at:
@@ -31,6 +31,26 @@ pub fn commit_on_ctrl_enter(dialog: &impl IsA<gtk::Widget>, commit: impl Fn() + 
         glib::Propagation::Stop
     });
     dialog.as_ref().add_controller(keys);
+}
+
+/// Close a dialog from Escape in its search box.
+///
+/// Everything else here already works: an `AdwDialog` closes itself on
+/// Escape, a popover inside one closes only the popover, and a pushed subpage
+/// pops rather than taking the whole dialog with it. A `GtkSearchEntry` is the
+/// one hole. It claims Escape and emits `stop-search` instead — and then does
+/// nothing at all with it, not even clearing the text, because the clearing
+/// everyone remembers belongs to `GtkSearchBar` and there is no search bar
+/// here. So Escape in the box is simply dead unless something listens.
+///
+/// It closes rather than clearing. The box is the dialog: emptying it would
+/// leave an empty picker open and a second Escape to press, when the hand
+/// that reached for the key had already decided against the whole thing.
+pub fn close_on_search_escape(entry: &gtk::SearchEntry, dialog: &adw::Dialog) {
+    let dialog = dialog.clone();
+    entry.connect_stop_search(move |_| {
+        dialog.close();
+    });
 }
 
 /// "Ctrl+Enter", written the way this desktop writes it.
