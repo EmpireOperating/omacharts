@@ -3734,12 +3734,19 @@ impl Window {
                 match response {
                     Response::Bars { key, timeframe, bars } => {
                         this.present(&key, timeframe, bars, None);
+                        // One at a time, each asked for as the last lands.
+                        this.loader.keep_warming(&key, timeframe, |tf| {
+                            this.store.coverage(&key, tf).is_some()
+                        });
                     }
                     Response::Failed { key, timeframe, bars, failure } => {
                         // A failure shows the same chart and says what went
                         // wrong. Never an empty pane, and never a pane that
                         // blames the symbol for a request that never arrived.
                         this.present(&key, timeframe, bars, Some(failure));
+                        // Three more requests is the worst possible answer to
+                        // a provider that has just refused one.
+                        this.loader.stop_warming(&key);
                         // Being throttled is the one failure worth acting on
                         // rather than just showing: carrying on would spend a
                         // queue of speculative requests on certain refusals
@@ -4263,6 +4270,13 @@ impl Window {
             // the old neighbourhood is forgotten: those symbols are no longer
             // the ones a keypress away.
             self.loader.drop_prefetches();
+            // Fill in the rest of the strip behind this chart, so the first
+            // click on 15m is a repaint rather than a wait. Nothing is asked
+            // for until this very load lands, which is what keeps a walk down
+            // the rail free.
+            self.loader.warm_strip(&key, &symbol, &self.timeframes.borrow(), timeframe, |tf| {
+                self.store.coverage(&key, tf).is_some()
+            });
         }
         self.loader
             .fetch(Request { key, symbol, timeframe, speculative: false }, FOREGROUND);
