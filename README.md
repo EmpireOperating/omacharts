@@ -51,23 +51,7 @@ Yahoo Finance's public endpoint, no account or key needed, cached locally in
 SQLite. Prices are delayed about 15 minutes, which is invisible on the
 timeframes this is built for. Not affiliated with Yahoo.
 
-## Roadmap
 
-Rough order, and nothing here is a promise.
-
-- [ ] **Beautiful annotations.** Trendlines, levels and notes that stay where
-      you put them, and look like they belong on the chart rather than on top
-      of it.
-- [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
-      can sit behind the same one, including the paid ones with real-time
-      prices.
-- [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
-
-Pull requests are welcome.
-
-## Licence
-
-MIT. See [LICENSE](LICENSE).
 
 ## From a terminal
 
@@ -115,3 +99,21 @@ app on your machine is not an agreement to have your agent's configuration
 written into. `omacharts skill --help` has the rest: `uninstall` takes it
 back out, and `status` says where it is. See
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).
+
+## Roadmap
+
+Rough order, and nothing here is a promise.
+
+- [ ] **Beautiful annotations.** Trendlines, levels and notes that stay where
+      you put them, and look like they belong on the chart rather than on top
+      of it.
+- [ ] **More data feeds.** Yahoo is one provider behind one interface. Others
+      can sit behind the same one, including the paid ones with real-time
+      prices.
+- [ ] **More indicators.** MACD and Bollinger bands are the obvious gaps.
+
+Pull requests are welcome.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
