@@ -1903,11 +1903,12 @@ impl Window {
     /// button aside by exactly their width, and every other chart keeps the
     /// corner it had.
     fn sync_corner_clearance(self: &Rc<Self>) {
-        let railed = self
-            .split
-            .end_child()
-            .map(|rail| rail.is_visible())
-            .unwrap_or(false);
+        // Through the toggle, not the rail's own visibility: gtk4-rs answers
+        // that about the whole ancestor chain, so during launch it says the
+        // rail is hidden and the cluster wears its backdrop over the rail —
+        // until you toggle the sidebar and this runs again with the window on
+        // screen, which is what made it look like a repaint bug.
+        let railed = self.shows_sidebar();
         let clearance = match railed {
             true => 0,
             false => self
