@@ -32,8 +32,7 @@ Fast, beautiful market charts for [Omarchy](https://omarchy.org).
 - **A bar widget** for the Omarchy bar: your watchlist with sparklines, live,
   still there after the window closes.
 - **Agent ready.** A rich CLI covers everything the window does, and says what
-  it can do in a form a script or an agent can read. Commands land in a window
-  that is already open.
+  it can do in a form a script or an agent can read.
 
 ## Installing
 
