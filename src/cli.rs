@@ -262,6 +262,24 @@ mod tests {
         assert_eq!(parsed["kind"], "Futures");
     }
 
+    /// The widget hands these three fields straight back as `omacharts SAP DE`
+    /// when somebody clicks the row, and `SearchIndex::find` matches on the
+    /// ticker and the suffix as two things. Emitting `SAP.DE` as the symbol
+    /// would read as a ticker nobody lists and quietly open nothing.
+    #[test]
+    fn a_listing_abroad_carries_its_suffix_apart_from_its_ticker() {
+        let store = Store::memory().unwrap();
+        let provider = Yahoo::new();
+        let index = SearchIndex::new(omacharts_engine::symbols::seed());
+        let instrument = index.find("SAP", Some("DE")).unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&entry_json(&store, &provider, instrument)).unwrap();
+        assert_eq!(parsed["symbol"], "SAP", "the ticker alone, for looking it up again");
+        assert_eq!(parsed["suffix"], "DE");
+        assert_eq!(parsed["display"], "SAP.DE", "and the spelling people read");
+    }
+
     #[test]
     fn a_row_carries_a_short_series_for_its_sparkline() {
         let store = Store::memory().unwrap();
