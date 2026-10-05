@@ -77,7 +77,15 @@ impl Inventory {
 /// milliseconds, so it pays the few milliseconds once and searches
 /// everything.
 pub fn everything() -> SearchIndex {
-    SearchIndex::new(merge(LISTINGS, omacharts_engine::symbols::seed()))
+    SearchIndex::new(load_items(&crate::store::home()))
+}
+
+/// The user file replaces the generated catalogue; curated rows still win.
+/// Missing or unreadable files leave the embedded catalogue available.
+fn load_items(home: &std::path::Path) -> Vec<Instrument> {
+    let text = std::fs::read_to_string(listings_path(home))
+        .unwrap_or_else(|_| LISTINGS.to_string());
+    merge(&text, omacharts_engine::symbols::seed())
 }
 
 /// The generated listings and the curated rows, as one list.
@@ -132,12 +140,7 @@ pub fn load_in_background(inventory: Inventory, done: impl Fn(usize) + 'static) 
     let home = crate::store::home();
 
     std::thread::spawn(move || {
-        // A refreshed file if there is one, the compiled copy otherwise. A
-        // download that never happened, or happened and went wrong, leaves the
-        // app exactly as it shipped rather than without an inventory.
-        let text = std::fs::read_to_string(listings_path(&home))
-            .unwrap_or_else(|_| LISTINGS.to_string());
-        let _ = sender.send_blocking(merge(&text, omacharts_engine::symbols::seed()));
+        let _ = sender.send_blocking(load_items(&home));
     });
 
     glib::spawn_future_local(async move {

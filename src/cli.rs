@@ -22,7 +22,7 @@
 use std::rc::Rc;
 
 use omacharts_engine::providers::Yahoo;
-use omacharts_engine::{Instrument, Provider, SearchIndex, Timeframe};
+use omacharts_engine::{Instrument, Provider, Timeframe};
 
 use crate::loader::{Loader, Request, BACKFILL};
 use crate::store::{Store, ROOT_SECTION};
@@ -324,7 +324,7 @@ pub fn watchlist_json(refresh_first: bool, live: Option<&dyn Live>) -> String {
     let Ok(store) = Store::open() else {
         return r#"{"sections":[],"error":"could not open the database"}"#.to_string();
     };
-    let index = Rc::new(SearchIndex::new(omacharts_engine::symbols::seed()));
+    let index = crate::inventory::everything();
     let provider = Yahoo::new();
 
     let sections = store.watchlist();
@@ -355,10 +355,9 @@ pub fn watchlist_json(refresh_first: bool, live: Option<&dyn Live>) -> String {
             json_string(&section.name),
             section.id == ROOT_SECTION
         ));
-        for (e, entry) in section.entries.iter().enumerate() {
-            let Some(instrument) = index.find(&entry.symbol, entry.suffix.as_deref()) else {
-                continue;
-            };
+        let resolved = section.entries.iter()
+            .filter_map(|entry| index.find(&entry.symbol, entry.suffix.as_deref()));
+        for (e, instrument) in resolved.enumerate() {
             if e > 0 {
                 out.push(',');
             }
@@ -499,6 +498,7 @@ pub fn live(window: &Rc<crate::ui::Window>) -> Option<Box<dyn Live>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use omacharts_engine::SearchIndex;
 
     /// A window that goes wrong. `flush_workspace` is the first thing a command
     /// touching the arrangement calls, so panicking there stands in for a bug
