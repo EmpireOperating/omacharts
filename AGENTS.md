@@ -223,44 +223,55 @@ parity and does not is worse than none:
 
 ## Releasing
 
-Push a tag. That is the whole thing.
-
 ```sh
-git tag -a v0.1.2 -m "What this release is"
-git push origin v0.1.2
+bin/release 0.1.3
 ```
 
-`.github/workflows/release.yml` does the rest, in three jobs that run in
-order:
+That is the whole thing. The script writes the version into the four places a
+tag cannot float — `Cargo.toml`, `Cargo.lock`, the README's download line, and
+the PKGBUILD's `pkgver` — then builds and tests with `--locked` to prove the
+tree agrees with itself, commits, tags and pushes. It refuses to run on a dirty
+tree, off `main`, behind `origin`, or onto a tag that already exists.
 
-1. **build** — compiles the binary, tars it with the licence, README, assets
-   and packaging, and creates the release with notes generated the way the
-   "Generate release notes" button generates them. `.github/release.yml`
-   decides how those notes are grouped.
-2. **sync** — writes the new version into the four places a tag cannot float:
-   the README's download line names the package file, the PKGBUILD carries
-   `pkgver` and the `sha256sums` of the tarball GitHub builds for the tag, and
-   `Cargo.toml` is what `omacharts --version` answers with. The digest can only
-   be taken once the tag exists, which is why this runs after the tag rather
-   than before it. The commit lands on `main`.
-3. **package** — builds the Arch package in an `archlinux:base-devel`
-   container from the PKGBUILD `sync` just wrote, and attaches it to the
-   release. Because it builds from that PKGBUILD, a release that gets this far
-   has proved the PKGBUILD works against the tarball GitHub actually serves.
+Everything is written **before** the tag, on a machine with a toolchain. The
+tag then points at a commit that is already consistent. The one exception is
+the digest of the tarball GitHub builds for the tag, which cannot exist until
+the tag does; `.github/workflows/release.yml` writes that single line afterwards
+and nothing else.
 
-So the version in the working tree is always one release behind until the tag
-is pushed, and `sync` brings it forward. Do not bump it by hand first: the job
-is what keeps the four places honest, and a hand-edit only moves some of them.
+The workflow then runs three jobs in order:
 
-After the tag, `git pull` to pick up the commit `sync` made.
+1. **build** — compiles the binary, tars it with the licence, README, assets and
+   packaging, and creates the release with notes generated the way the
+   "Generate release notes" button generates them. `.github/release.yml` decides
+   how they are grouped.
+2. **sync** — writes the tarball's `sha256sums` into the PKGBUILD and commits it
+   to `main`. No toolchain, no cargo: it refuses outright if the tag does not
+   already name itself in the PKGBUILD, because that means something was tagged
+   by hand.
+3. **package** — builds the Arch package in an `archlinux:base-devel` container
+   from that PKGBUILD and attaches it to the release. Because it builds from the
+   PKGBUILD the digest was just written into, a release that gets this far has
+   proved the recipe works against the tarball GitHub actually serves.
+
+Afterwards, `git pull` to pick up the digest commit.
+
+### Do not bump the version by hand
+
+Four files have to agree, and `Cargo.lock` is the one everybody forgets: a lock
+file left behind its own `Cargo.toml` makes every `--locked` build refuse, which
+turns CI red on `main` and on everything branched from it. `bin/release` checks
+all four and will not tag if any disagrees.
 
 ### If something goes wrong
 
 The release exists as soon as **build** finishes, so a failure in **sync** or
-**package** leaves a release with the generic tarball but no Arch package and
-a `main` still naming the old version. Fix the cause and re-run the failed job
-from the Actions tab rather than cutting another tag.
+**package** leaves a release carrying the generic tarball but no Arch package.
+Fix the cause and re-run the failed job from the Actions tab.
 
-Moving a tag that has already been released means the digest in the PKGBUILD
-no longer matches what GitHub serves, so `makepkg` refuses it for everybody.
-If a tag has to move, re-run **sync** afterwards.
+Re-running uses the workflow **as it was at the tag**, so a fix to the workflow
+itself does not apply to a tag already cut. Either build and attach the package
+by hand that once, or cut the next version.
+
+Never move a tag that has been released. The PKGBUILD digest would stop matching
+the tarball, and `makepkg` would refuse it for everybody who tried to build it.

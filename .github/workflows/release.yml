@@ -34,10 +34,16 @@ jobs:
             omacharts-*-x86_64-linux.tar.gz.sha256
           generate_release_notes: true
 
-  # The version appears in three places that a tag cannot float: the README's
-  # download line names the file, and the PKGBUILD carries the version and the
-  # digest of the tarball GitHub builds for the tag. The digest can only be
-  # taken once the tag exists, which is why this runs here rather than before.
+  # Everything a tag can carry is already in the tag: bin/release writes the
+  # version into Cargo.toml, Cargo.lock, the README and the PKGBUILD, and
+  # verifies the tree builds with it, before tagging. The one thing that cannot
+  # exist until the tag does is the digest of the tarball GitHub builds for it,
+  # so that is the only thing written here.
+  #
+  # Deliberately no toolchain and no cargo in this job. It used to bump the
+  # version too, which meant running cargo in a checkout that never builds —
+  # that left the lock file behind its own Cargo.toml once and broke every
+  # --locked build on main, and failed outright the next time.
   sync:
     needs: build
     runs-on: ubuntu-latest
@@ -48,40 +54,34 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-      - name: Write the new version into the README and the PKGBUILD
+      - name: Write the tarball's digest into the PKGBUILD
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${GITHUB_REF_NAME}.tar.gz"
           digest=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
-          test -n "$digest"
+          [ -n "$digest" ] || { echo "no digest for $url"; exit 1; }
 
-          sed -i -E "s|omacharts-[0-9]+\.[0-9]+\.[0-9]+-1-x86_64\.pkg\.tar\.zst|omacharts-${version}-1-x86_64.pkg.tar.zst|g" README.md
-          sed -i -E "s|^pkgver=.*|pkgver=${version}|" packaging/aur/PKGBUILD
+          # The tag should already name itself everywhere. If it does not,
+          # something was tagged by hand instead of through bin/release.
+          grep -q "^pkgver=${version}$" packaging/aur/PKGBUILD \
+            || { echo "PKGBUILD pkgver is not ${version} — was this tagged with bin/release?"; exit 1; }
+
           sed -i -E "s|^sha256sums=.*|sha256sums=('${digest}')|" packaging/aur/PKGBUILD
-          # And the crate itself, or `omacharts --version` keeps answering with
-          # whatever it was built at when the version last moved by hand.
-          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s||version = \"${version}\"|" Cargo.toml
-          # Must not be allowed to fail quietly: a lock file left behind its
-          # own Cargo.toml makes every later `--locked` build refuse, which is
-          # how CI came to be red on main after a release.
-          cargo update -p omacharts --offline
-
           git diff --stat
       - name: Commit it back
         run: |
           set -euo pipefail
           if git diff --quiet; then
-            echo "Nothing to change — the tag was cut with the version already written."
+            echo "The digest was already correct."
             exit 0
           fi
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -am "Write ${GITHUB_REF_NAME} into the README and the PKGBUILD
+          git commit -am "Pin the ${GITHUB_REF_NAME} tarball
 
-          Done by the release workflow: the download line names the file and
-          the PKGBUILD carries the version and the tarball's digest, and none
-          of the three can be floated by the tag."
+          Written by the release workflow: the digest of the tarball GitHub
+          builds for a tag cannot be known until the tag exists."
           git push origin main
 
   # The package people actually install, built the way the PKGBUILD says and
