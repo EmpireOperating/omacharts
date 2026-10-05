@@ -26,10 +26,11 @@ describe a command that does not exist.
 
 You do not choose between them and there is no flag for it.
 
-`skill` commands always run in the invoking process, even with the app open.
-Agent configuration such as `CODEX_HOME` belongs to the caller, and a relative
-`skill install --to DIR` resolves from the caller's working directory. The same
-applies to `skill status` and `skill uninstall`.
+`skill` is the exception. It runs in the process you typed it in whether or not
+the app is open, because the answer is about your machine and not the window's:
+the agent variables it reads are the ones you were given, and a relative
+`skill install --to DIR` resolves from the directory you are standing in.
+`skill status` and `skill uninstall` are the same.
 
 ## Exit codes
 
