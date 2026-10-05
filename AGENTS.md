@@ -171,6 +171,25 @@ Two rules follow, and breaking either is how this gets slow:
   watchlist gained a symbol is fine with five symbols and stutters with five
   hundred.
 
+### Which is why a test run needs its own bus, not just its own profile
+
+The same dispatch is what makes an experiment land on somebody's real charts.
+A command is handed to whatever owns the application id on the session bus,
+and a disposable `XDG_DATA_HOME` does nothing about that — the window that
+catches it reads its own store, and writes the change through. Setting `HOME`
+is no help either: the store follows `XDG_DATA_HOME` first.
+
+So both, every time:
+
+```sh
+XDG_DATA_HOME=$(mktemp -d) DBUS_SESSION_BUS_ADDRESS= omacharts chart list
+dbus-run-session -- env XDG_DATA_HOME=$(mktemp -d) ./target/debug/omacharts
+```
+
+The first keeps a command in its own process; the second is for when the run
+needs a window of its own. Two separate sessions have changed a live chart by
+getting this half right.
+
 ## Verifying parity
 
 Before calling a feature done:
