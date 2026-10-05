@@ -461,6 +461,10 @@ bars carry their direction again, in the "hollow" scheme
   [exit 0]
 ```
 
+`config bars red-up` is the third answer: the theme's colours the other way
+round, red for a rise and green for a fall, the way charts are read in Taiwan,
+mainland China, Japan and Korea. It remembers the palette in use as well.
+
 `config set bar_scheme theme-mono` reaches the same scheme and is not the same
 command: it does not remember the scheme that was in use, so putting the colour
 back lands on the default rather than on the palette you had picked.

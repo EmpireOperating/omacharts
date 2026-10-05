@@ -490,6 +490,8 @@ pub const OMARCHY_ID: &str = "omarchy";
 pub const THEME_BARS_ID: &str = "theme";
 /// The same, with the direction colours spent: one neutral for every bar.
 pub const THEME_MONO_ID: &str = "theme-mono";
+/// The same, the other way round: red for a rise, green for a fall.
+pub const THEME_RED_UP_ID: &str = "theme-red-up";
 /// Fallback theme when Omarchy is not installed.
 pub const FALLBACK_THEME_ID: &str = "midnight";
 
@@ -715,6 +717,30 @@ fn set_apart(
         }
     }
     colour.to_string()
+}
+
+/// The theme's own bar colours with up and down exchanged.
+///
+/// Green for a rise is a Western habit, not a fact. Taiwan, mainland China,
+/// Japan and Korea read a chart the other way round — red is up, green is
+/// down — and a chart that disagrees with every other screen somebody trades
+/// from is one they misread. Built from the theme like [`theme_bars`], so it
+/// follows the desktop theme the same way, and it is a scheme rather than a
+/// switch laid over every scheme: what the scheme list previews is what the
+/// chart paints.
+pub fn theme_red_up_bars(theme: &Theme) -> BarScheme {
+    let bars = theme_bars(theme);
+    BarScheme {
+        id: THEME_RED_UP_ID.to_string(),
+        name: "Red up".to_string(),
+        up: bars.down.clone(),
+        up_fill: bars.down_fill.clone(),
+        down: bars.up.clone(),
+        down_fill: bars.up_fill.clone(),
+        volume_up: bars.volume_down.clone(),
+        volume_down: bars.volume_up.clone(),
+        ..bars
+    }
 }
 
 /// Candles in one neutral colour, for people who would rather read a chart
@@ -1290,6 +1316,18 @@ mod tests {
         assert_eq!(bars.up, theme.swatch("Green").unwrap().hex);
         assert_eq!(bars.down, theme.swatch("Rose").unwrap().hex);
         assert_eq!(bars.id, THEME_BARS_ID);
+    }
+
+    #[test]
+    fn red_up_is_the_theme_colours_the_other_way_round() {
+        for theme in builtin_themes() {
+            let (green, red) = (theme_bars(&theme), theme_red_up_bars(&theme));
+            assert_eq!((&red.up, &red.down), (&green.down, &green.up), "{}", theme.name);
+            assert_eq!((&red.up_fill, &red.down_fill), (&green.down_fill, &green.up_fill));
+            assert_eq!((&red.volume_up, &red.volume_down), (&green.volume_down, &green.volume_up));
+            assert_eq!(red.neutral, green.neutral, "unchanged stays unchanged");
+            assert_eq!(red.id, THEME_RED_UP_ID);
+        }
     }
 
     #[test]

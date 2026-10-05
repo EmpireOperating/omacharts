@@ -106,7 +106,7 @@ const LINE_STYLES: &[&str] = &["solid", "dashed", "dotted"];
 const SWITCHES: &[&str] = &["on", "off"];
 const LINKS: &[&str] =
     &["none", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-const COLOURING: &[&str] = &["coloured", "monochrome"];
+const COLOURING: &[&str] = &["coloured", "red-up", "monochrome"];
 
 /// How a colour is written on the command line.
 ///
@@ -661,7 +661,7 @@ pub const SURFACE: &[Noun] = &[
             },
             Verb {
                 name: "bars",
-                about: "Whether bars carry their direction in colour, or none at all",
+                about: "Whether bars carry their direction in colour, red for up, or no colour at all",
                 args: &[Arg::opt("STATE", "omit to read it").of(COLOURING)],
                 flags: &[],
                 example: "omacharts config bars monochrome",

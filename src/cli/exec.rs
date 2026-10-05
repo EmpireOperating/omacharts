@@ -12,7 +12,9 @@
 use serde_json::{json, Value};
 
 use omacharts_engine::indicators::{LineStyle, Stroke, MAX_PANE_SHARE, MIN_PANE_SHARE};
-use omacharts_engine::theme::{ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID};
+use omacharts_engine::theme::{
+    ColorChoice, SWATCH_NAMES, THEME_BARS_ID, THEME_MONO_ID, THEME_RED_UP_ID,
+};
 use omacharts_engine::{
     link, BarStyle, Indicator, IndicatorKind, LinkGroup, Reset, Session, Timeframe,
 };
@@ -135,7 +137,7 @@ pub fn dispatch(args: &[String], store: &Store, live: Option<&dyn Live>) -> Outc
         ("config", "list") => config_list(store, json),
         ("config", "get") => config_get(store, m, json),
         ("config", "set") => config_set(store, m, json),
-        ("config", "bars") => config_bars(store, m, json),
+        ("config", "bars") => config_bars(store, m, json, live),
         ("config", "refresh") => config_refresh(store, m, json),
 
         ("plugin", "status") => plugin_status(json),
@@ -1956,49 +1958,66 @@ fn config_refresh(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<
     said(as_json, json!({"autoRefresh": on}), format!("automatic chart refreshing is {state}"))
 }
 
-/// Colour or no colour, asked the way people arrive at it.
+/// Colour or no colour, and which way round, asked the way people arrive at
+/// it.
 ///
 /// `config set bar_scheme theme-mono` reaches the same scheme, and is not the
 /// same command: it does not remember what to go back to, so putting the
 /// colour back lands on the default rather than on the scheme that was in use.
 /// This is the question the preferences dialog asks, so the terminal asks it
 /// too.
-fn config_bars(store: &Store, m: &clap::ArgMatches, as_json: bool) -> Result<String, Fault> {
+fn config_bars(
+    store: &Store,
+    m: &clap::ArgMatches,
+    as_json: bool,
+    live: Option<&dyn Live>,
+) -> Result<String, Fault> {
     let current =
         store.setting(crate::theming::SETTING_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string());
-    let mono = current == THEME_MONO_ID;
     let Some(state) = arg(m, "STATE") else {
         return match as_json {
-            true => Ok(format!("{}\n", json!({"bars": spell_bars(mono), "scheme": current}))),
-            false => Ok(format!("{}\n", spell_bars(mono))),
+            true => Ok(format!("{}\n", json!({"bars": spell_bars(&current), "scheme": current}))),
+            false => Ok(format!("{}\n", spell_bars(&current))),
         };
     };
+    let state = state.as_str();
 
-    let wants_mono = state == "monochrome";
-    let scheme = match (wants_mono, mono) {
-        (true, false) => {
-            store.set_setting(COLOURED_BARS, &current);
-            THEME_MONO_ID.to_string()
-        }
-        (false, true) => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
-        // Already there. Said rather than silently done, because "it was
-        // already monochrome" and "it is monochrome now" are different
-        // answers to somebody checking their own work.
-        _ => current.clone(),
+    let scheme = match state {
+        "monochrome" => THEME_MONO_ID.to_string(),
+        "red-up" => THEME_RED_UP_ID.to_string(),
+        // "coloured": stay on the palette in use if it already carries the
+        // direction, and otherwise go back to the one it was left from.
+        _ if spell_bars(&current) == "coloured" => current.clone(),
+        _ => store.setting(COLOURED_BARS).unwrap_or_else(|| THEME_BARS_ID.to_string()),
     };
+    // Leaving a palette somebody picked: remember it to come back to.
+    if scheme != current && spell_bars(&current) == "coloured" {
+        store.set_setting(COLOURED_BARS, &current);
+    }
     store.set_setting(crate::theming::SETTING_BARS, &scheme);
-    let text = match (wants_mono, mono) {
-        (true, false) => "bars are monochrome; the colours are remembered".to_string(),
-        (false, true) => format!("bars carry their direction again, in the {scheme:?} scheme"),
-        _ => format!("bars were already {}", spell_bars(mono)),
+    // A candle has no row to reload: an open window paints from the scheme it
+    // read, so it is told to read it again.
+    if let Some(live) = live {
+        live.adopt_theming();
+    }
+    let text = match (state, scheme == current) {
+        // Said rather than silently done, because "it was already monochrome"
+        // and "it is monochrome now" are different answers to somebody
+        // checking their own work.
+        (_, true) => format!("bars were already {state}"),
+        ("monochrome", _) => "bars are monochrome; the colours are remembered".to_string(),
+        ("red-up", _) => "rising bars are red and falling bars green".to_string(),
+        _ => format!("bars carry their direction again, in the {scheme:?} scheme"),
     };
-    said(as_json, json!({"bars": spell_bars(wants_mono), "scheme": scheme}), text)
+    said(as_json, json!({"bars": state, "scheme": scheme}), text)
 }
 
-fn spell_bars(mono: bool) -> &'static str {
-    match mono {
-        true => "monochrome",
-        false => "coloured",
+/// Which of the three answers a scheme is.
+fn spell_bars(scheme: &str) -> &'static str {
+    match scheme {
+        THEME_MONO_ID => "monochrome",
+        THEME_RED_UP_ID => "red-up",
+        _ => "coloured",
     }
 }
 
@@ -2802,6 +2821,21 @@ mod tests {
     }
 
     #[test]
+    fn bars_can_turn_red_up_and_get_the_same_scheme_back() {
+        let store = Store::memory().unwrap();
+        run("config set bar_scheme hollow", &store);
+        assert_eq!(run("config bars red-up", &store).code, 0);
+        assert_eq!(run("config bars", &store).out.trim(), "red-up");
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "theme-red-up");
+
+        // From one of the two answers to the other, and back: the palette
+        // remembered is still the one somebody picked.
+        assert_eq!(run("config bars monochrome", &store).code, 0);
+        assert_eq!(run("config bars coloured", &store).code, 0);
+        assert_eq!(run("config get bar_scheme", &store).out.trim(), "hollow");
+    }
+
+    #[test]
     fn bars_can_lose_their_colour_and_get_the_same_scheme_back() {
         let store = Store::memory().unwrap();
         run("config set bar_scheme hollow", &store);
@@ -3086,6 +3120,7 @@ mod tests {
         fn flush_workspace(&self) {}
         fn reload_workspace(&self) {}
         fn reload_watchlists(&self) {}
+        fn adopt_theming(&self) {}
         fn warm(&self, _instruments: &[omacharts_engine::Instrument]) {}
 
         /// A test has no pixels. The other methods stand in for a window; this
