@@ -133,9 +133,12 @@ anything with an open blocker. Report instead.
 ## Landing it
 
 Fix the PR title first if it needs it — it becomes the squash subject, and
-branch names have been glued onto the end of one. Then:
+branch names have been glued onto the end of one. Label it too: the release
+notes are generated and grouped by label, so an unlabelled PR lands under
+"Changed" whatever it was.
 
 ```
+gh pr edit <N> --add-label enhancement     # or bug
 gh pr merge <N> --squash
 ```
 

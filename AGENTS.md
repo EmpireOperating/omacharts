@@ -256,6 +256,33 @@ The workflow then runs three jobs in order:
 
 Afterwards, `git pull` to pick up the digest commit.
 
+### Label the pull request before it is merged
+
+The notes are generated, not written, and `.github/release.yml` groups them by
+the labels on the pull requests that landed: `enhancement` or `feature` becomes
+**Added**, `bug` or `fix` becomes **Fixed**, and anything unlabelled falls
+through to **Changed**. So a release where nobody labelled anything comes out as
+one flat list under a heading that says nothing — which is the thing that
+config exists to prevent.
+
+Label it when you merge it, while you still remember which it was. Fixing it
+afterwards means regenerating and replacing the notes by hand:
+
+```sh
+gh pr edit <N> --add-label bug
+gh api -X POST repos/jorgemanrubia/omacharts/releases/generate-notes \
+  -f tag_name=v0.1.5 -f previous_tag_name=v0.1.4 --jq .body > notes.md
+gh release edit v0.1.5 --notes-file notes.md
+```
+
+### The README is updated by the change, not by the release
+
+`bin/release` touches one line of it — the version in the download command —
+and nothing else. A capability that needs explaining to somebody reading the
+README is explained in the pull request that adds the capability, in the same
+change, the same way the command and its `doc/cli.md` entry are. Leaving it for
+release day means writing from memory about work that is already merged.
+
 ### Do not bump the version by hand
 
 Four files have to agree, and `Cargo.lock` is the one everybody forgets: a lock
