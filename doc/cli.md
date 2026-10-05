@@ -26,6 +26,11 @@ describe a command that does not exist.
 
 You do not choose between them and there is no flag for it.
 
+`skill` commands always run in the invoking process, even with the app open.
+Agent configuration such as `CODEX_HOME` belongs to the caller, and a relative
+`skill install --to DIR` resolves from the caller's working directory. The same
+applies to `skill status` and `skill uninstall`.
+
 ## Exit codes
 
 An exit code is the only thing a script can rely on without parsing text.

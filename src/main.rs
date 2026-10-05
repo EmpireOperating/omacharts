@@ -17,8 +17,8 @@ const APP_ID: &str = "com.jorgemanrubia.Omacharts";
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
-    // Where a command goes depends on one thing: whether there is a window to
-    // show its result in.
+    // Skill commands belong to the caller's environment and working directory,
+    // not the window's. Other commands go where their result can be shown.
     //
     // With one open, the command is handed to it, so a watchlist created in a
     // terminal appears in the rail at once rather than after a restart. GTK's
@@ -29,7 +29,7 @@ fn main() -> glib::ExitCode {
     // database — no GTK, no display, no window. That is what makes this
     // usable over ssh and out of a cron line, and it is why the check below
     // asks the bus rather than starting an application to find out.
-    if cli::is_command(&args) && !app_is_running() {
+    if command_runs_here(&args, app_is_running) {
         return report(cli::run(&args, &open_store(), None));
     }
     if let Some(code) = peel_off(&args).filter(|_| !cli::is_command(&args)) {
@@ -176,6 +176,10 @@ fn main() -> glib::ExitCode {
     app.run_with_args(&args)
 }
 
+fn command_runs_here(args: &[String], app_running: impl FnOnce() -> bool) -> bool {
+    cli::is_command(args) && (args.get(1).map(String::as_str) == Some("skill") || !app_running())
+}
+
 /// Is a window already open?
 ///
 /// Asked of the session bus rather than by starting an application and
@@ -239,5 +243,66 @@ fn peel_off(args: &[String]) -> Option<glib::ExitCode> {
             Some(glib::ExitCode::FAILURE)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(command: &str) -> Vec<String> {
+        std::iter::once("omacharts")
+            .chain(command.split_whitespace())
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn the_whole_skill_noun_runs_in_the_calling_process() {
+        for command in [
+            "skill install --codex",
+            "skill status --to project-skills",
+            "skill uninstall --codex",
+            "skill",
+            "skill unknown",
+            "skill install --unknown",
+            "skill install --to",
+            "skill --help",
+            "skill install --help",
+        ] {
+            let queried = std::cell::Cell::new(false);
+            assert!(
+                command_runs_here(&args(command), || {
+                    queried.set(true);
+                    true
+                }),
+                "{command}"
+            );
+            assert!(!queried.get(), "skill does not need the bus: {command}");
+        }
+    }
+
+    #[test]
+    fn other_commands_follow_whether_the_app_is_running() {
+        for noun in cli::spec::SURFACE
+            .iter()
+            .map(|noun| noun.name)
+            .chain(["help", "surface"])
+        {
+            if noun != "skill" {
+                assert!(!command_runs_here(&args(noun), || true), "{noun}");
+                assert!(command_runs_here(&args(noun), || false), "{noun}");
+            }
+        }
+    }
+
+    #[test]
+    fn launches_and_top_level_options_are_not_local_commands() {
+        for command in ["", "NVDA", "--help", "--version", "--unknown"] {
+            assert!(
+                !command_runs_here(&args(command), || panic!("not a command")),
+                "{command}"
+            );
+        }
     }
 }
