@@ -17,6 +17,13 @@ const APP_ID: &str = "com.jorgemanrubia.Omacharts";
 fn main() -> glib::ExitCode {
     let args: Vec<String> = std::env::args().collect();
 
+    // Skill destinations belong to the invoking caller's environment, not
+    // the running window's. Keep the whole noun (including help and parser
+    // errors) local, using the same dispatcher and output as any other CLI.
+    if args.get(1).is_some_and(|arg| arg == "skill") {
+        return report(cli::run(&args, &open_store(), None));
+    }
+
     // Where a command goes depends on one thing: whether there is a window to
     // show its result in.
     //

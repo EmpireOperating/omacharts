@@ -104,11 +104,23 @@ describes every command and argument in a form meant to be parsed.
 
 What is left is discovery, so Omacharts ships a skill that makes an agent reach
 for it when you say "what's semis doing" or "set me up for the open". It
-installs for whichever agents you have:
+installs, only on request, for whichever of Claude, Codex and Hermes you have:
 
 ```sh
 omacharts skill install
 ```
+
+To select Hermes alone, even if it has not run yet:
+
+```sh
+omacharts skill install --hermes
+omacharts skill status --hermes
+omacharts skill uninstall --hermes
+```
+
+Hermes uses `$HERMES_HOME/skills/`, or `~/.hermes/skills/` when the variable is
+unset or empty. Set `HERMES_HOME` to target a specific profile; other profiles
+are not searched or changed. All agents read the same symlinked skill.
 
 See `omacharts skill --help`, or
 [doc/cli.md](doc/cli.md#teaching-an-agent-about-this-app).

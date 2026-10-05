@@ -132,6 +132,7 @@ pub const SKILLS_DIR: &str =
 const AGENT_FLAGS: &[Flag] = &[
     Flag::switch("claude", "just Claude, whether or not it looks installed"),
     Flag::switch("codex", "just Codex, whether or not it looks installed"),
+    Flag::switch("hermes", "just Hermes, whether or not it looks installed"),
     Flag::valued("to", "DIR", SKILLS_DIR),
 ];
 

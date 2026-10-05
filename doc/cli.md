@@ -23,6 +23,10 @@ describe a command that does not exist.
   terminal as if it had run locally.
 - **With nothing running**, the same command runs against the stored database.
   No GTK, no display, no window. This works over ssh.
+- **Skill commands always run in the invoking process**, even with the app
+  open. Agent detection and destinations use your terminal's environment
+  (including `HERMES_HOME`), never the running window's environment. This also
+  preserves caller-relative `--to` paths.
 
 You do not choose between them and there is no flag for it.
 
@@ -573,8 +577,9 @@ several commands and a handful of facts about `pos:N` and link groups, none of
 which is a word in any one command's help.
 
 **One skill, not one per agent.** Claude reads `~/.claude/skills/<name>/`, Codex
-reads `$CODEX_HOME/skills/<name>/`, and both want the same thing: a directory
-with a `SKILL.md` whose frontmatter has a `name` and a `description`. So there
+reads `$CODEX_HOME/skills/<name>/`, and Hermes reads
+`$HERMES_HOME/skills/<name>/`. All want the same thing: a directory with a
+`SKILL.md` whose frontmatter has a `name` and a `description`. So there
 is one file, and installing points every agent at it. A copy each would be a
 second thing to drift, which is the one failure worth designing against.
 
@@ -608,10 +613,26 @@ its configuration directory is there — meaning it has run here and has state �
 **or** its command is on `PATH`, which catches one installed but not yet
 started. Either signal is enough on purpose: a skill installed for an agent you
 do not use is a directory you never look in, while one missing for an agent you
-do use is a failure you would have to notice and diagnose. `--claude` and
-`--codex` name one outright, present or not, because somebody who typed the flag
-has said what they mean. Finding nothing at all is not an error — it says what
-it looked for and writes nothing.
+do use is a failure you would have to notice and diagnose. `--claude`, `--codex`
+and `--hermes` select agents outright, present or not, because somebody who
+typed the flag has said what they mean. The flags work for `install`, `status`
+and `uninstall`, and can be combined. Finding nothing at all is not an error —
+it says what it looked for and writes nothing.
+
+Hermes uses `HERMES_HOME` for both detection and installation, falling back to
+`~/.hermes` when unset or empty. Only that home is considered: no other
+profiles are searched or changed. To use a particular profile, set the variable
+for each command:
+
+```sh
+HERMES_HOME="$HOME/.hermes/profiles/research" omacharts skill install --hermes
+HERMES_HOME="$HOME/.hermes/profiles/research" omacharts skill status --hermes
+HERMES_HOME="$HOME/.hermes/profiles/research" omacharts skill uninstall --hermes
+```
+
+The profile receives the same shared skill directory, not a Hermes-specific
+copy or plugin manifest. Like the other agents, Hermes is also detected by
+its `hermes` command on `PATH`.
 
 **It is a symlink, not a copy.** The risk worth designing against is a skill
 that drifts from the CLI, and the skill is kept beside the surface it describes

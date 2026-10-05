@@ -8,9 +8,10 @@
 //! somebody says "what's semis doing".
 //!
 //! **One skill, installed in several places.** Claude reads
-//! `~/.claude/skills/<name>/SKILL.md` and Codex reads
-//! `$CODEX_HOME/skills/<name>/SKILL.md`, and the two want the same shape of
-//! directory — frontmatter with a `name` and a `description`, prose below. So
+//! `~/.claude/skills/<name>/SKILL.md`, Codex reads
+//! `$CODEX_HOME/skills/<name>/SKILL.md`, and Hermes reads
+//! `$HERMES_HOME/skills/<name>/SKILL.md` (defaulting to `~/.hermes`). All want
+//! the same directory — frontmatter with a `name` and a `description`, prose below. So
 //! there is one file and [`KNOWN`] is a list of places to point at it. A second
 //! copy per agent would be a second thing to drift, which is the one failure
 //! this whole arrangement is designed against.
@@ -85,6 +86,13 @@ pub const KNOWN: &[Known] = &[
         home_var: "CODEX_HOME",
         home_dir: ".codex",
         binary: "codex",
+    },
+    Known {
+        name: "Hermes",
+        flag: "hermes",
+        home_var: "HERMES_HOME",
+        home_dir: ".hermes",
+        binary: "hermes",
     },
 ];
 
@@ -530,9 +538,9 @@ mod tests {
         dir
     }
 
-    /// Both agents, pointed at scratch directories. This is how the Codex path
-    /// is exercised without a Codex on the machine or a write to `~/.codex`.
-    fn both(root: &Path) -> Vec<Agent> {
+    /// Every agent, pointed at scratch directories. No agent on the machine
+    /// is needed, and no real configuration directory is written to.
+    fn all_agents(root: &Path) -> Vec<Agent> {
         KNOWN
             .iter()
             .map(|known| Agent {
@@ -548,7 +556,7 @@ mod tests {
     #[test]
     fn the_skill_installs_for_every_agent_and_comes_back_out_leaving_nothing() {
         let root = scratch("roundtrip");
-        let agents = both(&root);
+        let agents = all_agents(&root);
 
         let out = run("install", &agents, false);
         assert_eq!(out.code, EXIT_OK, "{}", out.err);
@@ -558,12 +566,24 @@ mod tests {
             assert!(at.join("SKILL.md").is_file(), "the link has to reach the skill");
             assert!(out.out.contains(&at.display().to_string()), "it has to say where: {}", out.out);
         }
-        // Named, so somebody reading two lines knows which is which.
-        assert!(out.out.contains("for Claude"), "{}", out.out);
-        assert!(out.out.contains("for Codex"), "{}", out.out);
+        // Named, so somebody reading the lines knows which is which.
+        for known in KNOWN {
+            assert!(
+                out.out.contains(&format!("for {}", known.name)),
+                "{}",
+                out.out
+            );
+        }
 
         let shown = run("status", &agents, false);
-        assert_eq!(shown.out.lines().filter(|l| l.contains("installed")).count(), 2);
+        assert_eq!(
+            shown
+                .out
+                .lines()
+                .filter(|l| l.contains("installed"))
+                .count(),
+            KNOWN.len()
+        );
 
         let gone = run("uninstall", &agents, false);
         assert_eq!(gone.code, EXIT_OK, "{}", gone.err);
@@ -574,19 +594,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// One skill file, reached from both. Two copies would be two things to
+    /// One skill file, reached from every agent. Copies would be things to
     /// drift, and the drift is the whole risk.
     #[test]
     fn every_agent_is_pointed_at_the_very_same_file() {
         let root = scratch("shared");
-        let agents = both(&root);
+        let agents = all_agents(&root);
         run("install", &agents, false);
 
         let targets: Vec<PathBuf> = agents
             .iter()
             .map(|agent| std::fs::canonicalize(agent.skills.join(NAME)).unwrap())
             .collect();
-        assert_eq!(targets[0], targets[1], "both agents must read one file");
+        assert!(
+            targets.iter().all(|target| target == &targets[0]),
+            "every agent must read one file"
+        );
         assert_eq!(targets[0], std::fs::canonicalize(source().unwrap()).unwrap());
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -595,11 +618,16 @@ mod tests {
     #[test]
     fn installing_twice_says_so_rather_than_failing() {
         let root = scratch("idempotent");
-        let agents = both(&root);
+        let agents = all_agents(&root);
         run("install", &agents, false);
         let again = run("install", &agents, false);
         assert_eq!(again.code, EXIT_OK, "{}", again.err);
-        assert_eq!(again.out.matches("already installed").count(), 2, "{}", again.out);
+        assert_eq!(
+            again.out.matches("already installed").count(),
+            KNOWN.len(),
+            "{}",
+            again.out
+        );
         for agent in &agents {
             assert_eq!(std::fs::read_dir(&agent.skills).unwrap().count(), 1);
         }
@@ -611,7 +639,7 @@ mod tests {
     #[test]
     fn one_agent_refused_does_not_hide_the_other_one_working() {
         let root = scratch("partial");
-        let agents = both(&root);
+        let agents = all_agents(&root);
         // Somebody's own skill of the same name, under the second agent only.
         let theirs = agents[1].skills.join(NAME);
         std::fs::create_dir_all(&theirs).unwrap();
@@ -657,7 +685,7 @@ mod tests {
     #[test]
     fn a_link_whose_package_has_gone_is_reported_as_dangling() {
         let root = scratch("dangling");
-        let agents = both(&root);
+        let agents = all_agents(&root);
         let gone = std::env::temp_dir().join("omacharts-gone/agents/skills/omacharts");
         for agent in &agents {
             std::fs::create_dir_all(&agent.skills).unwrap();
@@ -665,7 +693,12 @@ mod tests {
         }
 
         let shown = run("status", &agents, false);
-        assert_eq!(shown.out.matches("not there any more").count(), 2, "{}", shown.out);
+        assert_eq!(
+            shown.out.matches("not there any more").count(),
+            KNOWN.len(),
+            "{}",
+            shown.out
+        );
 
         // Ours, so uninstall clears it rather than refusing.
         assert_eq!(run("uninstall", &agents, false).code, EXIT_OK);
@@ -678,7 +711,7 @@ mod tests {
     #[test]
     fn the_json_answer_names_every_agent_and_survives_a_refusal() {
         let root = scratch("json");
-        let agents = both(&root);
+        let agents = all_agents(&root);
         let theirs = agents[1].skills.join(NAME);
         std::fs::create_dir_all(&theirs).unwrap();
 
